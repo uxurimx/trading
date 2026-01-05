@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Command Center v4 - Green SQ</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #121212;
+            --bg-card: #1e1e1e;
+            --primary: #00e676; /* Verde Neon */
+            --secondary: #2979ff; /* Azul Neon */
+            --accent: #ff3d00; /* Rojo Neon */
+            --gold: #ffd700;   /* Dorado para Green SQ */
+            --text-main: #e0e0e0;
+            --text-dim: #a0a0a0;
+            --sidebar-width: 260px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        
+        body { background-color: var(--bg-dark); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }
+
+        /* --- SIDEBAR --- */
+        .sidebar {
+            width: var(--sidebar-width);
+            background-color: var(--bg-card);
+            border-right: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.3s ease;
+            position: fixed;
+            height: 100%;
+            z-index: 100;
+        }
+        
+        .brand {
+            padding: 20px;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--primary);
+            text-align: center;
+            border-bottom: 1px solid #333;
+        }
+
+        .nav-links { list-style: none; padding: 20px 0; flex: 1; }
+        .nav-item { padding: 15px 25px; cursor: pointer; color: var(--text-dim); transition: 0.2s; display: flex; align-items: center; gap: 10px; }
+        .nav-item:hover, .nav-item.active { background-color: #333; color: var(--primary); border-left: 4px solid var(--primary); }
+        .nav-item i { width: 25px; text-align: center; }
+
+        /* Highlight especial para Green SQ */
+        .nav-item.green-sq-nav.active { color: var(--gold); border-left-color: var(--gold); }
+        .nav-item.green-sq-nav:hover { color: var(--gold); }
+
+        /* --- MAIN CONTENT --- */
+        .main-content {
+            flex: 1;
+            margin-left: var(--sidebar-width);
+            padding: 20px;
+            overflow-y: auto;
+            position: relative;
+            transition: margin 0.3s;
+        }
+
+        /* --- HEADER MOBILE --- */
+        .mobile-header {
+            display: none;
+            background-color: var(--bg-card);
+            padding: 15px;
+            align-items: center;
+            justify-content: space-between;
+            position: fixed;
+            top: 0; left: 0; right: 0; z-index: 90;
+            border-bottom: 1px solid #333;
+        }
+        .menu-btn { background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer; }
+
+        /* --- COMPONENTS --- */
+        .section { display: none; animation: fadeIn 0.3s; padding-bottom: 50px; }
+        .section.active { display: block; }
+        
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        h2 { margin-bottom: 20px; color: var(--primary); border-bottom: 1px solid #333; padding-bottom: 10px; }
+        
+        .card { background-color: var(--bg-card); padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.3); margin-bottom: 20px; }
+        
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
+        
+        .input-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; color: var(--text-dim); font-size: 0.9rem; }
+        input, select, textarea {
+            width: 100%; padding: 10px; background: #2c2c2c; border: 1px solid #444; color: white; border-radius: 5px;
+        }
+        input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primary); }
+
+        button.btn-primary {
+            width: 100%; padding: 12px; background: var(--primary); color: #000; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; margin-top: 10px; transition: 0.2s;
+        }
+        button.btn-primary:hover { opacity: 0.9; }
+        
+        button.btn-danger { background: var(--accent); color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
+        
+        /* P&L DISPLAY */
+        .pnl-display { font-size: 2rem; font-weight: bold; text-align: center; margin-bottom: 10px; }
+        .pnl-positive { color: var(--primary); }
+        .pnl-negative { color: var(--accent); }
+        .pnl-neutral { color: var(--text-dim); }
+
+        /* GREEN SQ STYLES */
+        .sq-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-top: 20px; }
+        .sq-card { 
+            background: #252525; border: 1px solid #444; border-radius: 8px; padding: 20px; position: relative; overflow: hidden;
+        }
+        .sq-card h3 { color: var(--text-dim); font-size: 1.2rem; margin-bottom: 15px; border-bottom: 1px solid #333; padding-bottom: 10px;}
+        .sq-card .leverage-badge {
+            position: absolute; top: 15px; right: 15px; background: var(--gold); color: #000; padding: 2px 8px; border-radius: 4px; font-weight: bold;
+        }
+        .sq-row { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 0.9rem; }
+        .sq-val { font-weight: bold; color: white; }
+        .sq-target { font-size: 1.4rem; color: var(--primary); text-align: center; margin-top: 15px; font-weight: bold; }
+        .sq-move { text-align: center; color: var(--text-dim); font-size: 0.9rem; }
+
+        /* TABLE STYLES */
+        .table-container { overflow-x: auto; min-height: 300px; }
+        table { width: 100%; border-collapse: collapse; min-width: 700px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; vertical-align: middle; }
+        th { color: var(--secondary); font-size: 0.9rem; }
+        
+        /* STATUS TAGS */
+        .tag { padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; text-transform: uppercase;}
+        .tag-win { background: rgba(0, 230, 118, 0.2); color: var(--primary); }
+        .tag-loss { background: rgba(255, 61, 0, 0.2); color: var(--accent); }
+        .tag-open { background: rgba(41, 121, 255, 0.2); color: var(--secondary); }
+        
+        /* ACTION MENU (3 DOTS) */
+        .action-cell { position: relative; text-align: center; width: 50px; }
+        .dots-btn { background: none; border: none; color: var(--text-dim); font-size: 1.2rem; cursor: pointer; padding: 5px; }
+        .dots-btn:hover { color: white; }
+        .dropdown-menu {
+            display: none; position: absolute; right: 10px; top: 30px; background-color: #2c2c2c; min-width: 180px; box-shadow: 0 8px 16px rgba(0,0,0,0.5); z-index: 50; border-radius: 5px; border: 1px solid #444; text-align: left;
+        }
+        .dropdown-menu.show { display: block; }
+        .dropdown-item {
+            padding: 10px 15px; color: var(--text-main); text-decoration: none; display: block; cursor: pointer; font-size: 0.9rem; border-bottom: 1px solid #333;
+        }
+        .dropdown-item:hover { background-color: #3d3d3d; }
+        .dropdown-item i { margin-right: 8px; width: 15px; }
+
+        /* --- RESPONSIVE --- */
+        @media (max-width: 768px) {
+            .sidebar { transform: translateX(-100%); }
+            .sidebar.active { transform: translateX(0); }
+            .main-content { margin-left: 0; margin-top: 60px; }
+            .mobile-header { display: flex; }
+        }
+    </style>
+</head>
+<body>
+
+    <header class="mobile-header">
+        <div class="brand" style="border:none; padding:0;">TradingOS</div>
+        <button class="menu-btn" onclick="toggleSidebar()"><i class="fas fa-bars"></i></button>
+    </header>
+
+    <aside class="sidebar" id="sidebar">
+        <div class="brand"><i class="fas fa-chart-line"></i> TradingOS</div>
+        <ul class="nav-links">
+            <li class="nav-item active" onclick="showSection('dashboard')"><i class="fas fa-home"></i> Dashboard</li>
+            <li class="nav-item green-sq-nav" onclick="showSection('greensq')"><i class="fas fa-bullseye"></i> Green SQ</li>
+            <li class="nav-item" onclick="showSection('dca')"><i class="fas fa-calculator"></i> Calculadora DCA</li>
+            <li class="nav-item" onclick="showSection('parciales')"><i class="fas fa-percentage"></i> Salidas Parciales</li>
+            <li class="nav-item" onclick="showSection('historial')"><i class="fas fa-history"></i> Historial Completo</li>
+        </ul>
+    </aside>
+
+    <main class="main-content" onclick="closeDropdowns(); closeSidebarOnMobile();">
+        
+        <section id="dashboard" class="section active">
+            
+            <div class="card" style="text-align: center; border: 1px solid #333;">
+                <label>P&G TOTAL ACUMULADO</label>
+                <div id="total_pnl_display" class="pnl-display pnl-neutral">$0.00</div>
+            </div>
+
+            <h2>Nuevo Trade</h2>
+            <div class="card">
+                <div class="form-grid">
+                    <div class="input-group">
+                        <label>Par</label>
+                        <select id="track_symbol">
+                            <option value="XRPUSDT">XRP / USDT</option>
+                            <option value="BTCUSDT">BTC / USDT</option>
+                            <option value="SOLUSDT">SOL / USDT</option>
+                            <option value="XLMUSDT">XLM / USDT</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label>Tipo</label>
+                        <select id="track_type">
+                            <option value="LONG">LONG</option>
+                            <option value="SHORT">SHORT</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label style="color:var(--primary); font-weight:bold;">Cantidad (Monedas)</label>
+                        <input type="number" id="track_qty" step="any" placeholder="Ej: 500">
+                    </div>
+                    <div class="input-group">
+                        <label>Precio Entrada</label>
+                        <input type="number" id="track_entry" step="any">
+                    </div>
+                    <div class="input-group">
+                        <label>Precio TP</label>
+                        <input type="number" id="track_tp" step="any">
+                    </div>
+                    <div class="input-group">
+                        <label>Precio SL</label>
+                        <input type="number" id="track_sl" step="any">
+                    </div>
+                </div>
+                <div class="input-group">
+                    <label>Notas Iniciales</label>
+                    <textarea id="track_notes" rows="2" placeholder="Motivo de entrada..."></textarea>
+                </div>
+                <button class="btn-primary" onclick="saveTrade()">Abrir Trade</button>
+            </div>
+
+            <h3>Trades Recientes</h3>
+            <div class="table-container card">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Par</th>
+                            <th>Cant.</th>
+                            <th>Entrada</th>
+                            <th>Estado</th>
+                            <th>P&G</th>
+                            <th style="text-align:center;">Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody id="quick_history_body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="greensq" class="section">
+            <h2 style="color: var(--gold);">Green SQ: Proyección de Ganancia</h2>
+            <div class="card">
+                <div class="form-grid">
+                    <div class="input-group">
+                        <label>Precio Actual de Entrada</label>
+                        <input type="number" id="sq_entry" step="any" placeholder="Ej: 2.18">
+                    </div>
+                    <div class="input-group">
+                        <label>Tu Inversión (Margin en USDT)</label>
+                        <input type="number" id="sq_margin" step="any" placeholder="Ej: 100">
+                    </div>
+                    <div class="input-group">
+                        <label>Ganancia Deseada (Target Profit $)</label>
+                        <input type="number" id="sq_target_profit" step="any" placeholder="Ej: 10">
+                    </div>
+                    <div class="input-group">
+                        <label>Dirección</label>
+                        <select id="sq_direction">
+                            <option value="1">Long (Subida)</option>
+                            <option value="-1">Short (Bajada)</option>
+                        </select>
+                    </div>
+                </div>
+                <button class="btn-primary" style="background-color: var(--gold); color: black;" onclick="calcGreenSQ()">Calcular Ruta</button>
+            </div>
+
+            <div id="sq_results" style="display:none;">
+                <div class="sq-grid">
+                    
+                    <div class="sq-card">
+                        <span class="leverage-badge">5x</span>
+                        <h3>Modo Seguro</h3>
+                        <div class="sq-row">
+                            <span>Posición Total:</span>
+                            <span class="sq-val" id="sq_5x_pos">0</span>
+                        </div>
+                        <div class="sq-row">
+                            <span>Monedas:</span>
+                            <span class="sq-val" id="sq_5x_coins">0</span>
+                        </div>
+                        <div style="margin-top:20px; border-top:1px dashed #555; padding-top:10px;">
+                            <div class="sq-move">Necesitas un movimiento del:</div>
+                            <div class="sq-target" id="sq_5x_target">0.0000</div>
+                            <div class="sq-move" id="sq_5x_pct" style="color:var(--gold)">0%</div>
+                        </div>
+                    </div>
+
+                    <div class="sq-card" style="border-color: var(--primary);">
+                        <span class="leverage-badge" style="background:var(--primary);">10x</span>
+                        <h3>Modo Trader</h3>
+                        <div class="sq-row">
+                            <span>Posición Total:</span>
+                            <span class="sq-val" id="sq_10x_pos">0</span>
+                        </div>
+                        <div class="sq-row">
+                            <span>Monedas:</span>
+                            <span class="sq-val" id="sq_10x_coins">0</span>
+                        </div>
+                        <div style="margin-top:20px; border-top:1px dashed #555; padding-top:10px;">
+                            <div class="sq-move">Necesitas un movimiento del:</div>
+                            <div class="sq-target" id="sq_10x_target">0.0000</div>
+                            <div class="sq-move" id="sq_10x_pct" style="color:var(--gold)">0%</div>
+                        </div>
+                    </div>
+
+                    <div class="sq-card" style="border-color: var(--accent);">
+                        <span class="leverage-badge" style="background:var(--accent); color:white;">25x</span>
+                        <h3>Modo Degen</h3>
+                        <div class="sq-row">
+                            <span>Posición Total:</span>
+                            <span class="sq-val" id="sq_25x_pos">0</span>
+                        </div>
+                        <div class="sq-row">
+                            <span>Monedas:</span>
+                            <span class="sq-val" id="sq_25x_coins">0</span>
+                        </div>
+                        <div style="margin-top:20px; border-top:1px dashed #555; padding-top:10px;">
+                            <div class="sq-move">Necesitas un movimiento del:</div>
+                            <div class="sq-target" id="sq_25x_target">0.0000</div>
+                            <div class="sq-move" id="sq_25x_pct" style="color:var(--gold)">0%</div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+        <section id="dca" class="section">
+            <h2>Calculadora Promedio (DCA)</h2>
+            <div class="card">
+                <h3>Posición Actual (Autocompletado)</h3>
+                <div class="form-grid">
+                    <div class="input-group">
+                        <label>Cantidad Actual</label>
+                        <input type="number" id="dca_qty" placeholder="100">
+                    </div>
+                    <div class="input-group">
+                        <label>Precio Promedio Actual</label>
+                        <input type="number" id="dca_price" step="any">
+                    </div>
+                </div>
+                <h3>Reglas (Distancia Fija)</h3>
+                <div class="form-grid">
+                    <div class="input-group">
+                        <label>Distancia TP (+USDT)</label>
+                        <input type="number" id="dca_tp_dist" step="any" placeholder="0.17">
+                    </div>
+                    <div class="input-group">
+                        <label>Distancia SL (-USDT)</label>
+                        <input type="number" id="dca_sl_dist" step="any" placeholder="0.17">
+                    </div>
+                </div>
+                <h3>Órdenes Pendientes</h3>
+                <div id="dca_orders_container"></div>
+                <button class="btn-primary" style="background:#444; color:white; margin-bottom:10px;" onclick="addDcaRow()">+ Agregar Orden</button>
+                <button class="btn-primary" onclick="calculateDCA()">Calcular Escenarios</button>
+            </div>
+            <div id="dca_results" class="card" style="display:none;">
+                <div class="table-container">
+                    <table id="dca_table">
+                        <thead><tr><th>Escenario</th><th>Nuevo Promedio</th><th>Nuevo TP</th><th>Nuevo SL</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <section id="parciales" class="section">
+            <h2>Calculadora Salidas Parciales</h2>
+            <div class="card">
+                <h3>Datos del Trade (Autocompletado)</h3>
+                <div class="form-grid">
+                    <div class="input-group">
+                        <label>Precio Entrada Promedio</label>
+                        <input type="number" id="part_entry" step="any">
+                    </div>
+                    <div class="input-group">
+                        <label>Cantidad Total Monedas</label>
+                        <input type="number" id="part_total" step="any">
+                    </div>
+                    <div class="input-group">
+                        <label>Precio Venta Parcial (TP1)</label>
+                        <input type="number" id="part_tp1" step="any">
+                    </div>
+                    <div class="input-group">
+                        <label>% a Vender</label>
+                        <input type="number" id="part_percent" value="50">
+                    </div>
+                    <div class="input-group">
+                        <label>Precio Objetivo Final (TP2)</label>
+                        <input type="number" id="part_tp2" step="any">
+                    </div>
+                </div>
+                <button class="btn-primary" onclick="calcPartial()">Calcular Ganancias</button>
+            </div>
+            <div id="part_results" class="card" style="display:none;">
+                <div style="display:flex; justify-content:space-between; border-bottom:1px solid #333; padding:10px 0;">
+                    <span>Vendes Ahora (TP1):</span> <strong style="color:var(--primary)" id="res_sell_qty">0</strong>
+                </div>
+                <div style="display:flex; justify-content:space-between; border-bottom:1px solid #333; padding:10px 0;">
+                    <span>Dinero al Bolsillo:</span> <strong style="color:white" id="res_cash">0</strong>
+                </div>
+                <div style="display:flex; justify-content:space-between; border-bottom:1px solid #333; padding:10px 0;">
+                    <span>Ganancia Neta TP1:</span> <strong style="color:var(--primary)" id="res_profit_tp1">0</strong>
+                </div>
+                <div style="display:flex; justify-content:space-between; border-bottom:1px solid #333; padding:10px 0;">
+                    <span>Quedan Corriendo:</span> <strong style="color:var(--secondary)" id="res_runner_qty">0</strong>
+                </div>
+                <div style="display:flex; justify-content:space-between; border-bottom:1px solid #333; padding:10px 0;">
+                    <span>Potencial Ganancia TP2:</span> <strong style="color:var(--primary)" id="res_profit_tp2">0</strong>
+                </div>
+            </div>
+        </section>
+
+        <section id="historial" class="section">
+            <h2>Historial Completo</h2>
+            <div class="card table-container">
+                <table id="full_history_table">
+                    <thead><tr><th>Fecha</th><th>Par</th><th>Cant.</th><th>Entrada</th><th>Estado</th><th>P&G Final</th><th>Acción</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <button class="btn-danger" onclick="clearStorage()">Borrar Todo el Historial</button>
+        </section>
+
+    </main>
+
+    <script>
+        /* --- NAVEGACIÓN --- */
+        function toggleSidebar() { document.getElementById('sidebar').classList.toggle('active'); }
+        function closeSidebarOnMobile() { if (window.innerWidth <= 768) document.getElementById('sidebar').classList.remove('active'); }
+
+        function showSection(id) {
+            document.querySelectorAll('.section').forEach(sec => sec.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+            
+            const navs = document.querySelectorAll('.nav-item');
+            navs.forEach(n => n.classList.remove('active'));
+            if(id === 'dashboard') navs[0].classList.add('active');
+            if(id === 'greensq') navs[1].classList.add('active');
+            if(id === 'dca') navs[2].classList.add('active');
+            if(id === 'parciales') navs[3].classList.add('active');
+            if(id === 'historial') navs[4].classList.add('active');
+
+            closeSidebarOnMobile();
+            if(id === 'historial' || id === 'dashboard') loadHistory();
+        }
+
+        /* --- LOGICA GREEN SQ (NUEVO) --- */
+        function calcGreenSQ() {
+            const entry = parseFloat(document.getElementById('sq_entry').value);
+            const margin = parseFloat(document.getElementById('sq_margin').value);
+            const targetProfit = parseFloat(document.getElementById('sq_target_profit').value);
+            const direction = parseFloat(document.getElementById('sq_direction').value); // 1 Long, -1 Short
+
+            if(!entry || !margin || !targetProfit) { alert("Rellena todos los campos"); return; }
+
+            const leverages = [5, 10, 25];
+            
+            leverages.forEach(lev => {
+                // 1. Tamaño Posición = Margen * Apalancamiento
+                const positionSize = margin * lev;
+                // 2. Cantidad Monedas = Tamaño Posición / Precio Entrada
+                const coins = positionSize / entry;
+                // 3. Movimiento Precio Necesario = Profit Deseado / Cantidad Monedas
+                const priceDelta = targetProfit / coins;
+                
+                // 4. Target Price = Entrada + (Delta * Dirección)
+                const targetPrice = entry + (priceDelta * direction);
+                
+                // 5. Porcentaje Movimiento
+                const pctMove = (Math.abs(targetPrice - entry) / entry) * 100;
+
+                // Renderizar
+                document.getElementById(`sq_${lev}x_pos`).innerText = '$' + positionSize.toFixed(2);
+                document.getElementById(`sq_${lev}x_coins`).innerText = coins.toFixed(2);
+                document.getElementById(`sq_${lev}x_target`).innerText = targetPrice.toFixed(4);
+                document.getElementById(`sq_${lev}x_pct`).innerText = pctMove.toFixed(2) + '%';
+            });
+
+            document.getElementById('sq_results').style.display = 'block';
+        }
+
+        /* --- LOGICA MENÚ DE 3 PUNTOS Y CONEXIÓN --- */
+        function toggleDropdown(event, id) {
+            event.stopPropagation(); closeDropdowns();
+            const menu = document.getElementById(`menu-${id}`);
+            if(menu) menu.classList.toggle('show');
+        }
+        function closeDropdowns() { document.querySelectorAll('.dropdown-menu').forEach(d => d.classList.remove('show')); }
+
+        function goToTool(tool, tradeId) {
+            const trades = getTrades();
+            const trade = trades.find(t => t.id === tradeId);
+            showSection(tool); 
+            if(trade) {
+                if(tool === 'dca') {
+                    document.getElementById('dca_qty').value = trade.qty;
+                    document.getElementById('dca_price').value = trade.entry;
+                    if(trade.tp) document.getElementById('dca_tp_dist').value = Math.abs(trade.tp - trade.entry).toFixed(4);
+                    if(trade.sl) document.getElementById('dca_sl_dist').value = Math.abs(trade.entry - trade.sl).toFixed(4);
+                }
+                if(tool === 'parciales') {
+                    document.getElementById('part_entry').value = trade.entry;
+                    document.getElementById('part_total').value = trade.qty;
+                    if(trade.tp) document.getElementById('part_tp2').value = trade.tp;
+                }
+            }
+        }
+
+        /* --- TRACKER / LOCALSTORAGE --- */
+        function getTrades() { return JSON.parse(localStorage.getItem('trading_data')) || []; }
+        function saveTrade() {
+            const trade = {
+                id: Date.now(),
+                date: new Date().toLocaleDateString(),
+                symbol: document.getElementById('track_symbol').value,
+                type: document.getElementById('track_type').value,
+                qty: document.getElementById('track_qty').value,
+                entry: document.getElementById('track_entry').value,
+                tp: document.getElementById('track_tp').value,
+                sl: document.getElementById('track_sl').value,
+                status: 'OPEN', pnl: 0,
+                notes: document.getElementById('track_notes').value
+            };
+            if(!trade.entry || !trade.qty) { alert('Falta Precio de Entrada o Cantidad'); return; }
+            const trades = getTrades();
+            trades.unshift(trade);
+            localStorage.setItem('trading_data', JSON.stringify(trades));
+            alert('Trade Abierto Correctamente');
+            document.getElementById('track_qty').value = ''; document.getElementById('track_entry').value = '';
+            loadHistory();
+        }
+        function updateTradeStatus(id, newStatus) {
+            let trades = getTrades();
+            const tradeIndex = trades.findIndex(t => t.id === id);
+            if(tradeIndex === -1) return;
+            let finalPnL = 0;
+            if(newStatus === 'WIN' || newStatus === 'LOSS') {
+                const input = prompt("Ingresa el resultado en USDT (Ej: 50 o -20):", "0");
+                if(input === null) return;
+                finalPnL = parseFloat(input) || 0;
+            }
+            trades[tradeIndex].status = newStatus;
+            trades[tradeIndex].pnl = finalPnL;
+            localStorage.setItem('trading_data', JSON.stringify(trades));
+            loadHistory();
+        }
+        function deleteTrade(id) {
+            if(!confirm('¿Eliminar?')) return;
+            let trades = getTrades().filter(t => t.id !== id);
+            localStorage.setItem('trading_data', JSON.stringify(trades));
+            loadHistory();
+        }
+        function clearStorage() {
+            if(confirm('¿Borrar todo?')) { localStorage.removeItem('trading_data'); loadHistory(); }
+        }
+
+        function loadHistory() {
+            const trades = getTrades();
+            const fullBody = document.querySelector('#full_history_table tbody');
+            const quickBody = document.getElementById('quick_history_body');
+            fullBody.innerHTML = ''; quickBody.innerHTML = '';
+            let totalPnL = 0;
+
+            trades.forEach((t, index) => {
+                let statusClass = t.status === 'WIN' ? 'tag-win' : (t.status === 'LOSS' ? 'tag-loss' : 'tag-open');
+                let pnlClass = t.pnl > 0 ? 'pnl-positive' : (t.pnl < 0 ? 'pnl-negative' : 'pnl-neutral');
+                let pnlText = t.status === 'OPEN' ? '--' : `$${t.pnl.toFixed(2)}`;
+                let displayQty = t.qty ? t.qty : '-';
+                if(t.status !== 'OPEN') totalPnL += parseFloat(t.pnl);
+
+                const fullRow = `<tr><td>${t.date}</td><td><strong>${t.symbol}</strong><br><small>${t.type}</small></td><td>${displayQty}</td><td>${t.entry}</td><td><span class="tag ${statusClass}">${t.status}</span></td><td class="${pnlClass}"><strong>${pnlText}</strong></td><td><button class="btn-danger" onclick="deleteTrade(${t.id})"><i class="fas fa-trash"></i></button></td></tr>`;
+                fullBody.innerHTML += fullRow;
+
+                if(index < 10) {
+                    let menuItems = '';
+                    if(t.status === 'OPEN') {
+                        menuItems = `<a class="dropdown-item" onclick="goToTool('parciales', ${t.id})"><i class="fas fa-percentage"></i> Salir Parcial</a><a class="dropdown-item" onclick="goToTool('dca', ${t.id})"><i class="fas fa-calculator"></i> Agregar Compras</a><div style="border-top:1px solid #444; margin:5px 0;"></div><a class="dropdown-item" style="color:var(--primary)" onclick="updateTradeStatus(${t.id}, 'WIN')"><i class="fas fa-check"></i> Cerrar Ganada</a><a class="dropdown-item" style="color:var(--accent)" onclick="updateTradeStatus(${t.id}, 'LOSS')"><i class="fas fa-times"></i> Cerrar Perdida</a>`;
+                    } else { menuItems = `<div style="padding:10px; font-size:0.8rem; color:#aaa;">Finalizado</div>`; }
+                    const quickRow = `<tr><td><strong>${t.symbol}</strong><br><span style="font-size:0.8em; color:#888;">${t.type}</span></td><td>${displayQty}</td><td>${t.entry}</td><td><span class="tag ${statusClass}">${t.status}</span></td><td class="${pnlClass}">${pnlText}</td><td class="action-cell"><button class="dots-btn" onclick="toggleDropdown(event, ${t.id})"><i class="fas fa-ellipsis-v"></i></button><div id="menu-${t.id}" class="dropdown-menu">${menuItems}</div></td></tr>`;
+                    quickBody.innerHTML += quickRow;
+                }
+            });
+            const pnlDisplay = document.getElementById('total_pnl_display');
+            pnlDisplay.innerText = `$${totalPnL.toFixed(2)}`;
+            pnlDisplay.className = 'pnl-display ' + (totalPnL > 0 ? 'pnl-positive' : (totalPnL < 0 ? 'pnl-negative' : 'pnl-neutral'));
+        }
+
+        /* --- OTRAS HERRAMIENTAS --- */
+        function addDcaRow() {
+            const div = document.createElement('div'); div.className = 'form-grid'; div.style.marginBottom = '10px';
+            div.innerHTML = `<input type="number" placeholder="Cnt" class="dca-q"><input type="number" placeholder="Pre" class="dca-p" step="any"><button class="btn-danger" onclick="this.parentElement.remove()" style="height:40px;">X</button>`;
+            document.getElementById('dca_orders_container').appendChild(div);
+        }
+        function calculateDCA() {
+            let cQ = parseFloat(document.getElementById('dca_qty').value), cP = parseFloat(document.getElementById('dca_price').value);
+            let tpD = parseFloat(document.getElementById('dca_tp_dist').value), slD = parseFloat(document.getElementById('dca_sl_dist').value);
+            if(!cQ || !cP) return alert('Faltan datos');
+            const tb = document.querySelector('#dca_table tbody'); tb.innerHTML = `<tr><td>Inicio</td><td>${cP.toFixed(4)}</td><td>${(cP+tpD).toFixed(4)}</td><td>${(cP-slD).toFixed(4)}</td></tr>`;
+            const qs = document.querySelectorAll('.dca-q'), ps = document.querySelectorAll('.dca-p');
+            qs.forEach((inp, i) => { const q=parseFloat(inp.value), p=parseFloat(ps[i].value); if(q&&p){ const t=(cQ*cP)+(q*p); cQ+=q; cP=t/cQ; tb.innerHTML+=`<tr><td>Orden ${i+1}</td><td style="color:var(--primary);">${cP.toFixed(4)}</td><td>${(cP+tpD).toFixed(4)}</td><td style="color:var(--accent);">${(cP-slD).toFixed(4)}</td></tr>`; }});
+            document.getElementById('dca_results').style.display = 'block';
+        }
+        function calcPartial() {
+            const e=parseFloat(document.getElementById('part_entry').value), t=parseFloat(document.getElementById('part_total').value), tp1=parseFloat(document.getElementById('part_tp1').value), p=parseFloat(document.getElementById('part_percent').value), tp2=parseFloat(document.getElementById('part_tp2').value);
+            if(!e||!t||!tp1) return alert('Faltan datos');
+            const sold=t*(p/100), cash=sold*tp1, prof1=sold*(tp1-e), rem=t-sold, prof2=rem*(tp2-e);
+            document.getElementById('res_sell_qty').innerText=sold.toFixed(2); document.getElementById('res_cash').innerText='$'+cash.toFixed(2); document.getElementById('res_profit_tp1').innerText='$'+prof1.toFixed(2); document.getElementById('res_runner_qty').innerText=rem.toFixed(2); document.getElementById('res_profit_tp2').innerText='$'+prof2.toFixed(2);
+            document.getElementById('part_results').style.display = 'block';
+        }
+
+        // Init
+        loadHistory(); addDcaRow(); addDcaRow();
+    </script>
+</body>
+</html>
