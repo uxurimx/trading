@@ -394,20 +394,22 @@ class MarketStream:
             if "price24hPcnt"      in d: tk.price_change_pct  = float(d["price24hPcnt"]) * 100
             state.last_update = time.time()
 
-        elif "liquidation" in topic:
-            d = msg.get("data", {})
-            try:
-                size  = float(d.get("size", 0))
-                price = float(d.get("price", 0))
-                state.add_liquidation(Liquidation(
-                    timestamp=int(d.get("updatedTime", time.time() * 1000)),
-                    side=d.get("side", ""),
-                    size=size,
-                    price=price,
-                    notional=size * price,
-                ))
-            except (KeyError, ValueError):
-                pass
+        elif "allLiquidation" in topic:
+            # Bybit v5: "allLiquidation.{symbol}" — datos dentro de data.list[]
+            for item in msg.get("data", {}).get("list", [msg.get("data", {})]):
+                try:
+                    size  = float(item.get("size", 0))
+                    price = float(item.get("price", 0))
+                    if size > 0 and price > 0:
+                        state.add_liquidation(Liquidation(
+                            timestamp=int(item.get("updatedTime", time.time() * 1000)),
+                            side=item.get("side", ""),
+                            size=size,
+                            price=price,
+                            notional=size * price,
+                        ))
+                except (KeyError, ValueError):
+                    pass
 
     def _handle_spot(self, symbol: str, msg: dict) -> None:
         if "tickers" not in msg.get("topic", ""):
@@ -466,13 +468,61 @@ class MarketStream:
     async def _connect_futures(self, symbol: str) -> None:
         env   = "test" if settings.bybit_testnet else "live"
         url   = self._URL[f"linear_{env}"]
-        topics = [
+        # Nota: topic correcto para liquidaciones en Bybit v5 es "allLiquidation.{symbol}"
+        # Se envían por separado para que un fallo no cancele toda la suscripción.
+        market_topics = [
             f"orderbook.50.{symbol}",
             f"publicTrade.{symbol}",
             f"tickers.{symbol}",
-            f"liquidation.{symbol}",
         ]
-        await self._connect(url, topics, symbol, self._handle_futures)
+        liq_topics = [f"allLiquidation.{symbol}"]
+        # Conectar mercado + liquidaciones en el mismo WebSocket pero suscribir por separado
+        await self._connect_futures_ws(url, market_topics, liq_topics, symbol)
+
+    async def _connect_futures_ws(
+        self,
+        url: str,
+        market_topics: list,
+        liq_topics: list,
+        symbol: str,
+    ) -> None:
+        backoff = 1.0
+        while self._running:
+            try:
+                async with websockets.connect(
+                    url,
+                    ping_interval=20,
+                    ping_timeout=15,
+                    max_size=10 * 1024 * 1024,
+                ) as ws:
+                    # Suscribir tópicos de mercado
+                    await ws.send(json.dumps({"op": "subscribe", "args": market_topics}))
+                    # Suscribir liquidaciones por separado (topic diferente)
+                    await ws.send(json.dumps({"op": "subscribe", "args": liq_topics}))
+                    backoff = 1.0
+
+                    async for raw in ws:
+                        if not self._running:
+                            return
+                        try:
+                            msg = json.loads(raw)
+                            if "topic" in msg:
+                                self._handle_futures(symbol, msg)
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+
+            except (
+                websockets.exceptions.ConnectionClosed,
+                websockets.exceptions.WebSocketException,
+                OSError,
+            ):
+                if self._running:
+                    self.states[symbol].connected = False
+                    await asyncio.sleep(min(backoff, 30.0))
+                    backoff = min(backoff * 2, 30.0)
+
+            except asyncio.CancelledError:
+                return
 
     async def _connect_spot(self, symbol: str) -> None:
         env   = "test" if settings.bybit_testnet else "live"

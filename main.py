@@ -1,19 +1,30 @@
 """
 main.py — QTS · Quantum Trading System
 ───────────────────────────────────────
-Punto de entrada. Inicializa la base de datos y arranca el dashboard.
+Lanza la ventana nativa GTK4 + libadwaita para GNOME/Fedora.
 
-Uso:
-    python main.py
+Alternativa terminal:   python main_terminal.py
 """
+import sys
+
+try:
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Gtk, Adw  # noqa: F401
+except (ImportError, ValueError):
+    print("GTK4 / libadwaita no encontrado.")
+    print("Instala con:  sudo dnf install python3-gobject gtk4 libadwaita")
+    print("Alternativa:  python main_terminal.py")
+    sys.exit(1)
+
 from core.db import initialize_db
-from interface.terminal import TradingApp
+from interface.gtk_app import run
 
 
 def main() -> None:
     initialize_db()
-    app = TradingApp()
-    app.run()
+    run()
 
 
 if __name__ == "__main__":

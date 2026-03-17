@@ -1,0 +1,129 @@
+/*
+ * QTS — Quantum Trading System
+ * Estilo 100% nativo GNOME/Adwaita — idéntico a Reloj, Terminal, Nautilus.
+ *
+ * Regla: los fondos y colores base son de libadwaita (@tokens).
+ * Solo se definen colores semánticos de trading encima.
+ */
+
+/* ── Ventana principal ────────────────────────────────────────── */
+
+window.qts-window {
+    background-color: @window_bg_color;
+    color: @window_fg_color;
+}
+
+/* ── Cards / paneles ──────────────────────────────────────────── */
+
+.qts-card {
+    background-color: @card_bg_color;
+    border-radius: 12px;
+    border: 1px solid alpha(@window_fg_color, 0.08);
+    padding: 12px 10px;
+    margin: 5px;
+}
+
+/* ── Cabecera ─────────────────────────────────────────────────── */
+
+headerbar {
+    background-color: @headerbar_bg_color;
+    color: @headerbar_fg_color;
+    border-bottom: 1px solid alpha(@window_fg_color, 0.1);
+}
+
+/* ── Tipografía ───────────────────────────────────────────────── */
+
+.qts-title {
+    /* Usa el color de acento del sistema (azul por defecto en Fedora) */
+    color: @accent_color;
+    font-weight: bold;
+    font-size: 11pt;
+    letter-spacing: 0.6px;
+    margin-bottom: 6px;
+}
+
+.qts-section {
+    color: @accent_color;
+    font-weight: bold;
+    font-size: 9pt;
+    letter-spacing: 0.3px;
+    margin-top: 6px;
+    margin-bottom: 3px;
+    opacity: 0.8;
+}
+
+.qts-label {
+    color: alpha(@window_fg_color, 0.55);
+    font-size: 9.5pt;
+}
+
+.qts-mono {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro',
+                 'Cascadia Code', 'Iosevka', monospace;
+    font-size: 10.5pt;
+    line-height: 1.55;
+}
+
+.qts-mono-sm {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace;
+    font-size: 9.5pt;
+    line-height: 1.5;
+}
+
+/* ── Botones de símbolo ───────────────────────────────────────── */
+
+.symbol-group button {
+    background-color: alpha(@window_fg_color, 0.07);
+    color: alpha(@window_fg_color, 0.65);
+    border: none;
+    padding: 4px 12px;
+    font-weight: bold;
+    font-size: 9.5pt;
+    transition: all 150ms ease;
+}
+
+.symbol-group button:hover {
+    background-color: alpha(@window_fg_color, 0.13);
+    color: @window_fg_color;
+}
+
+.symbol-group button:checked {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+}
+
+.symbol-group button:first-child {
+    border-radius: 8px 0 0 8px;
+}
+
+.symbol-group button:last-child {
+    border-radius: 0 8px 8px 0;
+}
+
+/* ── Stats bar ────────────────────────────────────────────────── */
+
+.qts-statsbar {
+    background-color: @headerbar_bg_color;
+    border-top: 1px solid alpha(@window_fg_color, 0.1);
+    padding: 6px 16px;
+}
+
+/* ── Separadores ──────────────────────────────────────────────── */
+
+.qts-sep {
+    background-color: alpha(@window_fg_color, 0.08);
+    margin: 4px 0;
+    min-height: 1px;
+}
+
+/* ── Scrollbar discreta ───────────────────────────────────────── */
+
+scrollbar slider {
+    background-color: alpha(@window_fg_color, 0.25);
+    border-radius: 4px;
+    min-width: 4px;
+}
+
+scrollbar slider:hover {
+    background-color: alpha(@window_fg_color, 0.4);
+}
