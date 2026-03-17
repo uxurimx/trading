@@ -702,6 +702,7 @@ class CommandCenter(Gtk.Box):
         self._market_states: dict = {}
         self._hist_ts:      float = 0.0
         self._last_cs:      Optional[ControllerState] = None
+        self._radar_ts:     float = 0.0
 
         controller.on_update(self._on_controller_update)
         self._build()
@@ -757,7 +758,7 @@ class CommandCenter(Gtk.Box):
 
         gl, self._goal_spin  = _make_spin("$",  0.1, 500, 1.0,  0.5,  2, 60)
         ll, self._loss_spin  = _make_spin("↓$", 0.05, 500, 0.5, 0.25, 2, 60)
-        lel, self._lev_spin  = _make_spin("x",  1,   25,  5,    1,    0, 42)
+        lel, self._lev_spin  = _make_spin("x",  1,   75,  5,    1,    0, 42)
         dl, self._dur_spin   = _make_spin("⏱",  0,  480,  0,   15,    0, 50)
         ml, self._multi_spin = _make_spin("×",  1,   10,  1,    1,    0, 38)
 
@@ -873,6 +874,17 @@ class CommandCenter(Gtk.Box):
                   self._prop_sizing, self._prop_ttp, self._prop_timer]:
             self._prop_card.append(w)
 
+        # Radar de scores en tiempo real (visible cuando no hay propuesta)
+        self._radar_sep   = _sep()
+        self._radar_title = _ml()
+        self._radar_rows: list[Gtk.Label] = [_ml() for _ in range(8)]
+        self._radar_note  = _ml()
+        self._prop_card.append(self._radar_sep)
+        self._prop_card.append(self._radar_title)
+        for lbl in self._radar_rows:
+            self._prop_card.append(lbl)
+        self._prop_card.append(self._radar_note)
+
         btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_row.set_margin_top(4)
         self._confirm_btn = Gtk.Button(label="✓ CONFIRMAR")
@@ -986,7 +998,7 @@ class CommandCenter(Gtk.Box):
     def _render_proposal(self, cs: ControllerState) -> None:
         prop = cs.proposal
         if prop is None:
-            # Determinar color y texto del log de scan
+            # ── Estado del último scan ──────────────────────────────────────
             log = cs.scan_log
             if log.startswith("✓"):
                 log_col = HEX["buy"]
@@ -1008,7 +1020,7 @@ class CommandCenter(Gtk.Box):
                     f'<span color="{HEX["over"]}">Sin propuesta — esperando escaneo…</span>'
                 )
 
-            # Mostrar countdown al próximo scan automático
+            # Countdown al próximo scan automático
             if cs.mode != AutoMode.MANUAL and cs.scan_in > 0:
                 self._prop_levels.set_markup(
                     f'<span color="{HEX["over"]}" size="small">Próximo scan en {cs.scan_in}s</span>'
@@ -1019,7 +1031,17 @@ class CommandCenter(Gtk.Box):
             for w in [self._prop_sizing, self._prop_ttp, self._prop_timer]:
                 w.set_text("")
             self._confirm_row.set_visible(False)
+
+            # ── Radar en vivo ───────────────────────────────────────────────
+            self._render_radar()
             return
+
+        # Hay propuesta → ocultar radar
+        self._radar_sep.set_visible(False)
+        self._radar_title.set_visible(False)
+        for lbl in self._radar_rows:
+            lbl.set_visible(False)
+        self._radar_note.set_visible(False)
 
         col   = HEX["buy"] if prop.side == "Buy" else HEX["sell"]
         arrow = "▲" if prop.side == "Buy" else "▼"
@@ -1079,6 +1101,76 @@ class CommandCenter(Gtk.Box):
             f'Expira en {ttl}s</span>'
         )
         self._confirm_row.set_visible(cs.mode == AutoMode.SUGGEST)
+
+    def _render_radar(self) -> None:
+        """Muestra scores en tiempo real de todos los símbolos monitoreados."""
+        now = time.monotonic()
+        if now - self._radar_ts < 2.0:
+            return
+        self._radar_ts = now
+        scores = self._controller.live_scores(8)
+        threshold = 55  # min_scan_score por defecto
+
+        self._radar_sep.set_visible(True)
+        self._radar_title.set_markup(
+            f'<span color="{HEX["sub"]}" size="small" weight="bold">'
+            f'RADAR  <span color="{HEX["over"]}">(umbral: {threshold})</span></span>'
+        )
+        self._radar_title.set_visible(True)
+
+        for i, lbl in enumerate(self._radar_rows):
+            if i >= len(scores):
+                lbl.set_text("")
+                lbl.set_visible(True)
+                continue
+
+            sym, score, direction, regime_label = scores[i]
+            short = sym.replace("USDT", "")
+
+            # Barra de score ASCII: 10 bloques
+            filled  = int(score / 10)
+            bar     = "█" * filled + "░" * (10 - filled)
+            pct_col = HEX["buy"] if score >= threshold else (
+                      HEX["warn"] if score >= 40 else HEX["over"])
+
+            # Dirección e icono
+            if direction == "LONG":
+                dir_icon = f'<span color="{HEX["buy"]}">▲</span>'
+            elif direction == "SHORT":
+                dir_icon = f'<span color="{HEX["sell"]}">▼</span>'
+            else:
+                dir_icon = f'<span color="{HEX["over"]}">─</span>'
+
+            # Indicador de si supera el umbral
+            flag = (f'<span color="{HEX["buy"]}" weight="bold"> ✓ENTRA</span>'
+                    if score >= threshold else "")
+
+            lbl.set_markup(
+                f'<span color="{HEX["text"]}" size="small">{short:<6}</span>'
+                f'{dir_icon}'
+                f'<span color="{pct_col}" size="small"> {bar} </span>'
+                f'<span color="{pct_col}" weight="bold" size="small">{score:3d}</span>'
+                f'<span color="{HEX["over"]}" size="small">  {regime_label}</span>'
+                f'{flag}'
+            )
+            lbl.set_visible(True)
+
+        # Nota explicativa si todos los scores son bajos
+        if scores and scores[0][1] < 30:
+            self._radar_note.set_markup(
+                f'<span color="{HEX["over"]}" size="small">'
+                f'Sin absorción activa en ningún símbolo</span>'
+            )
+        elif scores and scores[0][1] < threshold:
+            best = scores[0]
+            gap  = threshold - best[1]
+            self._radar_note.set_markup(
+                f'<span color="{HEX["over"]}" size="small">'
+                f'Mejor: {best[0].replace("USDT","")} a {gap} pts del umbral</span>'
+            )
+        else:
+            self._radar_note.set_text("")
+        self._radar_note.set_visible(True)
 
     def _render_journal(self) -> None:
         stats = get_journal_stats()

@@ -99,6 +99,8 @@ class TradeController:
         self._be_since:      Dict[str, float]  = {}      # cuándo progress alcanzó BE threshold
         self._duration_set_ts: float           = time.time()  # cuándo se configuró max_duration
         self._open_ts:       Dict[str, float]  = {}  # monotonic timestamp al confirmar OPEN
+        self._latest_opps:   dict              = {}  # última foto de OpportunitySignal por símbolo
+        self._position_seen: Set[str]          = set()  # símbolos vistos al menos 1 vez en WS
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -122,7 +124,7 @@ class TradeController:
         self._notify()
 
     def set_leverage(self, leverage: int) -> None:
-        self.leverage = max(1, min(25, leverage))
+        self.leverage = max(1, min(75, leverage))
 
     def set_max_duration(self, minutes: int) -> None:
         self.max_duration_min = max(0, minutes)
@@ -193,6 +195,15 @@ class TradeController:
 
     # ── Tick principal (100ms, main thread) ───────────────────────────────────
 
+    def live_scores(self, n: int = 8) -> list:
+        """Top-N símbolos por score actual. Para radar en tiempo real en la UI."""
+        items = [
+            (sym, opp.score, opp.direction, opp.regime.label)
+            for sym, opp in self._latest_opps.items()
+            if opp is not None
+        ]
+        return sorted(items, key=lambda x: x[1], reverse=True)[:n]
+
     def tick(
         self,
         states:  Dict[str, "MarketState"],
@@ -201,6 +212,7 @@ class TradeController:
         opps:    Dict[str, "OpportunitySignal"],
         risk:    "RiskStatus",
     ) -> None:
+        self._latest_opps = opps  # actualizar radar en vivo
         self._sync_active_trades(account)
 
         # Capturar baseline de PnL al primer tick activo del trade
@@ -365,17 +377,30 @@ class TradeController:
         self._active[req.symbol] = trade
 
         async def _do() -> None:
-            await self._executor.set_leverage(req.symbol, req.leverage)
-            result = await self._executor.place_market_bracket(req)
-            if result.success and (req.sl_price > 0 or req.tp_price > 0):
-                import asyncio as _aio
-                await _aio.sleep(0.5)
-                await self._executor.set_sl_tp(
-                    req.symbol, sl=req.sl_price, tp=req.tp_price, side=req.side
-                )
-                log.info("SL/TP confirmados: %s  SL=%s  TP=%s",
-                         req.symbol, req.sl_price, req.tp_price)
-            GLib.idle_add(self._on_order_result, result, req)
+            from core.order_model import OrderResult as _OR
+            result = _OR(success=False, error_msg="excepción inesperada")
+            try:
+                await self._executor.set_leverage(req.symbol, req.leverage)
+                result = await self._executor.place_market_bracket(req)
+                if result.success and (req.sl_price > 0 or req.tp_price > 0):
+                    import asyncio as _aio
+                    await _aio.sleep(0.5)
+                    try:
+                        await self._executor.set_sl_tp(
+                            req.symbol, sl=req.sl_price, tp=req.tp_price, side=req.side
+                        )
+                        log.info("SL/TP confirmados: %s  SL=%s  TP=%s",
+                                 req.symbol, req.sl_price, req.tp_price)
+                    except Exception as sl_exc:
+                        log.error("set_sl_tp falló: %s — %s (orden colocada, sin SL/TP)",
+                                  req.symbol, sl_exc)
+                        # La orden sigue siendo exitosa; el trader puede ver la posición
+                        # en Bybit sin SL/TP y gestionarla manualmente.
+            except Exception as exc:
+                log.error("_do error: %s — %s", req.symbol, exc)
+                result = _OR(success=False, error_msg=str(exc))
+            finally:
+                GLib.idle_add(self._on_order_result, result, req)
 
         self._bridge.submit(_do())
         log.info("Ejecutando: %s", req.summary())
@@ -472,6 +497,10 @@ class TradeController:
             self._trail_high[sym] = pos.entry_price
             self._trail_low[sym]  = pos.entry_price
             self._last_sl_upd[sym] = 0.0
+            # Si había una propuesta para este símbolo, cancelarla — ya hay posición
+            if self._proposal and self._proposal.symbol == sym:
+                self._proposal = None
+                log.info("Propuesta de %s cancelada — posición importada de Bybit", sym)
             log.info(
                 "Posición importada de Bybit: %s %s %.4f @ %.5g  SL=%s  TP=%s",
                 sym, pos.side, pos.size, pos.entry_price,
@@ -511,8 +540,12 @@ class TradeController:
                 open_since = time.monotonic() - self._open_ts.get(sym, 0)
                 if open_since < 5.0:
                     continue
+                # Solo contar ausencias DESPUÉS de haber visto la posición al menos una vez.
+                # Esto cubre el caso de latencia prolongada del WS: el trade apareció en Bybit
+                # pero el snapshot de posiciones aún no lo refleja localmente.
+                if sym not in self._position_seen:
+                    continue
                 # Requerir 15 ticks consecutivos (~1.5s) sin posición antes de marcar cerrado.
-                # 3 ticks = 300ms era insuficiente para latencia real del exchange.
                 self._close_confirm[sym] = self._close_confirm.get(sym, 0) + 1
                 if self._close_confirm[sym] < 15:
                     continue
@@ -531,8 +564,9 @@ class TradeController:
                 notifier.trade_closed(sym, trade.pnl_usd, trade.close_reason)
                 closed.append(sym)
             else:
+                self._position_seen.add(sym)          # confirmado vía WS al menos una vez
                 self._last_upnl[sym] = pos.unrealized_pnl  # rastrear PnL no realizado
-                self._close_confirm.pop(sym, None)  # posición activa → resetear contador
+                self._close_confirm.pop(sym, None)    # posición activa → resetear contador
 
         for sym in closed:
             self._active.pop(sym, None)
@@ -544,6 +578,7 @@ class TradeController:
             self._last_upnl.pop(sym, None)
             self._be_since.pop(sym, None)
             self._open_ts.pop(sym, None)
+            self._position_seen.discard(sym)
         if closed:
             self._notify()
 
@@ -705,6 +740,7 @@ class TradeController:
             self._last_upnl.pop(symbol, None)
             self._be_since.pop(symbol, None)
             self._open_ts.pop(symbol, None)
+            self._position_seen.discard(symbol)
             del self._active[symbol]
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)
