@@ -1548,11 +1548,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         # ── Simulación para el OrderPanel ──────────────────────────────────
         cs      = self.controller.state
-        sim_sym = (
-            cs.active_trade.symbol
-            if cs.active_trade and cs.active_trade.is_active
-            else self._sym
-        )
+        _first_active = cs.active_trades[0] if cs.active_trades else None
+        sim_sym = _first_active.symbol if _first_active else self._sym
         sim_state = self.stream.states.get(sim_sym)
         sim_tech  = self._multi_tech.get(sim_sym) or self._tech_signal
         sim_entry = sim_state.ticker.last_price if sim_state else 0.0

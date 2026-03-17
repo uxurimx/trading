@@ -2,44 +2,28 @@
 interface/order_panel.py
 ─────────────────────────
 OrderPanel — Centro de órdenes QTS.
-
-Layout vertical:
-  ┌─ MODO ──────────────────────────────────┐
-  │  [MANUAL] [SUGGEST] [AUTO] [FULL AUTO]  │
-  ├─ OBJETIVO ──────────────────────────────┤
-  │  Goal: $ [1.00]  Lev: [5x]  [SCAN]     │
-  ├─ PROPUESTA ─────────────────────────────┤
-  │  ▲ LONG XRPUSDT   Score: 72            │
-  │  Entry 1.5261  SL 1.5135  TP 1.5651   │
-  │  Qty 13  Margen $1.90  R:R 2.1:1      │
-  │  Riesgo: -$0.17                        │
-  │  [✓ CONFIRMAR]      [✗ RECHAZAR]       │
-  ├─ TRADE ACTIVO ──────────────────────────┤
-  │  [████████░░░░] +$0.34 / $1.00         │
-  │  Estado: OPEN → SL: 1.5135             │
-  ├─ LOG ───────────────────────────────────┤
-  │  ▲ XRPUSDT +$0.87 [TP hit]            │
-  │  ▼ SOLUSDT -$0.15 [SL hit]            │
-  └─────────────────────────────────────────┘
+Soporta hasta MAX_POSITIONS trades simultáneos.
 """
 from __future__ import annotations
 
-import math
+import time
 from typing import Optional, TYPE_CHECKING
 
 import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Pango
 
-from core.order_model import AutoMode, TradeState, ControllerState, TradeRecord
+from core.order_model import AutoMode, TradeState, ControllerState, MAX_POSITIONS
+from core.db import get_journal_stats
 
 if TYPE_CHECKING:
     from core.controller import TradeController
+    from core.order_model import TradeRecord
     from streams.account import AccountState
     from core.risk import RiskStatus
 
 
-# ─── Colores (mismo estilo que gtk_app.py) ────────────────────────────────────
+# ─── Colores ──────────────────────────────────────────────────────────────────
 
 HEX = {
     "buy":   "#57e389",
@@ -53,17 +37,17 @@ HEX = {
 }
 
 MODE_COLORS = {
-    AutoMode.MANUAL:     ("MANUAL",     "over"),
-    AutoMode.SUGGEST:    ("SUGGEST",    "blue"),
-    AutoMode.AUTO_ENTRY: ("AUTO",       "warn"),
-    AutoMode.FULL_AUTO:  ("FULL AUTO",  "sell"),
+    AutoMode.MANUAL:     ("MANUAL",    "over"),
+    AutoMode.SUGGEST:    ("SUGGEST",   "blue"),
+    AutoMode.AUTO_ENTRY: ("AUTO",      "warn"),
+    AutoMode.FULL_AUTO:  ("FULL AUTO", "sell"),
 }
 
 
-def _ml(text: str = "", use_markup: bool = True) -> Gtk.Label:
+def _ml(text: str = "") -> Gtk.Label:
     lbl = Gtk.Label(label=text)
     lbl.set_xalign(0)
-    lbl.set_use_markup(use_markup)
+    lbl.set_use_markup(True)
     lbl.add_css_class("qts-mono-sm")
     lbl.set_max_width_chars(34)
     lbl.set_ellipsize(Pango.EllipsizeMode.END)
@@ -84,21 +68,113 @@ def _section(text: str) -> Gtk.Label:
 
 
 def _fp(p: float) -> str:
-    if p <= 0:  return "──"
+    if p <= 0:    return "──"
     if p >= 1000: return f"{p:.2f}"
     if p >= 10:   return f"{p:.4f}"
     return f"{p:.5f}"
 
 
+# ─── Widget de un trade activo ────────────────────────────────────────────────
+
+class _TradeRow(Gtk.Box):
+    """
+    Fila compacta para un trade activo.
+    Se reutiliza: llamar show_trade() o clear() en cada refresh.
+    """
+
+    def __init__(self, controller: "TradeController") -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._controller = controller
+        self._symbol: str = ""
+
+        self._header = _ml()
+        self._levels = _ml()
+        self._pnl    = _ml()
+
+        prog_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._prog = Gtk.ProgressBar()
+        self._prog.set_hexpand(True)
+        self._prog.set_show_text(True)
+        self._close_btn = Gtk.Button(label="✗")
+        self._close_btn.add_css_class("destructive-action")
+        self._close_btn.set_size_request(28, -1)
+        self._close_btn.connect("clicked", self._on_close)
+        prog_row.append(self._prog)
+        prog_row.append(self._close_btn)
+
+        for w in [self._header, self._levels, self._pnl, prog_row]:
+            self.append(w)
+
+    def _on_close(self, _btn) -> None:
+        if self._symbol:
+            self._controller.close_symbol(self._symbol)
+
+    def show_trade(
+        self,
+        trade:   "TradeRecord",
+        mark:    float,
+        upnl:    float,
+    ) -> None:
+        self.set_visible(True)
+        req = trade.request
+        if not req:
+            return
+
+        self._symbol = trade.symbol
+        sym   = trade.symbol.replace("USDT", "")
+        col   = HEX["buy"] if req.side == "Buy" else HEX["sell"]
+        arrow = "▲" if req.side == "Buy" else "▼"
+
+        state_labels = {
+            TradeState.SUBMITTED: ("WAIT",       "warn"),
+            TradeState.OPEN:      ("OPEN",        "text"),
+            TradeState.BREAKEVEN: ("BREAKEVEN ✓", "buy"),
+            TradeState.TRAILING:  ("TRAILING ↑",  "teal"),
+        }
+        s_label, s_color = state_labels.get(trade.state, ("??", "over"))
+
+        self._header.set_markup(
+            f'<span color="{col}" weight="bold">{arrow} {sym}</span>'
+            f'  <span color="{HEX[s_color]}">{s_label}</span>'
+        )
+
+        self._levels.set_markup(
+            f'<span color="{HEX["sell"]}">SL {_fp(trade.current_sl)}</span>'
+            f'  <span color="{HEX["buy"]}">TP {_fp(trade.current_tp)}</span>'
+        )
+
+        sign    = "+" if upnl >= 0 else ""
+        pnl_col = HEX["buy"] if upnl >= 0 else HEX["sell"]
+        self._pnl.set_markup(
+            f'<span color="{pnl_col}" weight="bold">{sign}${upnl:.2f}</span>'
+            f'  <span color="{HEX["sub"]}">mark {_fp(mark)}</span>'
+        )
+
+        # Barra de progreso
+        entry   = trade.entry_price or req.entry_price
+        tp      = trade.current_tp
+        tp_dist = abs(tp - entry) if tp > 0 and entry > 0 else 1
+        if tp_dist > 0 and entry > 0:
+            is_long = req.side == "Buy"
+            prog = (mark - entry) / tp_dist if is_long else (entry - mark) / tp_dist
+            frac = max(0.0, min(1.0, prog))
+            goal_real = req.qty * tp_dist
+            self._prog.set_fraction(frac)
+            self._prog.set_text(f"{sign}${upnl:.2f} / ${goal_real:.2f}  ({frac*100:.0f}%)")
+        else:
+            self._prog.set_fraction(0.0)
+            self._prog.set_text(f"entry {_fp(entry)}")
+
+    def clear(self) -> None:
+        self.set_visible(False)
+        self._symbol = ""
+
+
 # ─── OrderPanel ───────────────────────────────────────────────────────────────
 
 class OrderPanel(Gtk.Box):
-    """
-    Panel de control de órdenes. Se añade como cuarta columna en MainWindow.
-    Ancho fijo 280px.
-    """
 
-    N_LOG = 5   # entradas del historial de trades
+    N_LOG = 5
 
     def __init__(self, controller: "TradeController") -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -107,19 +183,17 @@ class OrderPanel(Gtk.Box):
         self.set_size_request(280, -1)
 
         self._controller = controller
+        self._jnl_last_refresh: float = 0.0
+        self._jnl_log_len: int = -1
         controller.on_update(self._on_controller_update)
 
         self._build_ui()
 
-    # ── Construcción ─────────────────────────────────────────────────────────
-
     def _build_ui(self) -> None:
-        # Título
         title = Gtk.Label(label="⚡ CENTRO DE ÓRDENES")
         title.add_css_class("qts-title")
         title.set_xalign(0)
         self.append(title)
-
         self.append(_sep())
 
         # ── Modo ────────────────────────────────────────────────────────────
@@ -128,7 +202,7 @@ class OrderPanel(Gtk.Box):
         mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
                            spacing=0, css_classes=["symbol-group"])
         first: Optional[Gtk.ToggleButton] = None
-        for mode, (label, _color) in MODE_COLORS.items():
+        for mode, (label, _) in MODE_COLORS.items():
             btn = Gtk.ToggleButton(label=label)
             btn.set_active(mode == AutoMode.MANUAL)
             if first is None:
@@ -140,18 +214,13 @@ class OrderPanel(Gtk.Box):
             mode_box.append(btn)
         self.append(mode_box)
 
-        # Descripción del modo
         self._mode_desc = _ml()
         self.append(self._mode_desc)
-
         self.append(_sep())
 
-        # ── Goal + Max Loss + Leverage ───────────────────────────────────────
+        # ── Objetivo ─────────────────────────────────────────────────────
         self.append(_section("OBJETIVO"))
-
-        # Fila 1: Ganar / Perder máximo
         row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-
         goal_lbl = Gtk.Label(label="Ganar $")
         goal_lbl.add_css_class("qts-label")
         self._goal_spin = Gtk.SpinButton()
@@ -172,15 +241,11 @@ class OrderPanel(Gtk.Box):
         self._loss_spin.set_size_request(72, -1)
         self._loss_spin.connect("value-changed", self._on_loss_changed)
 
-        row1.append(goal_lbl)
-        row1.append(self._goal_spin)
-        row1.append(loss_lbl)
-        row1.append(self._loss_spin)
+        row1.append(goal_lbl); row1.append(self._goal_spin)
+        row1.append(loss_lbl); row1.append(self._loss_spin)
         self.append(row1)
 
-        # Fila 2: Leverage + Scan
         row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-
         lev_lbl = Gtk.Label(label="Leverage")
         lev_lbl.add_css_class("qts-label")
         self._lev_spin = Gtk.SpinButton()
@@ -193,31 +258,27 @@ class OrderPanel(Gtk.Box):
 
         self._scan_btn = Gtk.Button(label="🔍 Scan")
         self._scan_btn.add_css_class("flat")
-        self._scan_btn.connect("clicked", self._on_scan_clicked)
+        self._scan_btn.connect("clicked", lambda _: self._controller.force_scan())
 
-        row2.append(lev_lbl)
-        row2.append(self._lev_spin)
-        row2.append(self._scan_btn)
+        row2.append(lev_lbl); row2.append(self._lev_spin); row2.append(self._scan_btn)
         self.append(row2)
-
-        # ── Simulación en tiempo real ────────────────────────────────────────
         self.append(_sep())
+
+        # ── Simulación ───────────────────────────────────────────────────
         self.append(_section("SIMULACIÓN (sin ejecutar)"))
-        self._sim_sym_lbl  = _ml()   # símbolo + dirección si hay señal
-        self._sim_qty_lbl  = _ml()   # qty · notional · margen
-        self._sim_rr_lbl   = _ml()   # SL / TP / R:R
-        self._sim_result   = _ml()   # ✓ Si TP: +$X  /  ✗ Si SL: -$Y
-        self._sim_warn     = _ml()   # ⚠ warnings
+        self._sim_sym_lbl = _ml()
+        self._sim_qty_lbl = _ml()
+        self._sim_rr_lbl  = _ml()
+        self._sim_result  = _ml()
+        self._sim_warn    = _ml()
         for w in [self._sim_sym_lbl, self._sim_qty_lbl, self._sim_rr_lbl,
                   self._sim_result, self._sim_warn]:
             self.append(w)
-
         self.append(_sep())
 
-        # ── Propuesta ────────────────────────────────────────────────────────
+        # ── Propuesta ────────────────────────────────────────────────────
         self._prop_sec = _section("PROPUESTA")
         self.append(self._prop_sec)
-
         self._prop_header  = _ml()
         self._prop_levels  = _ml()
         self._prop_sizing  = _ml()
@@ -232,50 +293,48 @@ class OrderPanel(Gtk.Box):
         self._confirm_btn = Gtk.Button(label="✓ CONFIRMAR")
         self._confirm_btn.add_css_class("suggested-action")
         self._confirm_btn.connect("clicked", lambda _: self._controller.approve_proposal())
-        self._reject_btn  = Gtk.Button(label="✗ RECHAZAR")
+        self._reject_btn = Gtk.Button(label="✗ RECHAZAR")
         self._reject_btn.add_css_class("destructive-action")
         self._reject_btn.connect("clicked", lambda _: self._controller.reject_proposal())
         btn_row.append(self._confirm_btn)
         btn_row.append(self._reject_btn)
         self._confirm_row = btn_row
         self.append(btn_row)
-
-        # Botón cerrar posición (visible cuando hay trade activo)
-        self._close_btn = Gtk.Button(label="✗ CERRAR POSICIÓN")
-        self._close_btn.add_css_class("destructive-action")
-        self._close_btn.connect("clicked", lambda _: self._controller.close_now())
-        self.append(self._close_btn)
-
         self.append(_sep())
 
-        # ── Trade activo ─────────────────────────────────────────────────────
-        self.append(_section("TRADE ACTIVO"))
-
-        self._trade_state  = _ml()
-        self._trade_pnl    = _ml()
-        self._trade_sl     = _ml()
-        self._trade_prog   = Gtk.ProgressBar()
-        self._trade_prog.set_show_text(True)
-        for w in [self._trade_state, self._trade_prog, self._trade_pnl, self._trade_sl]:
-            self.append(w)
-
+        # ── Trades activos (hasta MAX_POSITIONS filas) ────────────────────
+        self.append(_section(f"TRADES ACTIVOS (0/{MAX_POSITIONS})"))
+        self._active_section_lbl = self.get_last_child()
+        self._trade_rows: list[_TradeRow] = []
+        for _ in range(MAX_POSITIONS):
+            row = _TradeRow(self._controller)
+            row.clear()
+            self._trade_rows.append(row)
+            self.append(row)
         self.append(_sep())
 
-        # ── Log de trades ────────────────────────────────────────────────────
+        # ── Log de trades ────────────────────────────────────────────────
         self.append(_section("HISTORIAL"))
         self._log_lbls = [_ml() for _ in range(self.N_LOG)]
         for lbl in self._log_lbls:
             self.append(lbl)
-
-        # ── Status ───────────────────────────────────────────────────────────
         self.append(_sep())
+
+        # ── Journal stats ────────────────────────────────────────────────
+        self.append(_section("JOURNAL"))
+        self._jnl_line1 = _ml()
+        self._jnl_line2 = _ml()
+        self.append(self._jnl_line1)
+        self.append(self._jnl_line2)
+        self.append(_sep())
+
+        # ── Status ───────────────────────────────────────────────────────
         self._status_lbl = _ml()
         self.append(self._status_lbl)
 
-        # Render inicial
         self._render_controller_state(self._controller.state)
 
-    # ── Callbacks de controles ────────────────────────────────────────────────
+    # ── Callbacks ────────────────────────────────────────────────────────────
 
     def _on_mode_toggled(self, btn: Gtk.ToggleButton, mode: AutoMode) -> None:
         if btn.get_active():
@@ -290,39 +349,29 @@ class OrderPanel(Gtk.Box):
     def _on_lev_changed(self, spin: Gtk.SpinButton) -> None:
         self._controller.set_leverage(int(spin.get_value()))
 
-    def _on_scan_clicked(self, _btn) -> None:
-        self._controller.force_scan()
-
-    # ── Callback del controlador (main thread vía on_update) ─────────────────
-
     def _on_controller_update(self, cs: ControllerState) -> None:
-        # Esto se llama desde el thread del controlador —
-        # necesita correr en el main thread GTK
         GLib.idle_add(self._render_controller_state, cs)
 
     def _render_controller_state(self, cs: ControllerState) -> bool:
         self._render_mode(cs.mode)
         self._render_proposal(cs)
-        self._render_active_trade(cs)
         self._render_log()
         msg = cs.status_msg
         msg_col = HEX["sell"] if msg.startswith("✗") else HEX["sub"]
         self._status_lbl.set_markup(
             f'<span color="{msg_col}" size="small">{GLib.markup_escape_text(msg)}</span>'
         )
-        return False   # para GLib.idle_add
+        return False
 
     # ── Renderizado ───────────────────────────────────────────────────────────
 
     def _render_mode(self, mode: AutoMode) -> None:
-        # Asegurarse que el botón correcto está activo
         for m, btn in self._mode_btns.items():
             if btn.get_active() != (m == mode):
                 btn.handler_block_by_func(self._on_mode_toggled)
                 btn.set_active(m == mode)
                 btn.handler_unblock_by_func(self._on_mode_toggled)
 
-        # Descripción
         descs = {
             AutoMode.MANUAL:     "Solo monitoreas. Tú ejecutas todo.",
             AutoMode.SUGGEST:    "El sistema propone. Tú confirmas con 1 clic.",
@@ -344,7 +393,6 @@ class OrderPanel(Gtk.Box):
                       self._prop_reasons, self._prop_timer]:
                 w.set_text("")
             self._confirm_row.set_visible(False)
-            self._close_btn.set_visible(False)
             return
 
         col   = HEX["buy"] if prop.side == "Buy" else HEX["sell"]
@@ -373,9 +421,10 @@ class OrderPanel(Gtk.Box):
         )
 
         if prop.reasons:
-            reasons_text = " · ".join(prop.reasons[:2])
             self._prop_reasons.set_markup(
-                f'<span color="{HEX["over"]}" size="small">{GLib.markup_escape_text(reasons_text)}</span>'
+                f'<span color="{HEX["over"]}" size="small">'
+                + GLib.markup_escape_text(" · ".join(prop.reasons[:2]))
+                + "</span>"
             )
         else:
             self._prop_reasons.set_text("")
@@ -386,66 +435,7 @@ class OrderPanel(Gtk.Box):
             f'<span color="{HEX["warn"] if ttl < 20 else HEX["over"]}" size="small">'
             f'Expira en {ttl}s</span>'
         )
-
-        # Botones: CONFIRMAR/RECHAZAR solo en SUGGEST mode
         self._confirm_row.set_visible(is_suggest)
-        self._close_btn.set_visible(False)
-
-    def _render_active_trade(self, cs: ControllerState) -> None:
-        trade = cs.active_trade
-
-        # Mostrar botón cerrar si hay trade activo (cualquier modo)
-        has_active = trade is not None and trade.is_active
-        self._close_btn.set_visible(has_active)
-
-        if not trade or not trade.is_active:
-            self._trade_state.set_markup(f'<span color="{HEX["over"]}">Sin trade activo</span>')
-            self._trade_pnl.set_text("")
-            self._trade_sl.set_text("")
-            self._trade_prog.set_fraction(0)
-            self._trade_prog.set_text("")
-            return
-
-        req = trade.request
-        if not req:
-            return
-
-        # Estado
-        state_labels = {
-            TradeState.SUBMITTED: ("ESPERANDO FILL", "warn"),
-            TradeState.OPEN:      ("OPEN",       "text"),
-            TradeState.BREAKEVEN: ("BREAKEVEN ✓", "buy"),
-            TradeState.TRAILING:  ("TRAILING ↑",  "teal"),
-        }
-        s_label, s_color = state_labels.get(trade.state, ("??", "over"))
-        col = HEX["buy"] if req.side == "Buy" else HEX["sell"]
-        arrow = "▲" if req.side == "Buy" else "▼"
-        sym = req.symbol.replace("USDT", "")
-        self._trade_state.set_markup(
-            f'<span color="{col}" weight="bold">{arrow} {sym}</span>'
-            f'  <span color="{HEX[s_color]}" weight="bold">{s_label}</span>'
-        )
-
-        # SL actual
-        self._trade_sl.set_markup(
-            f'<span color="{HEX["sub"]}">SL </span>'
-            f'<span color="{HEX["sell"]}">{_fp(trade.current_sl)}</span>'
-            f'  <span color="{HEX["sub"]}">TP </span>'
-            f'<span color="{HEX["buy"]}">{_fp(trade.current_tp)}</span>'
-        )
-
-        # Barra de progreso (requiere mark_price — aproximado con entry hasta que llegue del WS)
-        entry = trade.entry_price or req.entry_price
-        tp    = trade.current_tp
-        sl    = trade.current_sl
-        tp_dist = abs(tp - entry) if tp > 0 else 1
-        # Aproximar PnL con entry (se actualiza cuando AccountState tiene el dato)
-        self._trade_prog.set_fraction(0.0)
-        self._trade_prog.set_text(f"entry {_fp(entry)}")
-        self._trade_pnl.set_markup(
-            f'<span color="{HEX["sub"]}">Entry </span>'
-            f'<span color="{HEX["text"]}">{_fp(entry)}</span>'
-        )
 
     def _render_log(self) -> None:
         log_entries = self._controller.trade_log
@@ -456,8 +446,7 @@ class OrderPanel(Gtk.Box):
                 side  = req.side if req else "Buy"
                 arrow = "▲" if side == "Buy" else "▼"
                 sym   = t.symbol.replace("USDT", "")
-                from core.order_model import TradeState as _TS
-                if t.state == _TS.FAILED:
+                if t.state == TradeState.FAILED:
                     col    = HEX["sell"]
                     amount = "FALLÓ"
                 else:
@@ -472,8 +461,40 @@ class OrderPanel(Gtk.Box):
             else:
                 lbl.set_text("")
 
-    def _render_simulation(self, sim: dict) -> None:
-        """Muestra la simulación en tiempo real (sin ejecutar)."""
+        # Journal stats — refrescar máx 1 vez cada 10s o cuando cambia el log
+        now = time.monotonic()
+        if len(log_entries) != self._jnl_log_len or (now - self._jnl_last_refresh) > 10:
+            self._jnl_log_len = len(log_entries)
+            self._jnl_last_refresh = now
+            self._render_journal()
+
+    def _render_journal(self) -> None:
+        stats = get_journal_stats()
+        total = stats["total"]
+        if total == 0:
+            self._jnl_line1.set_markup(f'<span color="{HEX["over"]}">Sin trades en el journal</span>')
+            self._jnl_line2.set_text("")
+            return
+
+        wr_col = HEX["buy"] if stats["win_rate"] >= 50 else HEX["sell"]
+        pnl_col = HEX["buy"] if stats["total_pnl"] >= 0 else HEX["sell"]
+        sign = "+" if stats["total_pnl"] >= 0 else ""
+        self._jnl_line1.set_markup(
+            f'<span color="{HEX["sub"]}">W:</span>'
+            f'<span color="{wr_col}">{stats["wins"]}/{total} ({stats["win_rate"]}%)</span>'
+            f'  <span color="{HEX["sub"]}">PnL:</span>'
+            f'<span color="{pnl_col}">{sign}${stats["total_pnl"]}</span>'
+        )
+        self._jnl_line2.set_markup(
+            f'<span color="{HEX["sub"]}">Best: </span>'
+            f'<span color="{HEX["teal"]}">{stats["best_symbol"]}</span>'
+            f'  <span color="{HEX["sub"]}">AvgScore: </span>'
+            f'<span color="{HEX["text"]}">{stats["avg_score"]}</span>'
+            f'  <span color="{HEX["sub"]}">R:R: </span>'
+            f'<span color="{HEX["text"]}">{stats["avg_rr"]}</span>'
+        )
+
+    def _render_simulation(self, sim: Optional[dict]) -> None:
         if not sim or "error" in sim:
             msg = sim.get("error", "esperando datos…") if sim else "esperando datos…"
             self._sim_sym_lbl.set_markup(f'<span color="{HEX["over"]}">{msg}</span>')
@@ -481,123 +502,78 @@ class OrderPanel(Gtk.Box):
                 w.set_text("")
             return
 
-        goal  = sim["goal_requested"]
-        loss  = sim["loss_requested"]
+        goal        = sim["goal_requested"]
         real_profit = sim["real_profit"]
         real_loss   = sim["real_loss"]
         is_capped   = sim["is_capped"]
         binding     = sim["binding_limit"]
         sym         = sim.get("symbol", "??").replace("USDT", "")
 
-        # Encabezado: símbolo + niveles
         self._sim_sym_lbl.set_markup(
             f'<span color="{HEX["blue"]}">{sym}</span>'
             f'  <span color="{HEX["sub"]}">Entry≈</span>'
             f'<span color="{HEX["text"]}">{_fp(sim["entry"])}</span>'
         )
-
-        # Qty · notional · margen
         self._sim_qty_lbl.set_markup(
             f'<span color="{HEX["sub"]}">Qty </span><span color="{HEX["text"]}">{sim["qty"]}</span>'
             f'  <span color="{HEX["sub"]}">Notional </span><span color="{HEX["text"]}">${sim["notional"]}</span>'
             f'  <span color="{HEX["sub"]}">Margen </span><span color="{HEX["text"]}">${sim["margin"]}</span>'
         )
-
-        # SL · TP · R:R
         self._sim_rr_lbl.set_markup(
             f'<span color="{HEX["sell"]}">SL {_fp(sim["sl"])}</span>'
             f'  <span color="{HEX["buy"]}">TP {_fp(sim["tp"])}</span>'
             f'  <span color="{HEX["sub"]}">R:R </span>'
             f'<span color="{HEX["buy"] if sim["rr"] >= 2 else HEX["warn"]}">{sim["rr"]:.1f}:1</span>'
         )
-
-        # Resultado esperado
-        profit_col = HEX["buy"]
-        loss_col   = HEX["sell"]
         self._sim_result.set_markup(
-            f'<span color="{profit_col}" weight="bold">✓ TP: +${real_profit:.2f}</span>'
-            f'  <span color="{loss_col}" weight="bold">✗ SL: -${real_loss:.2f}</span>'
+            f'<span color="{HEX["buy"]}" weight="bold">✓ TP: +${real_profit:.2f}</span>'
+            f'  <span color="{HEX["sell"]}" weight="bold">✗ SL: -${real_loss:.2f}</span>'
         )
 
-        # Warnings
         warns = []
-        if is_capped:
+        if is_capped and real_profit < goal * 0.8:
+            warns.append(f"⚠ Solo puedes ganar ${real_profit:.2f} de ${goal:.2f}")
+            warns.append(f"  Límite: {binding}")
             gap = sim.get("equity_gap", 0)
-            if real_profit < goal * 0.8:
-                warns.append(
-                    f"⚠ Solo puedes ganar ${real_profit:.2f} de ${goal:.2f} pedidos"
-                )
-                warns.append(f"  Límite: {binding}")
-                if gap > 0:
-                    warns.append(f"  Necesitas ${gap:.2f} más de equity para lograrlo")
-        if real_loss > loss * 1.05 and loss > 0:
-            warns.append(f"⚠ Pérdida real ${real_loss:.2f} > límite ${loss:.2f}")
-
+            if gap > 0:
+                warns.append(f"  Necesitas ${gap:.2f} más de equity")
         if warns:
             self._sim_warn.set_markup(
                 f'<span color="{HEX["warn"]}" size="small">'
-                + GLib.markup_escape_text("\n".join(warns))
-                + "</span>"
+                + GLib.markup_escape_text("\n".join(warns)) + "</span>"
+            )
+        elif real_profit >= goal * 0.95:
+            self._sim_warn.set_markup(
+                f'<span color="{HEX["buy"]}" size="small">✓ Meta alcanzable</span>'
             )
         else:
-            if real_profit >= goal * 0.95:
-                self._sim_warn.set_markup(
-                    f'<span color="{HEX["buy"]}" size="small">✓ Meta alcanzable con este setup</span>'
-                )
-            else:
-                self._sim_warn.set_text("")
+            self._sim_warn.set_text("")
 
-    # ── Actualización de PnL en tiempo real (desde MainWindow._refresh) ───────
+    # ── Update (100ms desde _refresh) ────────────────────────────────────────
 
-    def update(self, account: "AccountState", risk: "RiskStatus", sim: Optional[dict] = None) -> None:
-        """
-        Llamado cada 100ms desde MainWindow._refresh().
-        Actualiza el PnL del trade activo y la simulación en tiempo real.
-        """
+    def update(
+        self,
+        account: "AccountState",
+        risk:    "RiskStatus",
+        sim:     Optional[dict] = None,
+    ) -> None:
         self._render_simulation(sim)
-        trade = self._controller._active
-        if not trade or not trade.is_active or not trade.request:
-            return
+        self._render_active_trades(account)
 
-        sym = trade.symbol
-        pos = account.positions.get(sym)
-        if not pos:
-            return
+    def _render_active_trades(self, account: "AccountState") -> None:
+        actives = list(self._controller._active.values())
+        n = len(actives)
 
-        mark    = pos.mark_price if pos.mark_price > 0 else pos.entry_price
-        entry   = trade.entry_price or pos.entry_price
-        tp      = trade.current_tp
-        sl      = trade.current_sl
-        upnl    = pos.unrealized_pnl
-        pnl_pct = pos.pnl_pct
+        # Actualizar título de la sección
+        self._active_section_lbl.set_text(f"TRADES ACTIVOS ({n}/{MAX_POSITIONS})")
 
-        pnl_col = HEX["buy"] if upnl >= 0 else HEX["sell"]
-        sign    = "+" if upnl >= 0 else ""
-
-        # PnL en tiempo real
-        self._trade_pnl.set_markup(
-            f'<span color="{pnl_col}" weight="bold">{sign}${upnl:.2f}</span>'
-            f'  <span color="{HEX["sub"]}">({sign}{pnl_pct:.1f}%)</span>'
-            f'  <span color="{HEX["sub"]}">mark {_fp(mark)}</span>'
-        )
-
-        # Barra de progreso
-        if tp > 0 and entry > 0:
-            tp_dist = abs(tp - entry)
-            if tp_dist > 0:
-                is_long = trade.request.side == "Buy"
-                prog = (mark - entry) / tp_dist if is_long else (entry - mark) / tp_dist
-                frac = max(0.0, min(1.0, prog))
-                goal_real = trade.request.qty * tp_dist if trade.request else 0
-                self._trade_prog.set_fraction(frac)
-                self._trade_prog.set_text(
-                    f"{sign}${upnl:.2f} / ${goal_real:.2f}  ({frac*100:.0f}%)"
-                )
-
-        # Actualizar el SL actual (puede haber sido movido por breakeven/trail)
-        self._trade_sl.set_markup(
-            f'<span color="{HEX["sub"]}">SL </span>'
-            f'<span color="{HEX["sell"]}">{_fp(trade.current_sl)}</span>'
-            f'  <span color="{HEX["sub"]}">TP </span>'
-            f'<span color="{HEX["buy"]}">{_fp(trade.current_tp)}</span>'
-        )
+        for i, row in enumerate(self._trade_rows):
+            if i < len(actives):
+                trade = actives[i]
+                sym   = trade.symbol
+                pos   = account.positions.get(sym)
+                mark  = pos.mark_price if pos and pos.mark_price > 0 else (pos.entry_price if pos else 0.0)
+                upnl  = pos.unrealized_pnl if pos else 0.0
+                row.show_trade(trade, mark, upnl)
+            else:
+                row.clear()

@@ -3,8 +3,7 @@ core/controller.py
 ──────────────────
 TradeController — gestiona el ciclo de vida completo de los trades.
 
-Conecta: StrategyEngine + BybitExecutor + RiskFortress.
-Se llama .tick() desde MainWindow._refresh() cada 100ms.
+Soporta hasta MAX_POSITIONS trades simultáneos en símbolos distintos.
 
 Flujo FULL_AUTO:
   scan cada 30s → propuesta → pre-flight → ejecutar → monitorear →
@@ -19,15 +18,17 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 from gi.repository import GLib
 
 from core.order_model import (
     AutoMode, TradeState, TradeRecord, OrderRequest,
-    OrderResult, ControllerState,
+    OrderResult, ControllerState, MAX_POSITIONS,
 )
 from core.strategy import StrategyEngine
+from core.db import save_trade
+import core.notifier as notifier
 
 if TYPE_CHECKING:
     from streams.market import MarketState
@@ -40,21 +41,16 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("qts.controller")
 
-# Segundos entre scans (evitar llamadas excesivas a la estrategia)
-SCAN_INTERVAL    = 30
-# Segundos antes de que una propuesta SUGGEST expire
-PROPOSAL_TTL     = 60
-# Porcentaje del camino hacia el TP para activar breakeven (~50% = +1R)
-BREAKEVEN_AT_PCT = 0.50
-# Porcentaje del camino hacia el TP para activar trailing
-TRAILING_AT_PCT  = 0.80
-# Mínimo movimiento de SL para enviar actualización (evitar spam API)
-TRAIL_MIN_MOVE_PCT = 0.003   # 0.3% del precio
+SCAN_INTERVAL      = 30
+PROPOSAL_TTL       = 60
+BREAKEVEN_AT_PCT   = 0.50
+TRAILING_AT_PCT    = 0.80
+TRAIL_MIN_MOVE_PCT = 0.003
 
 
 class TradeController:
     """
-    Gestiona el ciclo de vida de trades de forma autónoma o semi-autónoma.
+    Gestiona hasta MAX_POSITIONS trades simultáneos en símbolos distintos.
     El modo controla cuánta autonomía tiene el sistema.
     """
 
@@ -73,27 +69,26 @@ class TradeController:
         self._symbols       = symbols
 
         # Estado público
-        self.mode:           AutoMode                  = AutoMode.MANUAL
-        self.goal_usd:       float                     = 1.0
-        self.max_loss_usd:   float                     = 0.0   # 0 = usar % del equity
-        self.leverage:       int                       = 5
+        self.mode:         AutoMode = AutoMode.MANUAL
+        self.goal_usd:     float    = 1.0
+        self.max_loss_usd: float    = 0.0
+        self.leverage:     int      = 5
 
-        # Estado interno
-        self._proposal:      Optional[OrderRequest]   = None
-        self._proposal_ts:   float                     = 0.0
-        self._active:        Optional[TradeRecord]    = None
-        self._log:           List[TradeRecord]         = []   # historial
-        self._last_scan:     float                     = 0.0
-        self._scan_ctr:      int                       = 0    # ticks desde último scan
-        self._trailing_high: float                     = 0.0
-        self._trailing_low:  float                     = 9e9
-        self._last_sl_update: float                    = 0.0
-        self._callbacks:     List[Callable]            = []
+        # Estado interno — multi-posición
+        self._active:        Dict[str, TradeRecord] = {}   # symbol → trade
+        self._pending_exec:  Set[str]               = set()  # symbols en ejecución
+        self._trail_high:    Dict[str, float]       = {}
+        self._trail_low:     Dict[str, float]       = {}
+        self._last_sl_upd:   Dict[str, float]       = {}
 
-        # Para recibir resultados de AsyncBridge (thread-safe via GLib.idle_add)
-        self._pending_exec:  bool                      = False
-        self._last_error:    str                       = ""
-        self._last_error_ts: float                     = 0.0
+        self._proposal:      Optional[OrderRequest] = None
+        self._proposal_ts:   float                  = 0.0
+        self._log:           List[TradeRecord]      = []
+        self._last_scan:     float                  = 0.0
+        self._callbacks:     List[Callable]         = []
+
+        self._last_error:    str   = ""
+        self._last_error_ts: float = 0.0
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -102,7 +97,7 @@ class TradeController:
             return
         log.info("AutoMode: %s → %s", self.mode, mode)
         if mode == AutoMode.MANUAL:
-            self._proposal = None  # cancelar propuesta al pasar a manual
+            self._proposal = None
         self.mode = mode
         self._notify()
 
@@ -120,27 +115,26 @@ class TradeController:
         self.leverage = max(1, min(25, leverage))
 
     def approve_proposal(self) -> None:
-        """SUGGEST: usuario aprobó. Ejecutar la propuesta."""
-        if self._proposal and not self._pending_exec:
+        if self._proposal and self._proposal.symbol not in self._pending_exec:
             self._execute(self._proposal)
 
     def reject_proposal(self) -> None:
-        """SUGGEST: usuario rechazó."""
         self._proposal = None
-        self._last_scan = time.monotonic()  # esperar otro intervalo
+        self._last_scan = time.monotonic()
         self._notify()
 
+    def close_symbol(self, symbol: str) -> None:
+        """Cierra un trade específico a mercado."""
+        trade = self._active.get(symbol)
+        if trade and trade.is_active and trade.request:
+            self._bridge.submit(self._do_close(symbol, trade.request))
+
     def close_now(self) -> None:
-        """Cierre de emergencia a mercado."""
-        if self._active and self._active.is_active:
-            req = self._active.request
-            if req:
-                self._bridge.submit(
-                    self._do_close(self._active.symbol, self._active.request)
-                )
+        """Cierra todos los trades activos (emergencia)."""
+        for sym in list(self._active.keys()):
+            self.close_symbol(sym)
 
     def force_scan(self) -> None:
-        """Forzar un scan inmediato (usuario hizo click en 'Scan ahora')."""
         self._last_scan = 0.0
 
     def on_update(self, callback: Callable[[ControllerState], None]) -> None:
@@ -155,7 +149,7 @@ class TradeController:
             goal_usd       = self.goal_usd,
             proposal       = self._proposal,
             proposal_age_s = prop_age,
-            active_trade   = self._active,
+            active_trades  = list(self._active.values()),
             last_result    = self._log[-1] if self._log else None,
             scan_in        = scan_in,
             status_msg     = self._status_msg(),
@@ -163,46 +157,43 @@ class TradeController:
 
     @property
     def trade_log(self) -> List[TradeRecord]:
-        return list(reversed(self._log[-10:]))   # últimos 10, más reciente primero
+        return list(reversed(self._log[-10:]))
 
     # ── Tick principal (100ms, main thread) ───────────────────────────────────
 
     def tick(
         self,
-        states:   Dict[str, "MarketState"],
-        account:  "AccountState",
-        techs:    Dict[str, "TechSignal"],
-        opps:     Dict[str, "OpportunitySignal"],
-        risk:     "RiskStatus",
+        states:  Dict[str, "MarketState"],
+        account: "AccountState",
+        techs:   Dict[str, "TechSignal"],
+        opps:    Dict[str, "OpportunitySignal"],
+        risk:    "RiskStatus",
     ) -> None:
-
-        # ── Sincronizar trade activo con la cuenta real ────────────────────
-        self._sync_active_trade(account)
+        self._sync_active_trades(account)
 
         if self.mode == AutoMode.MANUAL:
             return
 
-        # ── Circuit breaker: parar todo ────────────────────────────────────
         if risk.is_breaker:
-            if self._active and self._active.is_active:
-                log.warning("Circuit breaker activo — cerrando posición")
+            if self._active:
+                log.warning("Circuit breaker — cerrando todas las posiciones")
                 self.close_now()
             self._proposal = None
             return
 
-        # ── Gestión del trade activo ───────────────────────────────────────
-        if self._active and self._active.is_active:
-            if self.mode == AutoMode.FULL_AUTO:
-                self._manage_active(account, states)
-            return  # no buscar nuevas entradas mientras hay trade activo
+        # Gestionar trades activos en FULL_AUTO
+        if self._active and self.mode == AutoMode.FULL_AUTO:
+            self._manage_active_trades(account, states)
 
-        # ── Scan de oportunidades ──────────────────────────────────────────
+        # Si estamos al límite de posiciones, no escanear
+        if len(self._active) >= MAX_POSITIONS:
+            return
+
         if self._pending_exec:
-            return  # esperando resultado de ejecución
+            return
 
-        # Expirar propuesta antigua
+        # Expirar propuesta vieja
         if self._proposal and (time.monotonic() - self._proposal_ts) > PROPOSAL_TTL:
-            log.debug("Propuesta expirada")
             self._proposal = None
             self._notify()
 
@@ -212,7 +203,7 @@ class TradeController:
                 self._last_scan = time.monotonic()
                 self._run_scan(states, account, techs, opps, risk)
 
-        # Auto-ejecución en modos AUTO
+        # Auto-ejecución
         if self._proposal and self.mode in (AutoMode.AUTO_ENTRY, AutoMode.FULL_AUTO):
             ok, reason = self._pre_flight(self._proposal, account, risk)
             if ok:
@@ -231,8 +222,10 @@ class TradeController:
         opps:    Dict[str, "OpportunitySignal"],
         risk:    "RiskStatus",
     ) -> None:
-        # Log de diagnóstico antes del scan
-        for sym in self._symbols:
+        # Solo escanear símbolos sin posición activa
+        available = [s for s in self._symbols if s not in self._active]
+
+        for sym in available:
             opp  = opps.get(sym)
             tech = techs.get(sym)
             log.debug("scan %s: score=%s has_data=%s",
@@ -241,7 +234,7 @@ class TradeController:
                       tech.has_data if tech else "n/a")
 
         result = self._strategy.scan_all(
-            symbols      = self._symbols,
+            symbols      = available,
             states       = states,
             opps         = opps,
             techs        = techs,
@@ -258,11 +251,13 @@ class TradeController:
                 self._proposal    = proposal
                 self._proposal_ts = time.monotonic()
                 log.info("Nueva propuesta: %s", proposal.summary())
+                if self.mode == AutoMode.SUGGEST:
+                    notifier.proposal_ready(sym, proposal.side, proposal.opp_score, self.goal_usd)
                 self._notify()
             else:
                 log.info("Propuesta descartada (pre-flight): %s — %s", proposal.symbol, reason)
         else:
-            log.info("Scan: sin setup válido (score < %d o filtros técnicos)", 55)
+            log.info("Scan: sin setup válido (score < 55 o filtros técnicos)")
 
     # ── Pre-flight ────────────────────────────────────────────────────────────
 
@@ -274,8 +269,12 @@ class TradeController:
     ) -> tuple[bool, str]:
         if risk.is_breaker:
             return False, "circuit breaker activo"
+        if req.symbol in self._active:
+            return False, f"ya hay posición activa en {req.symbol}"
         if req.symbol in account.positions:
             return False, f"ya hay posición abierta en {req.symbol}"
+        if len(self._active) >= MAX_POSITIONS:
+            return False, f"máximo {MAX_POSITIONS} posiciones simultáneas"
         avail = account.balance.available_balance
         if avail > 0 and req.margin > avail * 0.95:
             return False, f"margen requerido ${req.margin:.2f} > disponible ${avail:.2f}"
@@ -288,12 +287,11 @@ class TradeController:
     # ── Ejecución ─────────────────────────────────────────────────────────────
 
     def _execute(self, req: OrderRequest) -> None:
-        if self._pending_exec:
+        if req.symbol in self._pending_exec:
             return
-        self._pending_exec = True
+        self._pending_exec.add(req.symbol)
         self._proposal = None
 
-        # Crear TradeRecord preliminar
         trade = TradeRecord(
             symbol     = req.symbol,
             request    = req,
@@ -302,21 +300,16 @@ class TradeController:
             current_tp = req.tp_price,
             auto_mode  = self.mode,
         )
-        self._active = trade
+        self._active[req.symbol] = trade
 
         async def _do() -> None:
             await self._executor.set_leverage(req.symbol, req.leverage)
             result = await self._executor.place_market_bracket(req)
-            # Bybit ignora SL/TP en market orders si el fill es instantáneo.
-            # Enviamos set_sl_tp inmediatamente después del fill como confirmación.
             if result.success and (req.sl_price > 0 or req.tp_price > 0):
                 import asyncio as _aio
-                await _aio.sleep(0.5)   # pequeña pausa para que Bybit registre la posición
+                await _aio.sleep(0.5)
                 await self._executor.set_sl_tp(
-                    req.symbol,
-                    sl   = req.sl_price,
-                    tp   = req.tp_price,
-                    side = req.side,
+                    req.symbol, sl=req.sl_price, tp=req.tp_price, side=req.side
                 )
                 log.info("SL/TP confirmados: %s  SL=%s  TP=%s",
                          req.symbol, req.sl_price, req.tp_price)
@@ -327,79 +320,97 @@ class TradeController:
         self._notify()
 
     def _on_order_result(self, result: OrderResult, req: OrderRequest) -> bool:
-        """Callback en main thread (via GLib.idle_add)."""
-        self._pending_exec = False
+        self._pending_exec.discard(req.symbol)
+        trade = self._active.get(req.symbol)
 
         if result.success:
-            if self._active:
-                self._active.state      = TradeState.OPEN
-                self._active.result     = result
-                self._active.opened_at  = int(time.time())
-                # El precio de entrada real vendrá del WebSocket privado
-                self._active.entry_price = req.entry_price
-                self._trailing_high      = req.entry_price
-                self._trailing_low       = req.entry_price
+            if trade:
+                trade.state       = TradeState.OPEN
+                trade.result      = result
+                trade.opened_at   = int(time.time())
+                trade.entry_price = req.entry_price
+                trade.pnl_at_open = 0.0   # se establece en primer tick con account data
+                self._trail_high[req.symbol] = req.entry_price
+                self._trail_low[req.symbol]  = req.entry_price
+                self._last_sl_upd[req.symbol] = 0.0
             log.info("Orden confirmada: %s  id=%s", req.symbol, result.order_id)
+            notifier.trade_opened(
+                req.symbol, req.side, req.entry_price,
+                req.sl_price, req.tp_price, self.goal_usd,
+            )
         else:
             msg = result.error_msg or "error desconocido"
             log.warning("Orden falló: %s — %s", req.symbol, msg)
             self._last_error    = f"✗ {req.symbol}: {msg}"
             self._last_error_ts = time.monotonic()
-            if self._active:
-                self._active.state        = TradeState.FAILED
-                self._active.close_reason = msg
-                self._log.append(self._active)
-                self._active = None
+            notifier.order_failed(req.symbol, msg)
+            if trade:
+                trade.state       = TradeState.FAILED
+                trade.close_reason = msg
+                self._log.append(trade)
+                save_trade(trade)
+                del self._active[req.symbol]
 
         self._notify()
-        return False   # GLib.idle_add no repetir
+        return False
 
-    # ── Gestión del trade activo (FULL_AUTO) ──────────────────────────────────
+    # ── Sincronización con la cuenta ──────────────────────────────────────────
 
-    def _sync_active_trade(self, account: "AccountState") -> None:
-        """
-        Detecta si la posición fue cerrada por SL/TP/manual y actualiza estado.
-        """
-        if not self._active or not self._active.is_active:
-            return
+    def _sync_active_trades(self, account: "AccountState") -> None:
+        """Detecta cierres por SL/TP/manual para todos los trades activos."""
+        closed: List[str] = []
+        for sym, trade in self._active.items():
+            if not trade.is_active:
+                continue
+            pos = account.positions.get(sym)
+            if pos is None or pos.size <= 0:
+                trade.state       = TradeState.CLOSED
+                trade.closed_at   = int(time.time())
+                trade.pnl_usd     = account.daily_pnl - trade.pnl_at_open
+                trade.close_reason = "SL/TP/manual"
+                log.info("Trade cerrado: %s  PnL≈$%.2f", sym, trade.pnl_usd)
+                self._log.append(trade)
+                save_trade(trade)
+                notifier.trade_closed(sym, trade.pnl_usd, trade.close_reason)
+                closed.append(sym)
 
-        sym = self._active.symbol
-        pos = account.positions.get(sym)
-
-        if pos is None or pos.size <= 0:
-            # Posición cerrada
-            self._active.state      = TradeState.CLOSED
-            self._active.closed_at  = int(time.time())
-            self._active.pnl_usd    = account.daily_pnl   # aproximación
-            self._active.close_reason = "SL/TP/manual"
-            log.info("Trade cerrado: %s  PnL≈${:.2f}".format(self._active.pnl_usd),
-                     sym)
-            self._log.append(self._active)
-            self._active = None
+        for sym in closed:
+            self._active.pop(sym, None)
+            self._trail_high.pop(sym, None)
+            self._trail_low.pop(sym, None)
+            self._last_sl_upd.pop(sym, None)
+        if closed:
             self._notify()
 
-    def _manage_active(
+    # ── Gestión activa (FULL_AUTO) ────────────────────────────────────────────
+
+    def _manage_active_trades(
         self,
         account: "AccountState",
         states:  Dict[str, "MarketState"],
     ) -> None:
-        """
-        Gestión activa: breakeven + trailing stop.
-        Solo en FULL_AUTO.
-        """
-        if not self._active:
+        for sym, trade in list(self._active.items()):
+            self._manage_one(sym, trade, account)
+
+    def _manage_one(
+        self,
+        sym:     str,
+        trade:   TradeRecord,
+        account: "AccountState",
+    ) -> None:
+        req = trade.request
+        if not req:
             return
 
-        sym = self._active.symbol
         pos = account.positions.get(sym)
         if not pos or pos.size <= 0:
             return
 
-        mark      = pos.mark_price if pos.mark_price > 0 else pos.entry_price
-        entry     = self._active.entry_price or pos.entry_price
-        sl        = self._active.current_sl
-        tp        = self._active.current_tp
-        is_long   = self._active.request and self._active.request.side == "Buy"
+        mark    = pos.mark_price if pos.mark_price > 0 else pos.entry_price
+        entry   = trade.entry_price or pos.entry_price
+        sl      = trade.current_sl
+        tp      = trade.current_tp
+        is_long = req.side == "Buy"
 
         if entry <= 0 or tp <= 0 or sl <= 0:
             return
@@ -409,80 +420,81 @@ class TradeController:
         if sl_dist <= 0 or tp_dist <= 0:
             return
 
-        # Progreso hacia el TP (0.0 = en entrada, 1.0 = en TP)
-        if is_long:
-            progress = (mark - entry) / tp_dist
-        else:
-            progress = (entry - mark) / tp_dist
+        progress = (mark - entry) / tp_dist if is_long else (entry - mark) / tp_dist
+        now      = time.monotonic()
 
-        now = time.monotonic()
-
-        # ── Breakeven: mover SL a entrada cuando progress >= 50% ──────────
+        # ── Breakeven ─────────────────────────────────────────────────────
         if (
-            self._active.state == TradeState.OPEN
+            trade.state == TradeState.OPEN
             and progress >= BREAKEVEN_AT_PCT
-            and (sl != entry)
+            and sl != entry
         ):
             new_sl = entry
             log.info("Breakeven: %s SL → %s", sym, new_sl)
-            self._active.state      = TradeState.BREAKEVEN
-            self._active.current_sl = new_sl
+            trade.state      = TradeState.BREAKEVEN
+            trade.current_sl = new_sl
             self._bridge.submit(
                 self._executor.set_sl_tp(sym, sl=new_sl, side=req.side)
             )
-            self._last_sl_update = now
+            self._last_sl_upd[sym] = now
+            notifier.breakeven_activated(sym, new_sl)
             self._notify()
 
-        # ── Trailing: activar cuando progress >= 80% ──────────────────────
+        # ── Trailing ──────────────────────────────────────────────────────
         elif (
-            self._active.state in (TradeState.BREAKEVEN, TradeState.TRAILING)
+            trade.state in (TradeState.BREAKEVEN, TradeState.TRAILING)
             and progress >= TRAILING_AT_PCT
-            and (now - self._last_sl_update) >= 5.0   # debounce 5s
+            and (now - self._last_sl_upd.get(sym, 0)) >= 5.0
         ):
-            # Trailing de 1.5x ATR
-            # Usamos ATR guardado en el request (de la propuesta original)
-            # Si no tenemos ATR, usamos el sl_dist como proxy
-            atr = sl_dist / 1.5  # reversing: sl = entry - atr*1.5
-
+            atr = sl_dist / 1.5
             if is_long:
-                self._trailing_high = max(self._trailing_high, mark)
-                new_sl = self._trailing_high - atr * 1.5
-                # Solo actualizar si mejora significativamente
-                if new_sl > self._active.current_sl * (1 + TRAIL_MIN_MOVE_PCT):
-                    log.info("Trailing LONG: %s SL %s → %s", sym,
-                             self._active.current_sl, new_sl)
-                    self._active.state      = TradeState.TRAILING
-                    self._active.current_sl = new_sl
+                self._trail_high[sym] = max(self._trail_high.get(sym, mark), mark)
+                new_sl = self._trail_high[sym] - atr * 1.5
+                if new_sl > trade.current_sl * (1 + TRAIL_MIN_MOVE_PCT):
+                    log.info("Trailing LONG: %s SL %s → %s", sym, trade.current_sl, new_sl)
+                    first_trail = trade.state != TradeState.TRAILING
+                    trade.state      = TradeState.TRAILING
+                    trade.current_sl = new_sl
                     self._bridge.submit(
                         self._executor.set_sl_tp(sym, sl=new_sl, side=req.side)
                     )
-                    self._last_sl_update = now
+                    self._last_sl_upd[sym] = now
+                    if first_trail:
+                        notifier.trailing_activated(sym, new_sl)
                     self._notify()
             else:
-                self._trailing_low = min(self._trailing_low, mark)
-                new_sl = self._trailing_low + atr * 1.5
-                if new_sl < self._active.current_sl * (1 - TRAIL_MIN_MOVE_PCT):
-                    log.info("Trailing SHORT: %s SL %s → %s", sym,
-                             self._active.current_sl, new_sl)
-                    self._active.state      = TradeState.TRAILING
-                    self._active.current_sl = new_sl
+                self._trail_low[sym] = min(self._trail_low.get(sym, mark), mark)
+                new_sl = self._trail_low[sym] + atr * 1.5
+                if new_sl < trade.current_sl * (1 - TRAIL_MIN_MOVE_PCT):
+                    log.info("Trailing SHORT: %s SL %s → %s", sym, trade.current_sl, new_sl)
+                    first_trail = trade.state != TradeState.TRAILING
+                    trade.state      = TradeState.TRAILING
+                    trade.current_sl = new_sl
                     self._bridge.submit(
                         self._executor.set_sl_tp(sym, sl=new_sl, side=req.side)
                     )
-                    self._last_sl_update = now
+                    self._last_sl_upd[sym] = now
+                    if first_trail:
+                        notifier.trailing_activated(sym, new_sl)
                     self._notify()
 
     async def _do_close(self, symbol: str, req: OrderRequest) -> None:
         result = await self._executor.close_position(symbol, req.qty, req.side)
-        GLib.idle_add(self._on_close_result, result)
+        GLib.idle_add(self._on_close_result, symbol, result)
 
-    def _on_close_result(self, result: OrderResult) -> bool:
-        if self._active:
-            self._active.state       = TradeState.CLOSED
-            self._active.closed_at   = int(time.time())
-            self._active.close_reason = "manual close" if result.success else result.error_msg
-            self._log.append(self._active)
-            self._active = None
+    def _on_close_result(self, symbol: str, result: OrderResult) -> bool:
+        trade = self._active.get(symbol)
+        if trade:
+            trade.state       = TradeState.CLOSED
+            trade.closed_at   = int(time.time())
+            trade.close_reason = "manual" if result.success else result.error_msg
+            self._log.append(trade)
+            save_trade(trade)
+            notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
+            del self._active[symbol]
+            self._trail_high.pop(symbol, None)
+            self._trail_low.pop(symbol, None)
+            self._last_sl_upd.pop(symbol, None)
         self._notify()
         return False
 
@@ -498,22 +510,24 @@ class TradeController:
 
     def _status_msg(self) -> str:
         if self._pending_exec:
-            return "Ejecutando orden…"
+            return f"Ejecutando orden… ({', '.join(self._pending_exec)})"
+        if self._last_error and (time.monotonic() - self._last_error_ts) < 30:
+            return self._last_error
         if self._active:
-            t = self._active
-            if t.state == TradeState.SUBMITTED:
-                return f"Esperando fill: {t.symbol}"
-            if t.state == TradeState.OPEN:
-                return f"Posición abierta: {t.symbol}"
-            if t.state == TradeState.BREAKEVEN:
-                return f"Breakeven activo: {t.symbol}"
-            if t.state == TradeState.TRAILING:
-                return f"Trailing activo: {t.symbol}"
+            state_map = {
+                TradeState.SUBMITTED: "WAIT",
+                TradeState.OPEN:      "OPEN",
+                TradeState.BREAKEVEN: "BE",
+                TradeState.TRAILING:  "TR",
+            }
+            parts = [
+                f"{sym.replace('USDT','')}:{state_map.get(t.state, '?')}"
+                for sym, t in self._active.items()
+            ]
+            return "Posiciones: " + "  ".join(parts)
         if self._proposal:
             age = int(time.monotonic() - self._proposal_ts)
             return f"Propuesta lista ({age}s) — confirma o rechaza"
-        if self._last_error and (time.monotonic() - self._last_error_ts) < 30:
-            return self._last_error
         if self.mode == AutoMode.MANUAL:
             return "Modo MANUAL — señales activas"
         remaining = int(SCAN_INTERVAL - (time.monotonic() - self._last_scan))

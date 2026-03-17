@@ -107,6 +107,7 @@ class TradeRecord:
     lowest_price:    float        = 9e9    # para trailing (SHORT)
 
     pnl_usd:         float        = 0.0
+    pnl_at_open:     float        = 0.0    # daily_pnl snapshot al abrir (para calcular PnL del trade)
     close_reason:    str          = ""
     auto_mode:       AutoMode     = AutoMode.MANUAL
 
@@ -136,14 +137,17 @@ class TradeRecord:
 
 # ─── Estado del controlador (para notificar a la UI) ─────────────────────────
 
+MAX_POSITIONS: int = 3    # máximo de trades simultáneos
+
+
 @dataclass
 class ControllerState:
-    mode:            AutoMode    = AutoMode.MANUAL
-    goal_usd:        float       = 1.0
-    proposal:        Optional[OrderRequest] = None
-    proposal_age_s:  int         = 0      # segundos desde que se generó
-    active_trade:    Optional[TradeRecord]  = None
-    last_result:     Optional[TradeRecord]  = None
-    status_msg:      str         = ""
-    error_msg:       str         = ""
-    scan_in:         int         = 0      # segundos para próximo scan
+    mode:            AutoMode         = AutoMode.MANUAL
+    goal_usd:        float            = 1.0
+    proposal:        Optional[OrderRequest]  = None
+    proposal_age_s:  int              = 0
+    active_trades:   List[TradeRecord] = field(default_factory=list)
+    last_result:     Optional[TradeRecord]   = None
+    status_msg:      str              = ""
+    error_msg:       str              = ""
+    scan_in:         int              = 0
