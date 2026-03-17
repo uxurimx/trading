@@ -126,6 +126,33 @@ def save_trade(trade: "TradeRecord") -> None:
         log.error("save_trade falló: %s", e)
 
 
+def get_recent_trades(limit: int = 8) -> list:
+    """Retorna los últimos N trades para el historial compacto."""
+    try:
+        con = get_connection()
+        rows = con.execute("""
+            SELECT symbol, side, state, pnl_usd, close_reason, closed_at, duration_s
+            FROM trade_journal
+            ORDER BY closed_at DESC LIMIT ?
+        """, (limit,)).fetchall()
+        con.close()
+        return [
+            {
+                "symbol":       r[0],
+                "side":         r[1],
+                "state":        r[2],
+                "pnl_usd":      float(r[3] or 0),
+                "close_reason": r[4] or "",
+                "closed_at":    int(r[5] or 0),
+                "duration_s":   int(r[6] or 0),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        log.error("get_recent_trades falló: %s", e)
+        return []
+
+
 def get_journal_stats() -> dict:
     """Estadísticas agregadas del historial de trades."""
     try:

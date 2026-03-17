@@ -20,7 +20,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Pango
 
 from core.order_model import AutoMode, TradeState, ControllerState
-from core.db import get_journal_stats
+from core.db import get_journal_stats, get_recent_trades
 
 if TYPE_CHECKING:
     from core.controller import TradeController
@@ -119,6 +119,53 @@ def _estimate_ttp(entry: float, current: float, tp: float,
         return f"~{int(secs/60)}m"
     else:
         return f"~{int(secs)}s"
+
+
+def _estimate_proposal_ttp(symbol: str, entry: float, tp: float,
+                           market_states: dict) -> str:
+    """
+    Estima el tiempo para alcanzar el TP de una propuesta nueva,
+    basado en la velocidad de precios observada en los últimos 2 minutos.
+    """
+    ms = market_states.get(symbol) if market_states else None
+    if not ms or not ms.trades:
+        return "──"
+    trades = list(ms.trades)
+    now_ms = time.time() * 1000
+    recent = [t for t in trades if now_ms - t.timestamp < 120_000]
+    if len(recent) < 8:
+        recent = trades[-20:]
+    if len(recent) < 5:
+        return "──"
+    prices     = [t.price for t in recent]
+    span_s     = max((recent[-1].timestamp - recent[0].timestamp) / 1000, 1)
+    price_range = max(prices) - min(prices)
+    if price_range <= 0:
+        return "──"
+    velocity = price_range / span_s           # precio por segundo
+    tp_dist  = abs(tp - entry)
+    if velocity <= 0 or tp_dist <= 0:
+        return "──"
+    secs = tp_dist / velocity
+    if secs > 86400:
+        return ">24h"
+    if secs > 3600:
+        return f"~{int(secs/3600)}h{int((secs % 3600)/60)}m"
+    if secs > 60:
+        return f"~{int(secs/60)}m"
+    return f"~{int(secs)}s"
+
+
+def _fmt_duration_s(seconds: int) -> str:
+    if seconds <= 0:
+        return "──"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds//60}m{seconds%60:02d}s"
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    return f"{h}h{m:02d}m"
 
 
 def _trade_risk_analysis(trade: "TradeRecord", pos: Optional["Position"],
@@ -319,15 +366,15 @@ class TradeCard(Gtk.Box):
         self._build()
 
     def _build(self) -> None:
-        # ── Summary (siempre visible) ──────────────────────────────────
-        summary = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        summary.set_margin_start(8); summary.set_margin_end(8)
-        summary.set_margin_top(6);   summary.set_margin_bottom(4)
+        # ── Fila 1: símbolo · estado · PnL · modo · expand · cerrar ───
+        summary = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        summary.set_margin_start(6); summary.set_margin_end(6)
+        summary.set_margin_top(4);   summary.set_margin_bottom(1)
 
         self._sym_lbl   = _ml()
         self._state_lbl = _ml()
         self._pnl_lbl   = _ml()
-        self._time_lbl  = _ml()
+        self._auto_lbl  = _ml()   # muestra estado AUTO / MANUAL
         self._sym_lbl.set_hexpand(True)
 
         self._mode_btn = Gtk.Button(label="▶ AUTO")
@@ -336,10 +383,10 @@ class TradeCard(Gtk.Box):
 
         close_btn = Gtk.Button(label="✗")
         close_btn.add_css_class("destructive-action")
-        close_btn.set_size_request(32, -1)
+        close_btn.set_size_request(30, -1)
         close_btn.connect("clicked", self._on_close)
 
-        expand_btn = Gtk.Button(label="▼ Detalles")
+        expand_btn = Gtk.Button(label="▼")
         expand_btn.add_css_class("flat")
         expand_btn.connect("clicked", self._on_toggle)
         self._expand_btn = expand_btn
@@ -347,36 +394,35 @@ class TradeCard(Gtk.Box):
         summary.append(self._sym_lbl)
         summary.append(self._state_lbl)
         summary.append(self._pnl_lbl)
+        summary.append(self._auto_lbl)
         summary.append(self._mode_btn)
         summary.append(expand_btn)
         summary.append(close_btn)
         self.append(summary)
 
-        # Barra de progreso
+        # ── Fila 2: progreso + duración + ETA ─────────────────────────
+        prog_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        prog_row.set_margin_start(6); prog_row.set_margin_end(6)
+        prog_row.set_margin_bottom(3)
+
         self._prog = Gtk.ProgressBar()
         self._prog.set_show_text(True)
-        self._prog.set_margin_start(8); self._prog.set_margin_end(8)
-        self._prog.set_margin_bottom(4)
-        self.append(self._prog)
-
-        # Tiempo + ETA
-        time_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        time_row.set_margin_start(8); time_row.set_margin_end(8)
-        time_row.set_margin_bottom(6)
+        self._prog.set_hexpand(True)
         self._dur_lbl = _ml()
         self._eta_lbl = _ml()
-        time_row.append(self._dur_lbl)
-        time_row.append(self._eta_lbl)
-        self.append(time_row)
+        prog_row.append(self._prog)
+        prog_row.append(self._dur_lbl)
+        prog_row.append(self._eta_lbl)
+        self.append(prog_row)
 
         # ── Detalle (revealer) ─────────────────────────────────────────
         self._revealer = Gtk.Revealer()
         self._revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         self._revealer.set_transition_duration(200)
 
-        detail_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        detail_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         detail_box.set_margin_start(8); detail_box.set_margin_end(8)
-        detail_box.set_margin_bottom(8)
+        detail_box.set_margin_bottom(6)
         detail_box.append(_sep())
 
         # Niveles
@@ -423,6 +469,17 @@ class TradeCard(Gtk.Box):
                         if trade.auto_mode == AutoMode.FULL_AUTO
                         else AutoMode.FULL_AUTO)
             self._controller.set_trade_mode(self._symbol, new_mode)
+            # Feedback inmediato sin esperar el próximo _refresh
+            if new_mode == AutoMode.FULL_AUTO:
+                self._mode_btn.set_label("⏸ MANUAL")
+                self._mode_btn.set_tooltip_text(
+                    "AUTO activo — el sistema moverá SL a breakeven y aplicará trailing"
+                )
+            else:
+                self._mode_btn.set_label("▶ AUTO")
+                self._mode_btn.set_tooltip_text(
+                    "Click para activar gestión automática (breakeven + trailing)"
+                )
 
     def show_trade(self, trade: "TradeRecord", mark: float, upnl: float) -> None:
         self.set_visible(True)
@@ -482,13 +539,27 @@ class TradeCard(Gtk.Box):
         dur = _fmt_duration(trade.opened_at)
         eta = _estimate_ttp(entry, mark, req.tp_price, trade.opened_at, req.side)
         self._dur_lbl.set_markup(
-            f'<span color="{HEX["sub"]}">⏱ </span>'
-            f'<span color="{HEX["text"]}">{dur}</span>'
+            f'<span color="{HEX["sub"]}" size="small">⏱{dur}</span>'
         )
         self._eta_lbl.set_markup(
-            f'<span color="{HEX["sub"]}">🎯 TP est. </span>'
-            f'<span color="{HEX["teal"]}">{eta}</span>'
+            f'<span color="{HEX["teal"]}" size="small">→{eta}</span>'
         )
+
+        # Indicador de gestión automática (inline, compacto)
+        if trade.auto_mode == AutoMode.FULL_AUTO:
+            auto_map = {
+                TradeState.OPEN:      ("🤖",  "blue"),
+                TradeState.BREAKEVEN: ("🛡",  "buy"),
+                TradeState.TRAILING:  ("📈",  "teal"),
+            }
+            icon, acol = auto_map.get(trade.state, ("🤖", "blue"))
+            self._auto_lbl.set_markup(
+                f'<span color="{HEX[acol]}" size="small">{icon} AUTO</span>'
+            )
+        else:
+            self._auto_lbl.set_markup(
+                f'<span color="{HEX["over"]}" size="small">MANUAL</span>'
+            )
 
         # Detalle (siempre actualizado aunque no esté visible)
         self._levels_lbl.set_markup(
@@ -550,8 +621,12 @@ class TradeCard(Gtk.Box):
 
 # ─── CommandCenter ────────────────────────────────────────────────────────────
 
-class CommandCenter(Gtk.ScrolledWindow):
-    """Pantalla principal de operaciones. Se usa como primera pestaña."""
+class CommandCenter(Gtk.Box):
+    """
+    Pantalla principal de operaciones.
+    Layout 2 columnas:  Izquierda = trades activos (scroll)
+                        Derecha   = propuesta + simulación + journal (scroll)
+    """
 
     def __init__(
         self,
@@ -559,61 +634,26 @@ class CommandCenter(Gtk.ScrolledWindow):
         strategy,
         executor,
     ) -> None:
-        super().__init__()
-        self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_hexpand(True)
         self.set_vexpand(True)
 
-        self._controller = controller
-        self._strategy   = strategy
-        self._executor   = executor
-        self._jnl_ts: float = 0.0
-        self._jnl_log_len: int = -1
+        self._controller    = controller
+        self._strategy      = strategy
+        self._executor      = executor
+        self._jnl_ts:       float = 0.0
+        self._jnl_log_len:  int   = -1
+        self._market_states: dict = {}
+        self._hist_ts:      float = 0.0
 
         controller.on_update(self._on_controller_update)
-
-        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        inner.set_margin_start(16)
-        inner.set_margin_end(16)
-        inner.set_margin_top(8)
-        inner.set_margin_bottom(16)
-        self.set_child(inner)
-        self._inner = inner
-
         self._build()
 
     def _build(self) -> None:
-        inner = self._inner
-
-        # ── Modo ────────────────────────────────────────────────────────
-        inner.append(_section("MODO"))
-        self._mode_btns: dict[AutoMode, Gtk.ToggleButton] = {}
-        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
-                           spacing=0, css_classes=["symbol-group"])
-        first: Optional[Gtk.ToggleButton] = None
-        for mode, (label, _, _desc) in MODE_META.items():
-            btn = Gtk.ToggleButton(label=label)
-            btn.set_active(mode == AutoMode.MANUAL)
-            if first is None:
-                first = btn
-            else:
-                btn.set_group(first)
-            btn.connect("toggled", self._on_mode_toggled, mode)
-            self._mode_btns[mode] = btn
-            mode_box.append(btn)
-        inner.append(mode_box)
-
-        self._mode_desc = _ml()
-        inner.append(self._mode_desc)
-        inner.append(_sep())
-
-        # ── Objetivo + Controles ─────────────────────────────────────────
-        inner.append(_section("OBJETIVO"))
-        goal_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        goal_row.set_margin_bottom(4)
+        P = 8  # padding estándar
 
         def _make_spin(label: str, lo: float, hi: float, val: float,
-                       step: float, digits: int, w: int = 80) -> tuple:
+                       step: float, digits: int, w: int = 68) -> tuple:
             lbl = Gtk.Label(label=label)
             lbl.add_css_class("qts-label")
             sp  = Gtk.SpinButton()
@@ -623,69 +663,158 @@ class CommandCenter(Gtk.ScrolledWindow):
             sp.set_size_request(w, -1)
             return lbl, sp
 
-        gl, self._goal_spin = _make_spin("Ganar $", 0.1, 500, 1.0, 0.5, 2)
-        ll, self._loss_spin = _make_spin("Perder máx $", 0.05, 500, 0.5, 0.25, 2)
-        lel, self._lev_spin = _make_spin("Lev", 1, 25, 5, 1, 0, 55)
-        dl, self._dur_spin  = _make_spin("Dur máx", 0, 480, 0, 15, 0, 65)
-        dur_note = Gtk.Label(label="min")
-        dur_note.add_css_class("qts-label")
+        # ── Barra superior: balance + modo + parámetros + scan (todo en 2 filas)
+        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        top.set_margin_start(P); top.set_margin_end(P)
+        top.set_margin_top(3);   top.set_margin_bottom(2)
 
-        self._goal_spin.connect("value-changed", self._on_goal_changed)
-        self._loss_spin.connect("value-changed", self._on_loss_changed)
-        self._lev_spin.connect("value-changed",  self._on_lev_changed)
-        self._dur_spin.connect("value-changed",  self._on_dur_changed)
+        # Fila A: balance (full width, tamaño pequeño)
+        self._balance_lbl = _ml()
+        self._balance_lbl.set_markup(f'<span color="{HEX["over"]}" size="small">Conectando…</span>')
+        top.append(self._balance_lbl)
 
-        self._scan_btn = Gtk.Button(label="🔍 SCAN AHORA")
+        # Fila B: modo pills + spinners + scan (todo en una fila)
+        ctrl_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        ctrl_row.set_margin_top(2)
+
+        self._mode_btns: dict[AutoMode, Gtk.ToggleButton] = {}
+        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                           spacing=0, css_classes=["symbol-group"])
+        first: Optional[Gtk.ToggleButton] = None
+        for mode, (label, _, desc) in MODE_META.items():
+            btn = Gtk.ToggleButton(label=label)
+            btn.set_active(mode == AutoMode.MANUAL)
+            btn.set_tooltip_text(desc)
+            if first is None:
+                first = btn
+            else:
+                btn.set_group(first)
+            btn.connect("toggled", self._on_mode_toggled, mode)
+            self._mode_btns[mode] = btn
+            mode_box.append(btn)
+        ctrl_row.append(mode_box)
+
+        vsep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        vsep.set_margin_start(4); vsep.set_margin_end(4)
+        ctrl_row.append(vsep)
+
+        gl, self._goal_spin  = _make_spin("$",  0.1, 500, 1.0,  0.5,  2, 60)
+        ll, self._loss_spin  = _make_spin("↓$", 0.05, 500, 0.5, 0.25, 2, 60)
+        lel, self._lev_spin  = _make_spin("x",  1,   25,  5,    1,    0, 42)
+        dl, self._dur_spin   = _make_spin("⏱",  0,  480,  0,   15,    0, 50)
+        ml, self._multi_spin = _make_spin("×",  1,   10,  1,    1,    0, 38)
+
+        self._goal_spin.set_tooltip_text("Meta de ganancia en USD por trade")
+        self._loss_spin.set_tooltip_text("Pérdida máxima aceptada por trade")
+        self._lev_spin.set_tooltip_text("Apalancamiento")
+        self._dur_spin.set_tooltip_text("Duración máxima del trade (0 = sin límite)")
+        self._multi_spin.set_tooltip_text("Número de trades en paralelo para el objetivo")
+
+        self._goal_spin.connect("value-changed",  self._on_goal_changed)
+        self._loss_spin.connect("value-changed",  self._on_loss_changed)
+        self._lev_spin.connect("value-changed",   self._on_lev_changed)
+        self._dur_spin.connect("value-changed",   self._on_dur_changed)
+        self._multi_spin.connect("value-changed", self._on_multi_changed)
+
+        self._scan_btn = Gtk.Button(label="🔍 Scan")
         self._scan_btn.add_css_class("suggested-action")
         self._scan_btn.connect("clicked", lambda _: self._controller.force_scan())
 
+        # modo_desc: inline, compacto
+        self._mode_desc = _ml()
+        self._dur_hint  = _ml()   # se actualiza en _on_dur_changed
+
         for w in [gl, self._goal_spin, ll, self._loss_spin,
-                  lel, self._lev_spin, dl, self._dur_spin, dur_note,
-                  self._scan_btn]:
-            goal_row.append(w)
-        inner.append(goal_row)
+                  lel, self._lev_spin, dl, self._dur_spin,
+                  ml, self._multi_spin, self._scan_btn,
+                  self._mode_desc, self._dur_hint]:
+            ctrl_row.append(w)
+        top.append(ctrl_row)
+        self.append(top)
+        self.append(_sep())
 
-        self._dur_hint = _ml()
-        inner.append(self._dur_hint)
-        inner.append(_sep())
+        # ── Área principal: 2 columnas ───────────────────────────────────
+        main = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        main.set_vexpand(True)
+        main.set_hexpand(True)
 
-        # ── Trades activos ───────────────────────────────────────────────
-        trades_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._trades_title = _section("TRADES ACTIVOS (0)")
-        trades_header.append(self._trades_title)
-        close_all_btn = Gtk.Button(label="✗ Cerrar todo")
+        # ── Columna izquierda: trades activos ────────────────────────────
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        left.set_hexpand(True)
+        left.set_vexpand(True)
+
+        # Header de trades
+        trades_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        trades_hdr.set_margin_start(P); trades_hdr.set_margin_end(P)
+        trades_hdr.set_margin_top(4);   trades_hdr.set_margin_bottom(2)
+        self._trades_title = _section("ACTIVOS (0)")
+        self._total_pnl_lbl = _ml()
+        self._total_pnl_lbl.set_hexpand(True)
+        close_all_btn = Gtk.Button(label="✗ Todo")
         close_all_btn.add_css_class("destructive-action")
         close_all_btn.add_css_class("flat")
         close_all_btn.connect("clicked", lambda _: self._controller.close_now())
-        trades_header.append(close_all_btn)
-        inner.append(trades_header)
-
-        self._trade_cards: dict[str, TradeCard] = {}
-        self._cards_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        inner.append(self._cards_box)
+        trades_hdr.append(self._trades_title)
+        trades_hdr.append(self._total_pnl_lbl)
+        trades_hdr.append(close_all_btn)
+        left.append(trades_hdr)
 
         self._no_trades_lbl = _ml()
         self._no_trades_lbl.set_markup(
-            f'<span color="{HEX["over"]}">Sin trades activos</span>'
+            f'<span color="{HEX["over"]}" size="small">Sin trades activos</span>'
         )
-        inner.append(self._no_trades_lbl)
-        inner.append(_sep())
+        self._no_trades_lbl.set_margin_start(P)
+        left.append(self._no_trades_lbl)
 
-        # ── Propuesta ────────────────────────────────────────────────────
-        inner.append(_section("PROPUESTA"))
-        self._prop_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        # Scroll para las cards de trades
+        left_scroll = Gtk.ScrolledWindow()
+        left_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        left_scroll.set_vexpand(True)
+        left_scroll.set_hexpand(True)
+        self._trade_cards: dict[str, TradeCard] = {}
+        self._cards_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._cards_box.set_margin_start(P); self._cards_box.set_margin_end(P)
+        left_scroll.set_child(self._cards_box)
+        left.append(left_scroll)
+
+        # Status bar al fondo de la columna izquierda
+        self._status_lbl = _ml()
+        self._status_lbl.set_margin_start(P)
+        self._status_lbl.set_margin_bottom(4)
+        left.append(self._status_lbl)
+
+        main.append(left)
+
+        # Separador vertical
+        vsep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        main.append(vsep)
+
+        # ── Columna derecha: propuesta + sim + journal ───────────────────
+        right_scroll = Gtk.ScrolledWindow()
+        right_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        right_scroll.set_vexpand(True)
+        right_scroll.set_size_request(310, -1)
+        right_scroll.set_hexpand(False)
+
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        right.set_margin_start(6); right.set_margin_end(6)
+        right.set_margin_top(3);   right.set_margin_bottom(4)
+
+        # Propuesta
+        right.append(_section("PROPUESTA"))
+        self._prop_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         self._prop_card.add_css_class("qts-card")
         self._prop_card.set_margin_bottom(4)
-
-        self._prop_header  = _ml()
-        self._prop_levels  = _ml()
-        self._prop_sizing  = _ml()
-        self._prop_timer   = _ml()
+        self._prop_header = _ml()
+        self._prop_levels = _ml()
+        self._prop_sizing = _ml()
+        self._prop_ttp    = _ml()
+        self._prop_timer  = _ml()
         for w in [self._prop_header, self._prop_levels,
-                  self._prop_sizing, self._prop_timer]:
+                  self._prop_sizing, self._prop_ttp, self._prop_timer]:
             self._prop_card.append(w)
 
-        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_row.set_margin_top(4)
         self._confirm_btn = Gtk.Button(label="✓ CONFIRMAR")
         self._confirm_btn.add_css_class("suggested-action")
@@ -699,42 +828,42 @@ class CommandCenter(Gtk.ScrolledWindow):
         btn_row.append(self._reject_btn)
         self._confirm_row = btn_row
         self._prop_card.append(btn_row)
-        inner.append(self._prop_card)
-        inner.append(_sep())
+        right.append(self._prop_card)
+        right.append(_sep())
 
-        # ── Simulación + Journal (2 columnas) ────────────────────────────
-        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        bottom.set_margin_top(4)
-
-        sim_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        sim_box.add_css_class("qts-card")
-        sim_box.set_hexpand(True)
-        sim_box.append(_section("SIMULACIÓN"))
+        # Simulación
+        right.append(_section("SIMULACIÓN"))
+        sim_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        sim_card.add_css_class("qts-card")
+        sim_card.set_margin_bottom(4)
         self._sim_line1 = _ml()
         self._sim_line2 = _ml()
         self._sim_line3 = _ml()
         self._sim_warn  = _ml()
         for w in [self._sim_line1, self._sim_line2, self._sim_line3, self._sim_warn]:
-            sim_box.append(w)
+            sim_card.append(w)
+        right.append(sim_card)
+        right.append(_sep())
 
-        jnl_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        jnl_box.add_css_class("qts-card")
-        jnl_box.set_hexpand(True)
-        jnl_box.append(_section("JOURNAL"))
+        # Journal + historial
+        right.append(_section("JOURNAL"))
+        jnl_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        jnl_card.add_css_class("qts-card")
         self._jnl_line1 = _ml()
         self._jnl_line2 = _ml()
         self._jnl_line3 = _ml()
         for w in [self._jnl_line1, self._jnl_line2, self._jnl_line3]:
-            jnl_box.append(w)
+            jnl_card.append(w)
+        jnl_card.append(_sep())
+        self._hist_labels: list = [_ml() for _ in range(8)]
+        for lbl in self._hist_labels:
+            jnl_card.append(lbl)
+        right.append(jnl_card)
 
-        bottom.append(sim_box)
-        bottom.append(jnl_box)
-        inner.append(bottom)
-        inner.append(_sep())
+        right_scroll.set_child(right)
+        main.append(right_scroll)
 
-        # ── Status ───────────────────────────────────────────────────────
-        self._status_lbl = _ml()
-        inner.append(self._status_lbl)
+        self.append(main)
 
         self._render_controller_state(self._controller.state)
 
@@ -753,13 +882,15 @@ class CommandCenter(Gtk.ScrolledWindow):
     def _on_lev_changed(self, sp: Gtk.SpinButton) -> None:
         self._controller.set_leverage(int(sp.get_value()))
 
+    def _on_multi_changed(self, sp: Gtk.SpinButton) -> None:
+        self._controller.set_multi_trades(int(sp.get_value()))
+
     def _on_dur_changed(self, sp: Gtk.SpinButton) -> None:
         minutes = int(sp.get_value())
         self._controller.set_max_duration(minutes)
         if minutes > 0:
             self._dur_hint.set_markup(
-                f'<span color="{HEX["warn"]}" size="small">'
-                f'⏱ Posiciones se cerrarán automáticamente si no alcanzan TP en {minutes} min</span>'
+                f'<span color="{HEX["warn"]}" size="small">⏱ máx {minutes}m</span>'
             )
         else:
             self._dur_hint.set_text("")
@@ -786,9 +917,10 @@ class CommandCenter(Gtk.ScrolledWindow):
                 btn.handler_block_by_func(self._on_mode_toggled)
                 btn.set_active(m == mode)
                 btn.handler_unblock_by_func(self._on_mode_toggled)
-        _, ckey, desc = MODE_META[mode]
+        _, ckey, _desc = MODE_META[mode]
+        short = {"over": "monitoreo", "blue": "sugiere", "warn": "auto-entrada", "sell": "full-auto"}
         self._mode_desc.set_markup(
-            f'<span color="{HEX[ckey]}" size="small">{desc}</span>'
+            f'<span color="{HEX[ckey]}" size="small">{short.get(ckey, "")}</span>'
         )
 
     def _render_proposal(self, cs: ControllerState) -> None:
@@ -797,7 +929,7 @@ class CommandCenter(Gtk.ScrolledWindow):
             self._prop_header.set_markup(
                 f'<span color="{HEX["over"]}">Sin propuesta — escaneando oportunidades…</span>'
             )
-            for w in [self._prop_levels, self._prop_sizing, self._prop_timer]:
+            for w in [self._prop_levels, self._prop_sizing, self._prop_ttp, self._prop_timer]:
                 w.set_text("")
             self._confirm_row.set_visible(False)
             return
@@ -824,6 +956,36 @@ class CommandCenter(Gtk.ScrolledWindow):
             f'  <span color="{HEX["buy"]}">Goal +${goal_real:.2f}</span>'
             f'  <span color="{HEX["sell"]}">Riesgo -${prop.risk_usd:.2f}</span>'
         )
+
+        # Tiempo estimado para alcanzar el TP
+        ttp = _estimate_proposal_ttp(
+            prop.symbol, prop.entry_price, prop.tp_price, self._market_states
+        )
+        max_dur = self._controller.max_duration_min
+        ttp_col = HEX["teal"]
+        ttp_warn = ""
+        if ttp != "──" and max_dur > 0:
+            # Check if estimate exceeds max_duration
+            try:
+                # rough parse of ttp string to minutes
+                raw = ttp.lstrip("~>")
+                if "h" in raw:
+                    parts = raw.split("h")
+                    est_min = int(parts[0]) * 60 + (int(parts[1].replace("m", "")) if parts[1].replace("m", "") else 0)
+                else:
+                    est_min = int(raw.replace("m", "").replace("s", "")) // (1 if "s" in ttp else 1)
+                    if "s" in raw and "m" not in raw:
+                        est_min = 1
+                if est_min > max_dur:
+                    ttp_col  = HEX["warn"]
+                    ttp_warn = f"  ⚠ más de {max_dur}m"
+            except Exception:
+                pass
+        self._prop_ttp.set_markup(
+            f'<span color="{HEX["sub"]}" size="small">⏱ TP est. </span>'
+            f'<span color="{ttp_col}" size="small" weight="bold">{ttp}{ttp_warn}</span>'
+        )
+
         ttl = 60 - cs.proposal_age_s
         self._prop_timer.set_markup(
             f'<span color="{HEX["warn"] if ttl < 20 else HEX["over"]}" size="small">'
@@ -838,28 +1000,53 @@ class CommandCenter(Gtk.ScrolledWindow):
             self._jnl_line1.set_markup(f'<span color="{HEX["over"]}">Sin trades registrados aún</span>')
             self._jnl_line2.set_text("")
             self._jnl_line3.set_text("")
-            return
-        wr_col  = HEX["buy"] if stats["win_rate"] >= 50 else HEX["sell"]
-        pnl_col = HEX["buy"] if stats["total_pnl"] >= 0 else HEX["sell"]
-        sign    = "+" if stats["total_pnl"] >= 0 else ""
-        self._jnl_line1.set_markup(
-            f'<span color="{HEX["sub"]}">W: </span>'
-            f'<span color="{wr_col}" weight="bold">{stats["wins"]}/{total}  ({stats["win_rate"]}%)</span>'
-        )
-        self._jnl_line2.set_markup(
-            f'<span color="{HEX["sub"]}">PnL: </span>'
-            f'<span color="{pnl_col}" weight="bold">{sign}${stats["total_pnl"]}</span>'
-            f'  <span color="{HEX["sub"]}">avg </span>'
-            f'<span color="{HEX["text"]}">{sign}${stats["avg_pnl"]}</span>'
-        )
-        self._jnl_line3.set_markup(
-            f'<span color="{HEX["sub"]}">Best: </span>'
-            f'<span color="{HEX["teal"]}">{stats["best_symbol"]}</span>'
-            f'  <span color="{HEX["sub"]}">AvgScore: </span>'
-            f'<span color="{HEX["text"]}">{stats["avg_score"]}</span>'
-            f'  <span color="{HEX["sub"]}">R:R: </span>'
-            f'<span color="{HEX["text"]}">{stats["avg_rr"]}</span>'
-        )
+        else:
+            wr_col  = HEX["buy"] if stats["win_rate"] >= 50 else HEX["sell"]
+            pnl_col = HEX["buy"] if stats["total_pnl"] >= 0 else HEX["sell"]
+            sign    = "+" if stats["total_pnl"] >= 0 else ""
+            self._jnl_line1.set_markup(
+                f'<span color="{HEX["sub"]}">W: </span>'
+                f'<span color="{wr_col}" weight="bold">{stats["wins"]}/{total}  ({stats["win_rate"]}%)</span>'
+            )
+            self._jnl_line2.set_markup(
+                f'<span color="{HEX["sub"]}">PnL: </span>'
+                f'<span color="{pnl_col}" weight="bold">{sign}${stats["total_pnl"]}</span>'
+                f'  <span color="{HEX["sub"]}">avg </span>'
+                f'<span color="{HEX["text"]}">{sign}${stats["avg_pnl"]}</span>'
+            )
+            self._jnl_line3.set_markup(
+                f'<span color="{HEX["sub"]}">Best: </span>'
+                f'<span color="{HEX["teal"]}">{stats["best_symbol"]}</span>'
+                f'  <span color="{HEX["sub"]}">R:R: </span>'
+                f'<span color="{HEX["text"]}">{stats["avg_rr"]}</span>'
+            )
+
+        # Historial reciente
+        now = time.monotonic()
+        if (now - self._hist_ts) > 15:
+            self._hist_ts = now
+            recent = get_recent_trades(limit=8)
+            for i, lbl in enumerate(self._hist_labels):
+                if i >= len(recent):
+                    lbl.set_text("")
+                    continue
+                t     = recent[i]
+                sym   = t["symbol"].replace("USDT", "")
+                arrow = "▲" if t["side"] == "Buy" else "▼"
+                pnl   = t["pnl_usd"]
+                pcol  = HEX["buy"] if pnl >= 0 else HEX["sell"]
+                sign  = "+" if pnl >= 0 else ""
+                ts_str = (time.strftime("%m/%d %H:%M", time.localtime(t["closed_at"]))
+                          if t["closed_at"] > 0 else "──")
+                dur   = _fmt_duration_s(t["duration_s"])
+                reason = t["close_reason"] or t["state"]
+                lbl.set_markup(
+                    f'<span color="{pcol}" size="small">{arrow} {sym}</span>'
+                    f'  <span color="{pcol}" weight="bold" size="small">{sign}${pnl:.2f}</span>'
+                    f'  <span color="{HEX["sub"]}" size="small">{dur}  {ts_str}'
+                    + (f'  {GLib.markup_escape_text(reason)}' if reason not in ("CLOSED", "SL/TP/manual") else "")
+                    + "</span>"
+                )
 
     def _render_log_for_journal(self) -> None:
         log_entries = self._controller.trade_log
@@ -874,27 +1061,49 @@ class CommandCenter(Gtk.ScrolledWindow):
 
     def update(
         self,
-        account: "AccountState",
-        risk:    "RiskStatus",
-        sim:     Optional[dict] = None,
+        account:       "AccountState",
+        risk:          "RiskStatus",
+        sim:           Optional[dict] = None,
+        market_states: Optional[dict] = None,
     ) -> None:
-        self._render_active_trades(account)
+        self._market_states = market_states or {}
+        self._render_balance(account)
+        self._render_active_trades(account, self._market_states)
         self._render_simulation(sim)
 
-    def _render_active_trades(self, account: "AccountState") -> None:
+    def _render_balance(self, account: "AccountState") -> None:
+        bal = account.balance
+        if not account.connected or bal.total_equity <= 0:
+            self._balance_lbl.set_markup(
+                f'<span color="{HEX["over"]}" size="small">Cuenta: conectando…</span>'
+            )
+            return
+        dpnl_col  = HEX["buy"] if account.daily_pnl >= 0 else HEX["sell"]
+        dpnl_sign = "+" if account.daily_pnl >= 0 else ""
+        self._balance_lbl.set_markup(
+            f'<span color="{HEX["sub"]}" size="small">Equity </span>'
+            f'<span color="{HEX["text"]}" weight="bold" size="small">${bal.total_equity:.2f}</span>'
+            f'  <span color="{HEX["sub"]}" size="small">Disp </span>'
+            f'<span color="{HEX["teal"]}" size="small">${bal.available_balance:.2f}</span>'
+            f'  <span color="{HEX["sub"]}" size="small">Margen </span>'
+            f'<span color="{HEX["warn"]}" size="small">${bal.used_margin:.2f}</span>'
+            f'  <span color="{HEX["sub"]}" size="small">PnL día </span>'
+            f'<span color="{dpnl_col}" weight="bold" size="small">'
+            f'{dpnl_sign}${account.daily_pnl:.2f}</span>'
+        )
+
+    def _render_active_trades(self, account: "AccountState", market_states: dict) -> None:
         actives = list(self._controller._active.values())
         n = len(actives)
         active_syms = {t.symbol for t in actives}
-
-        # Actualizar título
-        self._trades_title.set_text(f"TRADES ACTIVOS ({n})")
-        self._no_trades_lbl.set_visible(n == 0)
 
         # Eliminar cards de trades ya cerrados
         for sym in list(self._trade_cards.keys()):
             if sym not in active_syms:
                 card = self._trade_cards.pop(sym)
                 self._cards_box.remove(card)
+
+        total_upnl = 0.0
 
         # Crear/actualizar cards
         for trade in actives:
@@ -903,11 +1112,41 @@ class CommandCenter(Gtk.ScrolledWindow):
                 card = TradeCard(self._controller)
                 self._trade_cards[sym] = card
                 self._cards_box.append(card)
-            pos   = account.positions.get(sym)
-            mark  = pos.mark_price if pos and pos.mark_price > 0 else (
-                    pos.entry_price if pos else 0.0)
-            upnl  = pos.unrealized_pnl if pos else 0.0
+
+            pos = account.positions.get(sym)
+
+            # Precio en tiempo real: usar ticker del MarketStream (actualiza con cada trade)
+            # Fallback: mark_price de la posición (solo se actualiza en cambios de posición)
+            ms   = market_states.get(sym)
+            mark = ms.ticker.last_price if (ms and ms.ticker.last_price > 0) else (
+                   pos.mark_price if pos and pos.mark_price > 0 else (
+                   pos.entry_price if pos else 0.0))
+
+            # PnL no realizado en tiempo real calculado desde el ticker
+            if pos and pos.size > 0 and mark > 0:
+                if pos.side == "Buy":
+                    upnl = (mark - pos.entry_price) * pos.size
+                else:
+                    upnl = (pos.entry_price - mark) * pos.size
+            else:
+                upnl = pos.unrealized_pnl if pos else 0.0
+
+            total_upnl += upnl
             self._trade_cards[sym].show_trade(trade, mark, upnl)
+
+        # Actualizar encabezado
+        self._trades_title.set_text(f"ACTIVOS ({n})")
+        self._no_trades_lbl.set_visible(n == 0)
+
+        if n > 0:
+            sign    = "+" if total_upnl >= 0 else ""
+            col     = HEX["buy"] if total_upnl >= 0 else HEX["sell"]
+            self._total_pnl_lbl.set_markup(
+                f'<span color="{HEX["sub"]}" size="small">PnL total </span>'
+                f'<span color="{col}" weight="bold">{sign}${total_upnl:.2f}</span>'
+            )
+        else:
+            self._total_pnl_lbl.set_text("")
 
     def _render_simulation(self, sim: Optional[dict]) -> None:
         if not sim or "error" in sim:

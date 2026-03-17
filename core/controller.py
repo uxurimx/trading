@@ -43,8 +43,8 @@ log = logging.getLogger("qts.controller")
 
 SCAN_INTERVAL      = 30
 PROPOSAL_TTL       = 60
-BREAKEVEN_AT_PCT   = 0.50
-TRAILING_AT_PCT    = 0.80
+BREAKEVEN_AT_PCT   = 0.40   # mover SL a entrada cuando progreso >= 40% hacia TP
+TRAILING_AT_PCT    = 0.70   # activar trailing cuando progreso >= 70%
 TRAIL_MIN_MOVE_PCT = 0.003
 
 
@@ -91,6 +91,8 @@ class TradeController:
         self._last_error_ts: float = 0.0
 
         self.max_duration_min: int = 0    # 0 = sin límite
+        self.multi_trades:     int = 1    # cuántos trades en paralelo para alcanzar el goal
+        self._close_confirm:   Dict[str, int] = {}  # ticks consecutivos sin posición
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -118,6 +120,9 @@ class TradeController:
 
     def set_max_duration(self, minutes: int) -> None:
         self.max_duration_min = max(0, minutes)
+
+    def set_multi_trades(self, n: int) -> None:
+        self.multi_trades = max(1, min(10, n))
 
     def set_trade_mode(self, symbol: str, mode: AutoMode) -> None:
         """Cambia el modo de gestión de un trade activo individual."""
@@ -184,6 +189,12 @@ class TradeController:
     ) -> None:
         self._sync_active_trades(account)
 
+        # Gestionar trades activos SIEMPRE (respeta el modo por-trade).
+        # El modo global MANUAL solo bloquea nuevas entradas, no la gestión
+        # de trades que el usuario ha activado individualmente con AUTO.
+        if self._active:
+            self._manage_active_trades(account, states)
+
         if self.mode == AutoMode.MANUAL:
             return
 
@@ -193,10 +204,6 @@ class TradeController:
                 self.close_now()
             self._proposal = None
             return
-
-        # Gestionar trades activos (por modo individual de cada trade)
-        if self._active:
-            self._manage_active_trades(account, states)
 
         if self._pending_exec:
             return
@@ -242,13 +249,14 @@ class TradeController:
                       opp.score if opp else "n/a",
                       tech.has_data if tech else "n/a")
 
+        goal_per_trade = self.goal_usd / max(1, self.multi_trades)
         result = self._strategy.scan_all(
             symbols      = available,
             states       = states,
             opps         = opps,
             techs        = techs,
             account      = account,
-            goal_usd     = self.goal_usd,
+            goal_usd     = goal_per_trade,
             executor     = self._executor,
             leverage     = self.leverage,
             max_loss_usd = self.max_loss_usd,
@@ -346,6 +354,9 @@ class TradeController:
                 req.symbol, req.side, req.entry_price,
                 req.sl_price, req.tp_price, self.goal_usd,
             )
+            # Si quedan slots de multi-trades disponibles, escanear inmediatamente
+            if self.multi_trades > 1 and len(self._active) < self.multi_trades:
+                self._last_scan = 0.0
         else:
             msg = result.error_msg or "error desconocido"
             log.warning("Orden falló: %s — %s", req.symbol, msg)
@@ -435,21 +446,29 @@ class TradeController:
 
             pos = account.positions.get(sym)
             if pos is None or pos.size <= 0:
-                trade.state       = TradeState.CLOSED
-                trade.closed_at   = int(time.time())
-                trade.pnl_usd     = account.daily_pnl - trade.pnl_at_open
+                # Requerir 3 ticks consecutivos sin posición antes de marcar como cerrado.
+                # Esto evita falsos cierres durante reconexiones o carga inicial del WS.
+                self._close_confirm[sym] = self._close_confirm.get(sym, 0) + 1
+                if self._close_confirm[sym] < 3:
+                    continue
+                trade.state        = TradeState.CLOSED
+                trade.closed_at    = int(time.time())
+                trade.pnl_usd      = account.daily_pnl - trade.pnl_at_open
                 trade.close_reason = "SL/TP/manual"
                 log.info("Trade cerrado: %s  PnL≈$%.2f", sym, trade.pnl_usd)
                 self._log.append(trade)
                 save_trade(trade)
                 notifier.trade_closed(sym, trade.pnl_usd, trade.close_reason)
                 closed.append(sym)
+            else:
+                self._close_confirm.pop(sym, None)  # posición activa → resetear contador
 
         for sym in closed:
             self._active.pop(sym, None)
             self._trail_high.pop(sym, None)
             self._trail_low.pop(sym, None)
             self._last_sl_upd.pop(sym, None)
+            self._close_confirm.pop(sym, None)
         if closed:
             self._notify()
 
@@ -464,13 +483,14 @@ class TradeController:
             # Solo gestiona trades con modo FULL_AUTO (global o por trade)
             effective = trade.auto_mode if trade.auto_mode != AutoMode.MANUAL else self.mode
             if effective == AutoMode.FULL_AUTO:
-                self._manage_one(sym, trade, account)
+                self._manage_one(sym, trade, account, states)
 
     def _manage_one(
         self,
         sym:     str,
         trade:   TradeRecord,
         account: "AccountState",
+        states:  Dict[str, "MarketState"] = None,
     ) -> None:
         req = trade.request
         if not req:
@@ -480,7 +500,12 @@ class TradeController:
         if not pos or pos.size <= 0:
             return
 
-        mark    = pos.mark_price if pos.mark_price > 0 else pos.entry_price
+        # Precio en tiempo real del ticker (se actualiza con cada trade)
+        # pos.mark_price es estático — solo cambia cuando Bybit manda posición
+        ms   = states.get(sym) if states else None
+        mark = (ms.ticker.last_price if ms and ms.ticker.last_price > 0
+                else pos.mark_price if pos.mark_price > 0
+                else pos.entry_price)
         entry   = trade.entry_price or pos.entry_price
         sl      = trade.current_sl
         tp      = trade.current_tp

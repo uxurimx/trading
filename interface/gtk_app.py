@@ -1331,6 +1331,7 @@ class MainWindow(Adw.ApplicationWindow):
         controller: "TradeController",
         strategy:   "StrategyEngine",
         executor:   "BybitExecutor",
+        bridge:     "AsyncBridge",
     ) -> None:
         super().__init__(application=app)
         self.stream      = stream
@@ -1339,13 +1340,23 @@ class MainWindow(Adw.ApplicationWindow):
         self.controller  = controller
         self._strategy   = strategy
         self._executor   = executor
+        self._bridge     = bridge
         self._sym    = settings.default_symbol
         self._sym_btns: dict[str, Gtk.ToggleButton] = {}
 
         self.set_title("QTS — Quantum Trading System")
-        self.set_default_size(1280, 760)
-        self.set_size_request(860, 560)
+        self.set_default_size(1200, 720)
+        self.set_size_request(600, 380)
+        self.set_resizable(True)
         self.add_css_class("qts-window")
+
+        # Maximizar al abrir
+        self.connect("show", lambda _: self.maximize())
+
+        # F11 para maximizar/restaurar
+        ctrl = Gtk.EventControllerKey()
+        ctrl.connect("key-pressed", self._on_key_press)
+        self.add_controller(ctrl)
 
         self._trend_analyzer  = TrendAnalyzer()
         self._abs_detector    = AbsorptionDetector()
@@ -1374,15 +1385,7 @@ class MainWindow(Adw.ApplicationWindow):
         # ── Header bar (con ViewSwitcher centrado) ──────────────
         root.append(self._build_header())
 
-        # ── Trend bar ──────────────────────────────────────────
-        self._trend_bar = TrendBar()
-        root.append(self._trend_bar)
-
-        # ── Position bar ───────────────────────────────────────
-        self._pos_bar = PositionBar()
-        root.append(self._pos_bar)
-
-        # ── Pestaña 1: CommandCenter ────────────────────────────
+        # ── Pestaña 1: CommandCenter (sin barras extra — más espacio vertical)
         self._cmd_center = CommandCenter(self.controller, self._strategy, self._executor)
         self._stack.add_titled_with_icon(
             self._cmd_center, "orders", "⚡ Órdenes", "go-next-symbolic"
@@ -1395,6 +1398,12 @@ class MainWindow(Adw.ApplicationWindow):
             hexpand=True,
             vexpand=True,
         )
+
+        # TrendBar y PositionBar solo en el tab de mercado (ahorran ~95px en Órdenes)
+        self._trend_bar = TrendBar()
+        market_box.append(self._trend_bar)
+        self._pos_bar = PositionBar()
+        market_box.append(self._pos_bar)
 
         content = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -1441,6 +1450,16 @@ class MainWindow(Adw.ApplicationWindow):
 
         # ── Timer de refresco (100ms = 10fps) ─────────────────
         GLib.timeout_add(100, self._refresh)
+
+    def _on_key_press(self, ctrl, keyval, keycode, state) -> bool:
+        from gi.repository import Gdk
+        if keyval == Gdk.KEY_F11:
+            if self.is_maximized():
+                self.unmaximize()
+            else:
+                self.maximize()
+            return True
+        return False
 
     def _build_header(self) -> Adw.HeaderBar:
         header = Adw.HeaderBar()
@@ -1499,9 +1518,18 @@ class MainWindow(Adw.ApplicationWindow):
     # ── Loop de refresco ───────────────────────────────────────────────────────
 
     def _refresh(self) -> bool:
+        """Timer de 100ms — SIEMPRE retorna True para no matar el loop."""
+        try:
+            self._do_refresh()
+        except Exception:
+            import logging as _log
+            _log.getLogger("qts.ui").exception("Error en _refresh — UI continúa")
+        return True   # CRÍTICO: nunca dejar de retornar True
+
+    def _do_refresh(self) -> None:
         state = self.stream.states.get(self._sym)
         if not state:
-            return True
+            return
 
         # ── Calcular todos los signals (orden importa: cada uno usa el anterior)
         trend  = self._trend_analyzer.analyze(state)
@@ -1527,7 +1555,7 @@ class MainWindow(Adw.ApplicationWindow):
             if k15 and k1h:
                 self._tech_signal = self._tech_analyzer.analyze(positions[0], k15, k1h)
 
-        # ── Actualizar widgets ──────────────────────────────────────────────
+        # ── Actualizar widgets del tab de mercado ───────────────────────────
         self._trend_bar.update(trend)
         self._pos_bar.update(self.acct.state, risk)
         self._ob_panel.update(state)
@@ -1535,33 +1563,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._tape_panel.update(state)
         self._stats.update(state, sig, opp)
 
-        # ── Cache multi-símbolo para el controller (cada ~3 s) ─────────────
+        # ── Cache multi-símbolo en background (cada ~5 s) ──────────────────
+        # Se corre en el bridge thread para no bloquear GTK con 15 símbolos.
         self._multi_ctr += 1
-        if self._multi_ctr >= 30:
+        if self._multi_ctr >= 50:
             self._multi_ctr = 0
-            for sym in settings.symbol_list:
-                st = self.stream.states.get(sym)
-                if not st:
-                    continue
-                tr_s  = self._trend_analyzer.analyze(st)
-                sig_s = self._abs_detector.analyze(st)
-                lm_s  = self._liq_analyzer.analyze(st)
-                rg_s  = self._regime_clf.classify(st, tr_s)
-                self._multi_opp[sym] = self._opp_scorer.score(sig_s, rg_s, tr_s, lm_s)
-                k15 = self.klines.store.get(sym, "15")
-                k1h = self.klines.store.get(sym, "60")
-                if k15 and k1h:
-                    # TechSignal sin posición: usar posición sintética neutral
-                    from streams.account import Position as _Pos
-                    dummy = _Pos(
-                        symbol=sym, side="Buy", size=1,
-                        entry_price=st.ticker.last_price,
-                        mark_price=st.ticker.last_price,
-                        leverage=5, unrealized_pnl=0,
-                        liquidation_price=0, take_profit=0,
-                        stop_loss=0, margin=1, created_time=0,
-                    )
-                    self._multi_tech[sym] = self._tech_analyzer.analyze(dummy, k15, k1h)
+            self._bridge.submit(self._compute_multi_signals())
 
         # ── Tick del controller ─────────────────────────────────────────────
         self.controller.tick(
@@ -1597,14 +1604,46 @@ class MainWindow(Adw.ApplicationWindow):
 
         # ── Actualizar paneles ──────────────────────────────────────────────
         self._order_panel.update(self.acct.state, risk, sim_dict)
-        self._cmd_center.update(self.acct.state, risk, sim_dict)
+        self._cmd_center.update(self.acct.state, risk, sim_dict,
+                                market_states=self.stream.states)
 
         # ── Escribir JSON para la extensión GNOME Shell (cada ~2 s) ────────
         self._status_writer.tick(
             self._sym, state, sig, opp, risk, trend, self.acct.state
         )
 
-        return True   # True = continuar el timer
+    async def _compute_multi_signals(self) -> None:
+        """Corre en el bridge thread: analiza 15 símbolos sin bloquear GTK."""
+        from streams.account import Position as _Pos
+        new_opp:  dict = {}
+        new_tech: dict = {}
+        for sym in settings.symbol_list:
+            try:
+                st = self.stream.states.get(sym)
+                if not st:
+                    continue
+                tr_s  = self._trend_analyzer.analyze(st)
+                sig_s = self._abs_detector.analyze(st)
+                lm_s  = self._liq_analyzer.analyze(st)
+                rg_s  = self._regime_clf.classify(st, tr_s)
+                new_opp[sym] = self._opp_scorer.score(sig_s, rg_s, tr_s, lm_s)
+                k15 = self.klines.store.get(sym, "15")
+                k1h = self.klines.store.get(sym, "60")
+                if k15 and k1h:
+                    dummy = _Pos(
+                        symbol=sym, side="Buy", size=1,
+                        entry_price=st.ticker.last_price,
+                        mark_price=st.ticker.last_price,
+                        leverage=5, unrealized_pnl=0,
+                        liquidation_price=0, take_profit=0,
+                        stop_loss=0, margin=1, created_time=0,
+                    )
+                    new_tech[sym] = self._tech_analyzer.analyze(dummy, k15, k1h)
+            except Exception:
+                pass
+        # Merge results back (GIL protege los dict writes simples)
+        self._multi_opp.update(new_opp)
+        self._multi_tech.update(new_tech)
 
 
 # ─── Aplicación ───────────────────────────────────────────────────────────────
@@ -1664,6 +1703,7 @@ class QTSApplication(Adw.Application):
             controller = self._controller,
             strategy   = self._strategy,
             executor   = self._executor,
+            bridge     = self._bridge,
         )
         win.present()
 
