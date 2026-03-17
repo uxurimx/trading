@@ -5,7 +5,14 @@ Lanza la ventana nativa GTK4 + libadwaita para GNOME/Fedora.
 
 Alternativa terminal:   python main_terminal.py
 """
+import logging
 import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(name)-20s  %(levelname)s  %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 try:
     import gi

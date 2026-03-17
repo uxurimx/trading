@@ -41,6 +41,11 @@ from core.config import settings
 from core.risk import RiskFortress, RiskStatus, OK_STATUS
 from core.status_writer import StatusWriter
 from core.technicals import TradeContextAnalyzer, TechSignal, NEUTRAL_TECH
+from core.executor import BybitExecutor
+from core.strategy import StrategyEngine
+from core.controller import TradeController
+from core.order_model import AutoMode
+from interface.order_panel import OrderPanel
 from streams.account import AccountStream, AccountState, Position, AccountBalance
 from streams.klines import KlineStream
 from streams.market import CandleCVD, MarketState, MarketStream
@@ -1123,11 +1128,11 @@ class IntelPanel(Gtk.Box):
         if state.connected:
             elapsed = time.time() - state.last_update
             if elapsed < 2.0:
-                st, cls = "● FUTUROS", "status-live"
+                st, st_col = "● FUTUROS", HEX["buy"]
             else:
-                st, cls = f"◐ {elapsed:.0f}s", "status-slow"
+                st, st_col = f"◐ {elapsed:.0f}s", HEX["warn"]
         else:
-            st, cls = "○ conectando…", "status-offline"
+            st, st_col = "○ conectando…", HEX["over"]
 
         spot_s = (
             f'<span color="{HEX["teal"]}"> · SPOT ●</span>'
@@ -1135,7 +1140,7 @@ class IntelPanel(Gtk.Box):
             else f'<span color="{HEX["over"]}"> · SPOT ○</span>'
         )
         self._status_lbl.set_markup(
-            f'<span class="{cls}" weight="bold">{st}</span>{spot_s}'
+            f'<span color="{st_col}" weight="bold">{st}</span>{spot_s}'
         )
 
 
@@ -1318,15 +1323,21 @@ class MainWindow(Adw.ApplicationWindow):
 
     def __init__(
         self,
-        app:    Adw.Application,
-        stream: MarketStream,
-        acct:   AccountStream,
-        klines: KlineStream,
+        app:        Adw.Application,
+        stream:     MarketStream,
+        acct:       AccountStream,
+        klines:     KlineStream,
+        controller: "TradeController",
+        strategy:   "StrategyEngine",
+        executor:   "BybitExecutor",
     ) -> None:
         super().__init__(application=app)
-        self.stream  = stream
-        self.acct    = acct
-        self.klines  = klines
+        self.stream      = stream
+        self.acct        = acct
+        self.klines      = klines
+        self.controller  = controller
+        self._strategy   = strategy
+        self._executor   = executor
         self._sym    = settings.default_symbol
         self._sym_btns: dict[str, Gtk.ToggleButton] = {}
 
@@ -1345,6 +1356,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._tech_analyzer   = TradeContextAnalyzer()
         self._tech_signal     = NEUTRAL_TECH
         self._kline_req_ctr   = 199  # forzar fetch inmediato en primer ciclo
+        # Cache multi-símbolo para el controller (actualizado cada ~3s = 30 ciclos)
+        self._multi_opp:  dict = {}
+        self._multi_tech: dict = {}
+        self._multi_ctr:  int  = 0
 
         # ── Layout raíz ────────────────────────────────────────
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -1387,9 +1402,12 @@ class MainWindow(Adw.ApplicationWindow):
         intel_scroll.set_hexpand(False)
         intel_scroll.set_vexpand(True)
 
+        self._order_panel = OrderPanel(self.controller)
+
         content.append(self._ob_panel)
         content.append(intel_scroll)
         content.append(self._tape_panel)
+        content.append(self._order_panel)
         root.append(content)
 
         # ── Stats bar ──────────────────────────────────────────
@@ -1469,11 +1487,12 @@ class MainWindow(Adw.ApplicationWindow):
         # ── Riesgo de cuenta ───────────────────────────────────────────────
         risk = self._risk_fortress.check(self.acct.state)
 
-        # ── Técnicos: solicitar klines cada ~20 s; calcular si hay posición ──
+        # ── Técnicos: solicitar klines para TODOS los símbolos cada ~20 s ────
         self._kline_req_ctr += 1
         if self._kline_req_ctr >= 200:
             self._kline_req_ctr = 0
-            self.klines.request(self._sym)
+            for _s in settings.symbol_list:
+                self.klines.request(_s)
 
         positions = self.acct.state.open_positions()
         if positions:
@@ -1490,6 +1509,72 @@ class MainWindow(Adw.ApplicationWindow):
         self._tape_panel.update(state)
         self._stats.update(state, sig, opp)
 
+        # ── Cache multi-símbolo para el controller (cada ~3 s) ─────────────
+        self._multi_ctr += 1
+        if self._multi_ctr >= 30:
+            self._multi_ctr = 0
+            for sym in settings.symbol_list:
+                st = self.stream.states.get(sym)
+                if not st:
+                    continue
+                tr_s  = self._trend_analyzer.analyze(st)
+                sig_s = self._abs_detector.analyze(st)
+                lm_s  = self._liq_analyzer.analyze(st)
+                rg_s  = self._regime_clf.classify(st, tr_s)
+                self._multi_opp[sym] = self._opp_scorer.score(sig_s, rg_s, tr_s, lm_s)
+                k15 = self.klines.store.get(sym, "15")
+                k1h = self.klines.store.get(sym, "60")
+                if k15 and k1h:
+                    # TechSignal sin posición: usar posición sintética neutral
+                    from streams.account import Position as _Pos
+                    dummy = _Pos(
+                        symbol=sym, side="Buy", size=1,
+                        entry_price=st.ticker.last_price,
+                        mark_price=st.ticker.last_price,
+                        leverage=5, unrealized_pnl=0,
+                        liquidation_price=0, take_profit=0,
+                        stop_loss=0, margin=1, created_time=0,
+                    )
+                    self._multi_tech[sym] = self._tech_analyzer.analyze(dummy, k15, k1h)
+
+        # ── Tick del controller ─────────────────────────────────────────────
+        self.controller.tick(
+            states  = self.stream.states,
+            account = self.acct.state,
+            techs   = self._multi_tech,
+            opps    = self._multi_opp,
+            risk    = risk,
+        )
+
+        # ── Simulación para el OrderPanel ──────────────────────────────────
+        cs      = self.controller.state
+        sim_sym = (
+            cs.active_trade.symbol
+            if cs.active_trade and cs.active_trade.is_active
+            else self._sym
+        )
+        sim_state = self.stream.states.get(sim_sym)
+        sim_tech  = self._multi_tech.get(sim_sym) or self._tech_signal
+        sim_entry = sim_state.ticker.last_price if sim_state else 0.0
+        sim_atr   = sim_tech.atr_15m if (sim_tech and sim_tech.has_data) else 0.0
+        equity    = self.acct.state.balance.total_equity
+
+        sim_dict: Optional[dict] = None
+        if sim_entry > 0 and sim_atr > 0 and equity > 0:
+            sim_dict = self._strategy.simulate(
+                equity       = equity,
+                goal_usd     = self.controller.goal_usd,
+                max_loss_usd = self.controller.max_loss_usd,
+                entry        = sim_entry,
+                atr          = sim_atr,
+                leverage     = self.controller.leverage,
+                executor     = self._executor,
+                symbol       = sim_sym,
+            )
+
+        # ── Actualizar order panel ──────────────────────────────────────────
+        self._order_panel.update(self.acct.state, risk, sim_dict)
+
         # ── Escribir JSON para la extensión GNOME Shell (cada ~2 s) ────────
         self._status_writer.tick(
             self._sym, state, sig, opp, risk, trend, self.acct.state
@@ -1504,10 +1589,19 @@ class QTSApplication(Adw.Application):
 
     def __init__(self) -> None:
         super().__init__(application_id="com.qts.trading")
-        self._stream = MarketStream()
-        self._acct   = AccountStream()
-        self._klines = KlineStream()
-        self._bridge = AsyncBridge()
+        self._stream   = MarketStream()
+        self._acct     = AccountStream()
+        self._klines   = KlineStream()
+        self._bridge   = AsyncBridge()
+        self._executor = BybitExecutor()
+        self._strategy = StrategyEngine()
+        self._controller = TradeController(
+            executor      = self._executor,
+            strategy      = self._strategy,
+            risk_fortress = RiskFortress(),
+            bridge        = self._bridge,
+            symbols       = settings.symbol_list,
+        )
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
@@ -1532,9 +1626,21 @@ class QTSApplication(Adw.Application):
         self._bridge.submit(self._stream.start())
         self._bridge.submit(self._acct.start())
         self._bridge.submit(self._klines.start())
+        # Pre-cargar info de instrumentos para validaciones de orden
+        self._bridge.submit(
+            self._executor.load_all_instruments(settings.symbol_list)
+        )
 
     def do_activate(self) -> None:
-        win = MainWindow(app=self, stream=self._stream, acct=self._acct, klines=self._klines)
+        win = MainWindow(
+            app        = self,
+            stream     = self._stream,
+            acct       = self._acct,
+            klines     = self._klines,
+            controller = self._controller,
+            strategy   = self._strategy,
+            executor   = self._executor,
+        )
         win.present()
 
 
