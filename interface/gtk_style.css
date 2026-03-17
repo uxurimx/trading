@@ -100,6 +100,15 @@ headerbar {
     border-radius: 0 8px 8px 0;
 }
 
+/* ── Position bar ─────────────────────────────────────────────── */
+
+.qts-posbar {
+    background-color: alpha(@window_fg_color, 0.04);
+    border-bottom: 1px solid alpha(@window_fg_color, 0.08);
+    padding: 4px 8px;
+    min-height: 28px;
+}
+
 /* ── Trend bar ────────────────────────────────────────────────── */
 
 .qts-trendbar {

@@ -38,6 +38,8 @@ from core.regime import (
     NEUTRAL_REGIME, NEUTRAL_OPP,
 )
 from core.config import settings
+from core.risk import RiskFortress, RiskStatus, OK_STATUS
+from streams.account import AccountStream, AccountState, Position, AccountBalance
 from streams.market import CandleCVD, MarketState, MarketStream
 
 
@@ -390,6 +392,150 @@ class ScoreBar(Gtk.DrawingArea):
         cr.arc(fill_w - radius, radius, radius, -math.pi / 2, math.pi / 2)
         cr.close_path()
         cr.fill()
+
+
+# ─── Widget: Position Bar ────────────────────────────────────────────────────
+
+class PositionBar(Gtk.Box):
+    """
+    Barra horizontal que muestra posiciones abiertas + estado de riesgo.
+    Se actualiza desde AccountStream (datos de cuenta privada).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.add_css_class("qts-posbar")
+
+        # Posiciones (izquierda, hexpand)
+        self._pos_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        self._pos_box.set_hexpand(True)
+        self._pos_box.set_margin_start(12)
+        self._pos_lbl = Gtk.Label()
+        self._pos_lbl.add_css_class("qts-mono-sm")
+        self._pos_lbl.set_use_markup(True)
+        self._pos_lbl.set_xalign(0)
+        self._pos_lbl.set_hexpand(True)
+        self._pos_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        self._pos_box.append(self._pos_lbl)
+        self.append(self._pos_box)
+
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        sep.set_margin_start(8)
+        sep.set_margin_end(8)
+        self.append(sep)
+
+        # Balance (centro)
+        self._bal_lbl = Gtk.Label()
+        self._bal_lbl.add_css_class("qts-mono-sm")
+        self._bal_lbl.set_use_markup(True)
+        self._bal_lbl.set_margin_end(12)
+        self._bal_lbl.set_width_chars(26)
+        self.append(self._bal_lbl)
+
+        sep2 = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        sep2.set_margin_end(8)
+        self.append(sep2)
+
+        # Riesgo (derecha)
+        self._risk_lbl = Gtk.Label()
+        self._risk_lbl.add_css_class("qts-mono-sm")
+        self._risk_lbl.set_use_markup(True)
+        self._risk_lbl.set_margin_end(12)
+        self._risk_lbl.set_width_chars(34)
+        self._risk_lbl.set_xalign(0)
+        self.append(self._risk_lbl)
+
+    def update(self, acct: AccountState, risk: RiskStatus) -> None:
+        self._render_positions(acct)
+        self._render_balance(acct.balance, risk)
+        self._render_risk(risk)
+
+    def _render_positions(self, acct: AccountState) -> None:
+        positions = acct.open_positions()
+
+        if not acct.connected and not positions:
+            key_color = HEX["over"]
+            if acct.error:
+                self._pos_lbl.set_markup(
+                    f'<span color="{HEX["sell"]}" size="small">⚠ {GLib.markup_escape_text(acct.error)}</span>'
+                )
+            else:
+                self._pos_lbl.set_markup(
+                    f'<span color="{HEX["over"]}">○ conectando cuenta…</span>'
+                )
+            return
+
+        if not positions:
+            self._pos_lbl.set_markup(
+                f'<span color="{HEX["over"]}">── Sin posiciones abiertas</span>'
+            )
+            return
+
+        parts = []
+        for pos in positions:
+            col   = HEX["buy"] if pos.is_long else HEX["sell"]
+            pnlc  = HEX["buy"] if pos.unrealized_pnl >= 0 else HEX["sell"]
+            arrow = "▲" if pos.is_long else "▼"
+            pnl_s = f"{pos.unrealized_pnl:+.2f}"
+            pct_s = f"{pos.pnl_pct:+.1f}%"
+
+            liq_str = ""
+            if pos.liquidation_price > 0:
+                d = pos.distance_to_liq_pct
+                liq_col = HEX["sell"] if d < 5 else (HEX["warn"] if d < 10 else HEX["sub"])
+                liq_str = (
+                    f'  <span color="{liq_col}">Liq {fp(pos.liquidation_price)}</span>'
+                )
+
+            sl_str = f'  <span color="{HEX["sub"]}">SL {fp(pos.stop_loss)}</span>' if pos.stop_loss > 0 else ""
+            tp_str = f'  <span color="{HEX["sub"]}">TP {fp(pos.take_profit)}</span>' if pos.take_profit > 0 else ""
+
+            parts.append(
+                f'<span color="{col}" weight="bold">{arrow} {pos.side_label} {pos.symbol}</span>'
+                f'<span color="{HEX["text"]}">  {fq(pos.size)} @ {fp(pos.entry_price)}</span>'
+                f'  <span color="{HEX["sub"]}">▶</span>'
+                f'  <span color="{HEX["text"]}">{fp(pos.mark_price)}</span>'
+                f'  <span color="{pnlc}" weight="bold">{pnl_s} ({pct_s})</span>'
+                f'{liq_str}{sl_str}{tp_str}'
+            )
+
+        self._pos_lbl.set_markup("    ".join(parts))
+
+    def _render_balance(self, b: AccountBalance, risk: RiskStatus) -> None:
+        if b.total_equity <= 0:
+            self._bal_lbl.set_markup(f'<span color="{HEX["over"]}">Equity ──</span>')
+            return
+
+        dpnl_col = HEX["buy"] if risk.daily_pnl_usd >= 0 else HEX["sell"]
+        upnl_col = HEX["buy"] if b.unrealized_pnl >= 0 else HEX["sell"]
+
+        self._bal_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">Equity </span>'
+            f'<span color="{HEX["text"]}" weight="bold">${b.total_equity:,.0f}</span>'
+            f'<span color="{HEX["sub"]}">  Día </span>'
+            f'<span color="{dpnl_col}" weight="bold">{risk.daily_pnl_usd:+.0f}</span>'
+            f'<span color="{HEX["sub"]}">  nPnL </span>'
+            f'<span color="{upnl_col}">{b.unrealized_pnl:+.2f}</span>'
+        )
+
+    def _render_risk(self, risk: RiskStatus) -> None:
+        col = HEX[risk.color_key]
+
+        if risk.is_breaker:
+            self._risk_lbl.set_markup(
+                f'<span color="{col}" weight="bold">{risk.icon} CIRCUIT BREAKER  </span>'
+                f'<span color="{HEX["sell"]}">{GLib.markup_escape_text(risk.message)}</span>'
+            )
+        elif risk.is_warning:
+            self._risk_lbl.set_markup(
+                f'<span color="{col}" weight="bold">{risk.icon} {GLib.markup_escape_text(risk.message)}</span>'
+                f'<span color="{HEX["sub"]}">  Mrgn {risk.margin_pct:.0f}%</span>'
+            )
+        else:
+            self._risk_lbl.set_markup(
+                f'<span color="{col}">{risk.icon} OK</span>'
+                f'<span color="{HEX["sub"]}">  Día {risk.daily_pnl_pct:+.2f}%  Mrgn {risk.margin_pct:.0f}%</span>'
+            )
 
 
 # ─── Panel: Orderbook ────────────────────────────────────────────────────────
@@ -1042,9 +1188,15 @@ class StatsBar(Gtk.Box):
 
 class MainWindow(Adw.ApplicationWindow):
 
-    def __init__(self, app: Adw.Application, stream: MarketStream) -> None:
+    def __init__(
+        self,
+        app:    Adw.Application,
+        stream: MarketStream,
+        acct:   AccountStream,
+    ) -> None:
         super().__init__(application=app)
         self.stream  = stream
+        self.acct    = acct
         self._sym    = settings.default_symbol
         self._sym_btns: dict[str, Gtk.ToggleButton] = {}
 
@@ -1058,6 +1210,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._liq_analyzer    = LiquidityAnalyzer()
         self._regime_clf      = RegimeClassifier()
         self._opp_scorer      = OpportunityScorer()
+        self._risk_fortress   = RiskFortress()
 
         # ── Layout raíz ────────────────────────────────────────
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -1069,6 +1222,10 @@ class MainWindow(Adw.ApplicationWindow):
         # ── Trend bar ──────────────────────────────────────────
         self._trend_bar = TrendBar()
         root.append(self._trend_bar)
+
+        # ── Position bar ───────────────────────────────────────
+        self._pos_bar = PositionBar()
+        root.append(self._pos_bar)
 
         # ── Paneles principales ────────────────────────────────
         content = Gtk.Box(
@@ -1175,8 +1332,12 @@ class MainWindow(Adw.ApplicationWindow):
         regime = self._regime_clf.classify(state, trend)
         opp    = self._opp_scorer.score(sig, regime, trend, lmap)
 
+        # ── Riesgo de cuenta ───────────────────────────────────────────────
+        risk = self._risk_fortress.check(self.acct.state)
+
         # ── Actualizar widgets ──────────────────────────────────────────────
         self._trend_bar.update(trend)
+        self._pos_bar.update(self.acct.state, risk)
         self._ob_panel.update(state)
         self._intel_panel.update(state, sig, lmap, opp)
         self._tape_panel.update(state)
@@ -1192,6 +1353,7 @@ class QTSApplication(Adw.Application):
     def __init__(self) -> None:
         super().__init__(application_id="com.qts.trading")
         self._stream = MarketStream()
+        self._acct   = AccountStream()
         self._bridge = AsyncBridge()
 
     def do_startup(self) -> None:
@@ -1212,12 +1374,13 @@ class QTSApplication(Adw.Application):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
-        # Arrancar async bridge + streams
+        # Arrancar async bridge + streams (mercado + cuenta en paralelo)
         self._bridge.start()
         self._bridge.submit(self._stream.start())
+        self._bridge.submit(self._acct.start())
 
     def do_activate(self) -> None:
-        win = MainWindow(app=self, stream=self._stream)
+        win = MainWindow(app=self, stream=self._stream, acct=self._acct)
         win.present()
 
 
