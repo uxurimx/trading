@@ -30,6 +30,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 from core.absorption import AbsorptionDetector, AbsorptionSignal, NEUTRAL_SIGNAL
+from core.liquidity import LiquidityAnalyzer, LiquidityMap, LiquidityLevel, _EMPTY_MAP
+from core.trend import TrendAnalyzer, TrendSignal, NEUTRAL_TREND, TIMEFRAMES
 from core.config import settings
 from streams.market import CandleCVD, MarketState, MarketStream
 
@@ -241,6 +243,106 @@ class BuyPctBar(Gtk.DrawingArea):
         cr.fill()
 
 
+# ─── Widget: Trend Bar ───────────────────────────────────────────────────────
+
+class TrendBar(Gtk.Box):
+    """
+    Barra horizontal de tendencia multi-timeframe.
+    Muestra un bloque coloreado por cada TF con su dirección,
+    más el score de alineación total.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self.add_css_class("qts-trendbar")
+
+        # Etiqueta fija
+        hdr = Gtk.Label(label="TENDENCIA")
+        hdr.add_css_class("qts-label")
+        hdr.set_margin_start(12)
+        hdr.set_margin_end(10)
+        self.append(hdr)
+
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        sep.set_margin_start(4)
+        sep.set_margin_end(4)
+        self.append(sep)
+
+        # Bloques por timeframe
+        self._tf_boxes: dict[str, Gtk.Label] = {}
+        for label, _, _ in TIMEFRAMES:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            box.set_margin_start(6)
+            box.set_margin_end(6)
+
+            val_lbl = Gtk.Label()
+            val_lbl.add_css_class("qts-mono")
+            val_lbl.set_use_markup(True)
+            val_lbl.set_markup(
+                f'<span color="{HEX["over"]}"><b>─</b></span>'
+            )
+
+            key_lbl = Gtk.Label(label=label)
+            key_lbl.add_css_class("qts-label")
+
+            box.append(val_lbl)
+            box.append(key_lbl)
+            self.append(box)
+            self._tf_boxes[label] = val_lbl
+
+        sep2 = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        sep2.set_margin_start(6)
+        sep2.set_margin_end(8)
+        self.append(sep2)
+
+        # Dirección + score
+        self._dir_lbl = Gtk.Label()
+        self._dir_lbl.add_css_class("qts-mono-sm")
+        self._dir_lbl.set_use_markup(True)
+        self._dir_lbl.set_margin_end(8)
+        self._dir_lbl.set_width_chars(22)
+        self._dir_lbl.set_xalign(0)
+        self.append(self._dir_lbl)
+
+        # Barra de score
+        self._score_bar = ScoreBar()
+        self._score_bar.set_size_request(90, 8)
+        self._score_bar.set_hexpand(False)
+        self._score_bar.set_valign(Gtk.Align.CENTER)
+        self._score_bar.set_margin_end(8)
+        self.append(self._score_bar)
+
+        self._score_lbl = Gtk.Label()
+        self._score_lbl.add_css_class("qts-mono-sm")
+        self._score_lbl.set_use_markup(True)
+        self._score_lbl.set_margin_end(12)
+        self.append(self._score_lbl)
+
+    def update(self, sig: TrendSignal) -> None:
+        for tf in sig.timeframes:
+            lbl = self._tf_boxes.get(tf.label)
+            if lbl is None:
+                continue
+            col = HEX[tf.color_key]
+            lbl.set_markup(f'<span color="{col}" weight="bold">{tf.glyph}</span>')
+
+        col = HEX[sig.color_key]
+        if sig.direction != "NEUTRAL":
+            self._dir_lbl.set_markup(
+                f'<span color="{col}" weight="bold">{sig.label}</span>'
+                f'<span color="{HEX["sub"]}">  {sig.aligned}/{sig.total} TF</span>'
+            )
+        else:
+            self._dir_lbl.set_markup(
+                f'<span color="{HEX["over"]}">SIN TENDENCIA</span>'
+            )
+
+        self._score_bar.update(sig.score, sig.color_key)
+        self._score_lbl.set_markup(
+            f'<span color="{col}" weight="bold">{sig.score}%</span>'
+        )
+
+
 # ─── Widget: Score Bar (Cairo) ───────────────────────────────────────────────
 
 class ScoreBar(Gtk.DrawingArea):
@@ -382,8 +484,9 @@ class IntelPanel(Gtk.Box):
     def __init__(self) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.add_css_class("qts-card")
-        self.set_size_request(310, -1)
+        self.set_size_request(320, -1)
         self._absorption = AbsorptionDetector()
+        self._liquidity  = LiquidityAnalyzer()
 
         # Título
         title = Gtk.Label(label="INTELIGENCIA")
@@ -484,6 +587,28 @@ class IntelPanel(Gtk.Box):
 
         self.append(self._sep())
 
+        # Mapa de Liquidez
+        liq_sec = Gtk.Label(label="LIQUIDEZ")
+        liq_sec.add_css_class("qts-section")
+        liq_sec.set_xalign(0)
+        self.append(liq_sec)
+
+        # Filas: N_LIQ_ROWS arriba + precio + N_LIQ_ROWS abajo
+        N = 4
+        self._liq_above = [self._row_label() for _ in range(N)]
+        self._liq_price = self._row_label()
+        self._liq_below = [self._row_label() for _ in range(N)]
+        self._liq_ctx   = self._mlabel()
+
+        for lbl in self._liq_above:
+            self.append(lbl)
+        self.append(self._liq_price)
+        for lbl in self._liq_below:
+            self.append(lbl)
+        self.append(self._liq_ctx)
+
+        self.append(self._sep())
+
         # Status
         self._status_lbl = self._mlabel()
         self.append(self._status_lbl)
@@ -491,6 +616,13 @@ class IntelPanel(Gtk.Box):
     def _mlabel(self, size: str = "", bold: bool = False) -> Gtk.Label:
         lbl = Gtk.Label()
         lbl.add_css_class("qts-mono")
+        lbl.set_xalign(0)
+        lbl.set_use_markup(True)
+        return lbl
+
+    def _row_label(self) -> Gtk.Label:
+        lbl = Gtk.Label()
+        lbl.add_css_class("qts-mono-sm")
         lbl.set_xalign(0)
         lbl.set_use_markup(True)
         return lbl
@@ -507,6 +639,60 @@ class IntelPanel(Gtk.Box):
         return (
             f'<span color="{HEX["sub"]}">{k:<10}</span>'
             f'<span color="{val_color}"{w}>{v}</span>'
+        )
+
+    # ── Renderizado del mapa de liquidez ───────────────────────────────────────
+
+    def _render_liquidity(self, lmap: "LiquidityMap", price: float) -> None:
+        N = len(self._liq_above)
+
+        def level_markup(lv: "LiquidityLevel") -> str:
+            col   = HEX[lv.color_key]
+            arrow = "▲" if lv.is_above else "▼"
+            if lv.level_type in ("HVN", "LVN") and lv.vol_pct > 0:
+                bars = min(8, int(lv.vol_pct * 8))
+                bar  = "█" * bars + "░" * (8 - bars)
+            elif lv.level_type in ("EQ_H", "EQ_L"):
+                bar  = f"×{lv.count}     "
+            else:
+                bar  = "○      "
+            dist_s = f"{lv.dist_pct:+.2f}%"
+            return (
+                f'<span color="{col}" font_family="monospace">'
+                f'{arrow} {fp(lv.price):>10}  {lv.label}  '
+                f'<span size="small">{bar:8}  {dist_s:>7}</span>'
+                f'</span>'
+            )
+
+        # Niveles ARRIBA — lejano arriba en pantalla, cercano abajo
+        above_rev = list(reversed(lmap.above[:N]))
+        padding   = N - len(above_rev)
+        for i, lbl in enumerate(self._liq_above):
+            idx = i - padding
+            if 0 <= idx < len(above_rev):
+                lbl.set_markup(level_markup(above_rev[idx]))
+            else:
+                lbl.set_text("")
+
+        # Precio actual
+        if price > 0:
+            self._liq_price.set_markup(
+                f'<span color="{HEX["blue"]}" weight="bold" font_family="monospace">'
+                f'● {fp(price):>10}  ←── PRECIO</span>'
+            )
+        else:
+            self._liq_price.set_text("")
+
+        # Niveles ABAJO — más cercano primero
+        for i, lbl in enumerate(self._liq_below):
+            if i < len(lmap.below):
+                lbl.set_markup(level_markup(lmap.below[i]))
+            else:
+                lbl.set_text("")
+
+        # Contexto
+        self._liq_ctx.set_markup(
+            f'<span color="{HEX["sub"]}" size="small">{lmap.context}</span>'
         )
 
     def update(self, state: MarketState) -> None:
@@ -628,6 +814,10 @@ class IntelPanel(Gtk.Box):
 
         # Store last signal for StatsBar access
         self._last_signal = sig
+
+        # ── Mapa de Liquidez ───────────────────────────────────────────────────
+        lmap = self._liquidity.analyze(state)
+        self._render_liquidity(lmap, tk.last_price)
 
         # Status
         if state.connected:
@@ -823,9 +1013,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._sym_btns: dict[str, Gtk.ToggleButton] = {}
 
         self.set_title("QTS — Quantum Trading System")
-        self.set_default_size(1440, 900)
-        self.set_size_request(900, 600)
+        self.set_default_size(1280, 760)
+        self.set_size_request(860, 560)
         self.add_css_class("qts-window")
+
+        self._trend_analyzer = TrendAnalyzer()
 
         # ── Layout raíz ────────────────────────────────────────
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -834,6 +1026,10 @@ class MainWindow(Adw.ApplicationWindow):
         # ── Header bar ─────────────────────────────────────────
         root.append(self._build_header())
 
+        # ── Trend bar ──────────────────────────────────────────
+        self._trend_bar = TrendBar()
+        root.append(self._trend_bar)
+
         # ── Paneles principales ────────────────────────────────
         content = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -841,15 +1037,24 @@ class MainWindow(Adw.ApplicationWindow):
             hexpand=True,
             vexpand=True,
         )
-        self._ob_panel    = OrderBookPanel()
-        self._intel_panel = IntelPanel()
-        self._tape_panel  = TapePanel()
 
+        self._ob_panel   = OrderBookPanel()
+        self._tape_panel = TapePanel()
         self._ob_panel.set_hexpand(True)
         self._tape_panel.set_hexpand(True)
 
+        # IntelPanel dentro de ScrolledWindow — ancho fijo, scroll vertical
+        self._intel_panel = IntelPanel()
+        self._intel_panel.set_hexpand(False)
+        intel_scroll = Gtk.ScrolledWindow()
+        intel_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        intel_scroll.set_child(self._intel_panel)
+        intel_scroll.set_size_request(310, -1)
+        intel_scroll.set_hexpand(False)
+        intel_scroll.set_vexpand(True)
+
         content.append(self._ob_panel)
-        content.append(self._intel_panel)
+        content.append(intel_scroll)
         content.append(self._tape_panel)
         root.append(content)
 
@@ -918,6 +1123,8 @@ class MainWindow(Adw.ApplicationWindow):
     def _refresh(self) -> bool:
         state = self.stream.states.get(self._sym)
         if state:
+            trend = self._trend_analyzer.analyze(state)
+            self._trend_bar.update(trend)
             self._ob_panel.update(state)
             self._intel_panel.update(state)
             self._tape_panel.update(state)

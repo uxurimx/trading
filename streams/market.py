@@ -30,6 +30,7 @@ import websockets
 import websockets.exceptions
 
 from core.config import settings
+from core.liquidity import VolumeProfile
 
 
 # ─── Dataclasses ─────────────────────────────────────────────────────────────
@@ -211,6 +212,15 @@ class MarketState:
         # Historial de OI para calcular velocidad
         self._oi_history: deque[Tuple[float, float]] = deque(maxlen=120)
 
+        # Fase 3: perfil de volumen de sesión + muestras de precio para swings
+        self.volume_profile = VolumeProfile()
+        self._price_samples: deque[Tuple[float, float]] = deque(maxlen=500)   # (ts_s, price) — trades
+
+        # Fase 3: historial grueso de precio para tendencia multi-timeframe
+        # Muestreado cada 30s, maxlen=1000 → cubre ~8.3 horas
+        self._price_history: deque[Tuple[float, float]] = deque(maxlen=1000)  # (ts_s, price)
+        self._last_price_sample: float = 0.0
+
         # Meta
         self.connected:        bool  = False
         self.spot_connected:   bool  = False
@@ -227,6 +237,8 @@ class MarketState:
             self.session_sell_vol += trade.qty
             self.cvd -= trade.qty
         self._update_cvd_candle(trade)
+        self.volume_profile.add(trade.price, trade.qty)
+        self._price_samples.append((trade.timestamp / 1000, trade.price))
         self.last_update = time.time()
 
     def _update_cvd_candle(self, trade: Trade) -> None:
@@ -260,6 +272,7 @@ class MarketState:
         self.session_sell_vol = 0.0
         self.liq_long_total   = 0.0
         self.liq_short_total  = 0.0
+        self.volume_profile.reset()
 
     # ── Propiedades derivadas ─────────────────────────────────────────────────
 
@@ -381,7 +394,13 @@ class MarketStream:
         elif "tickers" in topic:
             d  = msg.get("data", {})
             tk = state.ticker
-            if "lastPrice"         in d: tk.last_price       = float(d["lastPrice"])
+            if "lastPrice" in d:
+                tk.last_price = float(d["lastPrice"])
+                # Muestreo de precio para MTF trend (~30s)
+                _now = time.time()
+                if _now - state._last_price_sample >= 30.0 and tk.last_price > 0:
+                    state._price_history.append((_now, tk.last_price))
+                    state._last_price_sample = _now
             if "markPrice"         in d: tk.mark_price        = float(d["markPrice"])
             if "bid1Price"         in d: tk.bid               = float(d["bid1Price"])
             if "ask1Price"         in d: tk.ask               = float(d["ask1Price"])
