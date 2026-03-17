@@ -1,0 +1,17 @@
+# Networking async
+websockets>=12.0
+aiohttp>=3.9.0
+
+# Data
+pandas>=2.1.0
+numpy>=1.26.0
+duckdb>=0.10.0
+
+# Terminal interface
+textual>=0.62.0
+rich>=13.7.0
+
+# Configuration
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
