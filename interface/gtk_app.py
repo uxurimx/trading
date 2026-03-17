@@ -46,6 +46,7 @@ from core.strategy import StrategyEngine
 from core.controller import TradeController
 from core.order_model import AutoMode
 from interface.order_panel import OrderPanel
+from interface.command_center import CommandCenter
 from streams.account import AccountStream, AccountState, Position, AccountBalance
 from streams.klines import KlineStream
 from streams.market import CandleCVD, MarketState, MarketStream
@@ -1365,7 +1366,12 @@ class MainWindow(Adw.ApplicationWindow):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_content(root)
 
-        # ── Header bar ─────────────────────────────────────────
+        # ── ViewStack (dos pestañas) ────────────────────────────
+        self._stack = Adw.ViewStack()
+        self._stack.set_hexpand(True)
+        self._stack.set_vexpand(True)
+
+        # ── Header bar (con ViewSwitcher centrado) ──────────────
         root.append(self._build_header())
 
         # ── Trend bar ──────────────────────────────────────────
@@ -1376,7 +1382,20 @@ class MainWindow(Adw.ApplicationWindow):
         self._pos_bar = PositionBar()
         root.append(self._pos_bar)
 
-        # ── Paneles principales ────────────────────────────────
+        # ── Pestaña 1: CommandCenter ────────────────────────────
+        self._cmd_center = CommandCenter(self.controller, self._strategy, self._executor)
+        self._stack.add_titled_with_icon(
+            self._cmd_center, "orders", "⚡ Órdenes", "go-next-symbolic"
+        )
+
+        # ── Pestaña 2: Dashboard de mercado ────────────────────
+        market_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=0,
+            hexpand=True,
+            vexpand=True,
+        )
+
         content = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=0,
@@ -1408,11 +1427,17 @@ class MainWindow(Adw.ApplicationWindow):
         content.append(intel_scroll)
         content.append(self._tape_panel)
         content.append(self._order_panel)
-        root.append(content)
+        market_box.append(content)
 
-        # ── Stats bar ──────────────────────────────────────────
+        # Stats bar dentro del tab de mercado
         self._stats = StatsBar()
-        root.append(self._stats)
+        market_box.append(self._stats)
+
+        self._stack.add_titled_with_icon(
+            market_box, "market", "📊 Mercado", "view-grid-symbolic"
+        )
+
+        root.append(self._stack)
 
         # ── Timer de refresco (100ms = 10fps) ─────────────────
         GLib.timeout_add(100, self._refresh)
@@ -1421,10 +1446,11 @@ class MainWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         header.set_decoration_layout("icon:minimize,maximize,close")
 
-        # Título
-        title_lbl = Gtk.Label(label="⚡ QTS")
-        title_lbl.add_css_class("qts-title")
-        header.set_title_widget(title_lbl)
+        # ViewSwitcher centrado en el header
+        switcher = Adw.ViewSwitcher()
+        switcher.set_stack(self._stack)
+        switcher.set_policy(Adw.ViewSwitcherPolicy.WIDE)
+        header.set_title_widget(switcher)
 
         # Botones de símbolo (linked pill group)
         sym_box = Gtk.Box(
@@ -1569,8 +1595,9 @@ class MainWindow(Adw.ApplicationWindow):
                 symbol       = sim_sym,
             )
 
-        # ── Actualizar order panel ──────────────────────────────────────────
+        # ── Actualizar paneles ──────────────────────────────────────────────
         self._order_panel.update(self.acct.state, risk, sim_dict)
+        self._cmd_center.update(self.acct.state, risk, sim_dict)
 
         # ── Escribir JSON para la extensión GNOME Shell (cada ~2 s) ────────
         self._status_writer.tick(

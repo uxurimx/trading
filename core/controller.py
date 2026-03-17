@@ -90,6 +90,8 @@ class TradeController:
         self._last_error:    str   = ""
         self._last_error_ts: float = 0.0
 
+        self.max_duration_min: int = 0    # 0 = sin límite
+
     # ── API pública ───────────────────────────────────────────────────────────
 
     def set_mode(self, mode: AutoMode) -> None:
@@ -113,6 +115,9 @@ class TradeController:
 
     def set_leverage(self, leverage: int) -> None:
         self.leverage = max(1, min(25, leverage))
+
+    def set_max_duration(self, minutes: int) -> None:
+        self.max_duration_min = max(0, minutes)
 
     def approve_proposal(self) -> None:
         if self._proposal and self._proposal.symbol not in self._pending_exec:
@@ -356,12 +361,75 @@ class TradeController:
 
     # ── Sincronización con la cuenta ──────────────────────────────────────────
 
+    def _reconcile_positions(self, account: "AccountState") -> None:
+        """
+        Importa posiciones abiertas en Bybit que no están rastreadas localmente.
+        Se llama en cada tick — solo actúa cuando encuentra algo nuevo.
+        """
+        if not account.connected:
+            return
+        added = False
+        for sym, pos in account.positions.items():
+            if pos.size <= 0:
+                continue
+            if sym in self._active or sym in self._pending_exec:
+                continue
+            # Crear OrderRequest sintético desde la posición real de Bybit
+            req = OrderRequest(
+                symbol      = sym,
+                side        = pos.side,
+                qty         = pos.size,
+                entry_price = pos.entry_price,
+                sl_price    = pos.stop_loss,
+                tp_price    = pos.take_profit,
+                rr_ratio    = 1.5,
+            )
+            # created_time viene en ms desde Bybit
+            opened = (pos.created_time // 1000) if pos.created_time > 1_000_000_000_000 else (
+                pos.created_time if pos.created_time > 0 else int(time.time())
+            )
+            trade = TradeRecord(
+                symbol      = sym,
+                request     = req,
+                state       = TradeState.OPEN,
+                entry_price = pos.entry_price,
+                current_sl  = pos.stop_loss,
+                current_tp  = pos.take_profit,
+                opened_at   = opened,
+                auto_mode   = AutoMode.MANUAL,
+            )
+            self._active[sym] = trade
+            self._trail_high[sym] = pos.entry_price
+            self._trail_low[sym]  = pos.entry_price
+            self._last_sl_upd[sym] = 0.0
+            log.info(
+                "Posición importada de Bybit: %s %s %.4f @ %.5g  SL=%s  TP=%s",
+                sym, pos.side, pos.size, pos.entry_price,
+                pos.stop_loss, pos.take_profit,
+            )
+            added = True
+        if added:
+            self._notify()
+
     def _sync_active_trades(self, account: "AccountState") -> None:
-        """Detecta cierres por SL/TP/manual para todos los trades activos."""
+        """Detecta cierres por SL/TP/manual/duración para todos los trades activos."""
+        self._reconcile_positions(account)
         closed: List[str] = []
         for sym, trade in self._active.items():
             if not trade.is_active:
                 continue
+
+            # Cierre por duración máxima
+            if (
+                self.max_duration_min > 0
+                and trade.opened_at > 0
+                and (int(time.time()) - trade.opened_at) >= self.max_duration_min * 60
+            ):
+                log.info("Duración máxima alcanzada: %s (%dm) — cerrando", sym, self.max_duration_min)
+                notifier.order_failed(sym, f"Tiempo máximo {self.max_duration_min}m")
+                self.close_symbol(sym)
+                continue
+
             pos = account.positions.get(sym)
             if pos is None or pos.size <= 0:
                 trade.state       = TradeState.CLOSED
