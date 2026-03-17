@@ -32,6 +32,11 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 from core.absorption import AbsorptionDetector, AbsorptionSignal, NEUTRAL_SIGNAL
 from core.liquidity import LiquidityAnalyzer, LiquidityMap, LiquidityLevel, _EMPTY_MAP
 from core.trend import TrendAnalyzer, TrendSignal, NEUTRAL_TREND, TIMEFRAMES
+from core.regime import (
+    RegimeClassifier, OpportunityScorer,
+    RegimeSignal, OpportunitySignal,
+    NEUTRAL_REGIME, NEUTRAL_OPP,
+)
 from core.config import settings
 from streams.market import CandleCVD, MarketState, MarketStream
 
@@ -485,8 +490,6 @@ class IntelPanel(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.add_css_class("qts-card")
         self.set_size_request(320, -1)
-        self._absorption = AbsorptionDetector()
-        self._liquidity  = LiquidityAnalyzer()
 
         # Título
         title = Gtk.Label(label="INTELIGENCIA")
@@ -700,7 +703,13 @@ class IntelPanel(Gtk.Box):
             f'<span color="{HEX["sub"]}" size="small">{lmap.context}</span>'
         )
 
-    def update(self, state: MarketState) -> None:
+    def update(
+        self,
+        state: MarketState,
+        sig:   "AbsorptionSignal",
+        lmap:  "LiquidityMap",
+        opp:   "OpportunitySignal",
+    ) -> None:
         tk  = state.ticker
         ob  = state.orderbook
 
@@ -782,7 +791,6 @@ class IntelPanel(Gtk.Box):
         )
 
         # ── Absorción ──────────────────────────────────────────────────────────
-        sig = self._absorption.analyze(state)
         col = HEX[sig.color_key]
 
         if sig.is_signal:
@@ -817,12 +825,25 @@ class IntelPanel(Gtk.Box):
             self._abs_detail_lbl.set_text("")
             self._abs_reason_lbl.set_text("")
 
-        # Store last signal for StatsBar access
-        self._last_signal = sig
-
         # ── Mapa de Liquidez ───────────────────────────────────────────────────
-        lmap = self._liquidity.analyze(state)
         self._render_liquidity(lmap, tk.last_price)
+
+        # ── Oportunidad (componentes debajo de absorción) ──────────────────────
+        if opp.score >= 20:
+            opp_col = HEX[opp.color_key]
+            self._abs_reason_lbl.set_markup(
+                f'<span color="{HEX["over"]}" size="small">'
+                + " · ".join(GLib.markup_escape_text(r) for r in (sig.reasons + opp.reasons)[:3])
+                + "</span>"
+            )
+        else:
+            # razones solo de absorción
+            if sig.reasons:
+                self._abs_reason_lbl.set_markup(
+                    f'<span color="{HEX["over"]}" size="small">'
+                    + " · ".join(GLib.markup_escape_text(r) for r in sig.reasons)
+                    + "</span>"
+                )
 
         # Status
         if state.connected:
@@ -982,10 +1003,15 @@ class StatsBar(Gtk.Box):
             f'<span color="{color}"{w}>{GLib.markup_escape_text(text)}</span>'
         )
 
-    def update(self, state: MarketState, sig: "AbsorptionSignal | None" = None) -> None:
-        self._set("CVD",      fm(state.cvd, sign=True),      sc(state.cvd), bold=True)
-        self._set("Δ",        fm(state.session_delta, sign=True), sc(state.session_delta), bold=True)
-        self._set("Compras",  f"{state.buy_pct:.1f}%",        sc(state.buy_pct - 50))
+    def update(
+        self,
+        state: MarketState,
+        sig:   "AbsorptionSignal",
+        opp:   "OpportunitySignal",
+    ) -> None:
+        self._set("CVD",     fm(state.cvd, sign=True),           sc(state.cvd),           bold=True)
+        self._set("Δ",       fm(state.session_delta, sign=True), sc(state.session_delta), bold=True)
+        self._set("Compras", f"{state.buy_pct:.1f}%",            sc(state.buy_pct - 50))
 
         if state.spot_connected:
             self._set("Spot",  fp(state.spot_price).strip(), HEX["teal"])
@@ -994,17 +1020,22 @@ class StatsBar(Gtk.Box):
             self._set("Spot",  "──", HEX["over"])
             self._set("Basis", "──", HEX["over"])
 
-        # Fase 2: Absorción
-        if sig and sig.is_signal:
+        # Absorción
+        if sig.is_signal:
             short = "COMP" if sig.side == "BUY" else "VEND"
-            self._set("Absorción", short,        HEX[sig.color_key], bold=True)
-            self._set("Score",     f"{sig.score}", HEX[sig.color_key], bold=True)
+            self._set("Absorción", short, HEX[sig.color_key], bold=True)
         else:
             self._set("Absorción", "──", HEX["over"])
-            self._set("Score",     "──", HEX["over"])
 
-        # Placeholder Fase 4
-        self._set("Régimen", "──", HEX["over"])
+        # Régimen (Fase 4)
+        regime = opp.regime
+        self._set("Régimen", regime.label, HEX[regime.color_key], bold=(regime.confidence >= 60))
+
+        # Score de oportunidad combinado (Fase 4)
+        if opp.is_actionable:
+            self._set("Score", f"{opp.score}", HEX[opp.color_key], bold=True)
+        else:
+            self._set("Score", "──", HEX["over"])
 
 
 # ─── Ventana Principal ────────────────────────────────────────────────────────
@@ -1022,7 +1053,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_size_request(860, 560)
         self.add_css_class("qts-window")
 
-        self._trend_analyzer = TrendAnalyzer()
+        self._trend_analyzer  = TrendAnalyzer()
+        self._abs_detector    = AbsorptionDetector()
+        self._liq_analyzer    = LiquidityAnalyzer()
+        self._regime_clf      = RegimeClassifier()
+        self._opp_scorer      = OpportunityScorer()
 
         # ── Layout raíz ────────────────────────────────────────
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -1130,14 +1165,23 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _refresh(self) -> bool:
         state = self.stream.states.get(self._sym)
-        if state:
-            trend = self._trend_analyzer.analyze(state)
-            self._trend_bar.update(trend)
-            self._ob_panel.update(state)
-            self._intel_panel.update(state)
-            self._tape_panel.update(state)
-            sig = getattr(self._intel_panel, "_last_signal", None)
-            self._stats.update(state, sig)
+        if not state:
+            return True
+
+        # ── Calcular todos los signals (orden importa: cada uno usa el anterior)
+        trend  = self._trend_analyzer.analyze(state)
+        sig    = self._abs_detector.analyze(state)
+        lmap   = self._liq_analyzer.analyze(state)
+        regime = self._regime_clf.classify(state, trend)
+        opp    = self._opp_scorer.score(sig, regime, trend, lmap)
+
+        # ── Actualizar widgets ──────────────────────────────────────────────
+        self._trend_bar.update(trend)
+        self._ob_panel.update(state)
+        self._intel_panel.update(state, sig, lmap, opp)
+        self._tape_panel.update(state)
+        self._stats.update(state, sig, opp)
+
         return True   # True = continuar el timer
 
 
