@@ -1,0 +1,11 @@
+/*
+ * QTS — GNOME Shell Extension stylesheet
+ * Estilo mínimo para la etiqueta del panel.
+ */
+
+.qts-panel-label {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Source Code Pro', monospace;
+    font-size: 11px;
+    padding: 0 6px;
+    /* El color hereda del panel (blanco en modo oscuro) */
+}

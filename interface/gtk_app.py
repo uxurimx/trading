@@ -39,7 +39,10 @@ from core.regime import (
 )
 from core.config import settings
 from core.risk import RiskFortress, RiskStatus, OK_STATUS
+from core.status_writer import StatusWriter
+from core.technicals import TradeContextAnalyzer, TechSignal, NEUTRAL_TECH
 from streams.account import AccountStream, AccountState, Position, AccountBalance
+from streams.klines import KlineStream
 from streams.market import CandleCVD, MarketState, MarketStream
 
 
@@ -758,6 +761,34 @@ class IntelPanel(Gtk.Box):
 
         self.append(self._sep())
 
+        # ── Técnicos (Phase 6+) ────────────────────────────────────────────
+        tech_sec = Gtk.Label(label="TÉCNICOS  15m · 1h")
+        tech_sec.add_css_class("qts-section")
+        tech_sec.set_xalign(0)
+        self.append(tech_sec)
+
+        self._tech_ema15_lbl  = self._row_label()
+        self._tech_ema1h_lbl  = self._row_label()
+        self._tech_rsi_lbl    = self._row_label()
+        self._tech_sr_lbl     = self._row_label()
+        self._tech_atr_lbl    = self._row_label()
+        for w in [self._tech_ema15_lbl, self._tech_ema1h_lbl,
+                  self._tech_rsi_lbl, self._tech_sr_lbl, self._tech_atr_lbl]:
+            self.append(w)
+
+        # Score del setup de la posición abierta
+        self._tech_score_bar  = ScoreBar()
+        self._tech_score_lbl  = self._row_label()
+        self.append(self._tech_score_bar)
+        self.append(self._tech_score_lbl)
+
+        # Observaciones: ✓ / ⚠ / →
+        self._tech_obs_lbls = [self._row_label() for _ in range(5)]
+        for w in self._tech_obs_lbls:
+            self.append(w)
+
+        self.append(self._sep())
+
         # Status
         self._status_lbl = self._mlabel()
         self.append(self._status_lbl)
@@ -849,13 +880,107 @@ class IntelPanel(Gtk.Box):
             f'<span color="{HEX["sub"]}" size="small">{lmap.context}</span>'
         )
 
+    def _render_technicals(self, tech: "TechSignal") -> None:
+        if not tech.has_data:
+            dim = HEX["over"]
+            self._tech_ema15_lbl.set_markup(f'<span color="{dim}">EMA 9/21 (15m)  ──</span>')
+            self._tech_ema1h_lbl.set_markup(f'<span color="{dim}">EMA 50 (1h)     ──</span>')
+            self._tech_rsi_lbl.set_markup(f'<span color="{dim}">RSI             ──</span>')
+            self._tech_sr_lbl.set_markup(f'<span color="{dim}">Sup / Res       ──</span>')
+            self._tech_atr_lbl.set_markup(f'<span color="{dim}">ATR (15m)       ──</span>')
+            self._tech_score_bar.update(0, "over")
+            self._tech_score_lbl.set_text("")
+            for lbl in self._tech_obs_lbls:
+                lbl.set_text("")
+            return
+
+        # EMA 15m
+        ema15c = HEX["buy"] if tech.ema15m_bull else HEX["sell"]
+        ema15s = "▲ ALCISTA" if tech.ema15m_bull else "▼ BAJISTA"
+        ema200_badge = f'  <span color="{HEX["warn"]}" size="small">⚑ EN EMA200 1h</span>' if tech.at_ema200 else ""
+        self._tech_ema15_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">EMA 9/21 (15m) </span>'
+            f'<span color="{ema15c}" weight="bold">{ema15s}</span>'
+        )
+
+        # EMA 1h
+        ema1h_c = HEX["buy"] if tech.ema1h_bull else HEX["sell"]
+        ema1h_s = "▲ sobre EMA50" if tech.ema1h_bull else "▼ bajo EMA50"
+        self._tech_ema1h_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">EMA 50  (1h)   </span>'
+            f'<span color="{ema1h_c}" weight="bold">{ema1h_s}</span>'
+            f'{ema200_badge}'
+        )
+
+        # RSI
+        rsi15c = (HEX["sell"] if tech.rsi_15m > 70 else
+                  HEX["buy"]  if tech.rsi_15m < 30 else HEX["text"])
+        rsi1hc = (HEX["sell"] if tech.rsi_1h  > 70 else
+                  HEX["buy"]  if tech.rsi_1h  < 30 else HEX["sub"])
+        self._tech_rsi_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">RSI             </span>'
+            f'<span color="{rsi15c}" weight="bold">{tech.rsi_15m:.1f}</span>'
+            f'<span color="{HEX["over"]}"> 15m  </span>'
+            f'<span color="{rsi1hc}">{tech.rsi_1h:.1f}</span>'
+            f'<span color="{HEX["over"]}"> 1h</span>'
+        )
+
+        # Soporte / Resistencia
+        self._tech_sr_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">Sop / Res       </span>'
+            f'<span color="{HEX["buy"]}">{fp(tech.support)}</span>'
+            f'<span color="{HEX["over"]}"> · </span>'
+            f'<span color="{HEX["sell"]}">{fp(tech.resistance)}</span>'
+        )
+
+        # ATR
+        if tech.atr_15m > 0:
+            atr_pct = tech.atr_15m / tech.ema9_15m * 100 if tech.ema9_15m > 0 else 0
+            self._tech_atr_lbl.set_markup(
+                f'<span color="{HEX["sub"]}">ATR (15m)       </span>'
+                f'<span color="{HEX["text"]}">{fp(tech.atr_15m)}</span>'
+                f'<span color="{HEX["over"]}"> ({atr_pct:.2f}%)</span>'
+            )
+        else:
+            self._tech_atr_lbl.set_text("")
+
+        # Score bar del setup
+        self._tech_score_bar.update(tech.score, tech.score_color)
+        self._tech_score_lbl.set_markup(
+            f'<span color="{HEX[tech.score_color]}" weight="bold">'
+            f'{tech.verdict}  {tech.score}</span>'
+            + (f'<span color="{HEX["sub"]}">  R:R {tech.rr_ratio:.1f}:1</span>'
+               if tech.rr_ratio > 0 else "")
+        )
+
+        # Observaciones
+        all_obs = (
+            [("buy",  t) for t in tech.good]  +
+            [("warn", t) for t in tech.risks] +
+            [("blue", t) for t in tech.tips]
+        )
+        icons = {"buy": "✓", "warn": "⚠", "blue": "→"}
+        for i, lbl in enumerate(self._tech_obs_lbls):
+            if i < len(all_obs):
+                key, text = all_obs[i]
+                icon = icons[key]
+                lbl.set_markup(
+                    f'<span color="{HEX[key]}" size="small">'
+                    f'{icon} {GLib.markup_escape_text(text)}</span>'
+                )
+            else:
+                lbl.set_text("")
+
     def update(
         self,
         state: MarketState,
         sig:   "AbsorptionSignal",
         lmap:  "LiquidityMap",
         opp:   "OpportunitySignal",
+        tech:  "TechSignal" = None,
     ) -> None:
+        if tech is None:
+            tech = NEUTRAL_TECH
         tk  = state.ticker
         ob  = state.orderbook
 
@@ -973,6 +1098,9 @@ class IntelPanel(Gtk.Box):
 
         # ── Mapa de Liquidez ───────────────────────────────────────────────────
         self._render_liquidity(lmap, tk.last_price)
+
+        # ── Técnicos (klines REST) ─────────────────────────────────────────────
+        self._render_technicals(tech)
 
         # ── Oportunidad (componentes debajo de absorción) ──────────────────────
         if opp.score >= 20:
@@ -1193,10 +1321,12 @@ class MainWindow(Adw.ApplicationWindow):
         app:    Adw.Application,
         stream: MarketStream,
         acct:   AccountStream,
+        klines: KlineStream,
     ) -> None:
         super().__init__(application=app)
         self.stream  = stream
         self.acct    = acct
+        self.klines  = klines
         self._sym    = settings.default_symbol
         self._sym_btns: dict[str, Gtk.ToggleButton] = {}
 
@@ -1211,6 +1341,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._regime_clf      = RegimeClassifier()
         self._opp_scorer      = OpportunityScorer()
         self._risk_fortress   = RiskFortress()
+        self._status_writer   = StatusWriter()
+        self._tech_analyzer   = TradeContextAnalyzer()
+        self._tech_signal     = NEUTRAL_TECH
+        self._kline_req_ctr   = 199  # forzar fetch inmediato en primer ciclo
 
         # ── Layout raíz ────────────────────────────────────────
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -1335,13 +1469,31 @@ class MainWindow(Adw.ApplicationWindow):
         # ── Riesgo de cuenta ───────────────────────────────────────────────
         risk = self._risk_fortress.check(self.acct.state)
 
+        # ── Técnicos: solicitar klines cada ~20 s; calcular si hay posición ──
+        self._kline_req_ctr += 1
+        if self._kline_req_ctr >= 200:
+            self._kline_req_ctr = 0
+            self.klines.request(self._sym)
+
+        positions = self.acct.state.open_positions()
+        if positions:
+            k15 = self.klines.store.get(self._sym, "15")
+            k1h = self.klines.store.get(self._sym, "60")
+            if k15 and k1h:
+                self._tech_signal = self._tech_analyzer.analyze(positions[0], k15, k1h)
+
         # ── Actualizar widgets ──────────────────────────────────────────────
         self._trend_bar.update(trend)
         self._pos_bar.update(self.acct.state, risk)
         self._ob_panel.update(state)
-        self._intel_panel.update(state, sig, lmap, opp)
+        self._intel_panel.update(state, sig, lmap, opp, self._tech_signal)
         self._tape_panel.update(state)
         self._stats.update(state, sig, opp)
+
+        # ── Escribir JSON para la extensión GNOME Shell (cada ~2 s) ────────
+        self._status_writer.tick(
+            self._sym, state, sig, opp, risk, trend, self.acct.state
+        )
 
         return True   # True = continuar el timer
 
@@ -1354,6 +1506,7 @@ class QTSApplication(Adw.Application):
         super().__init__(application_id="com.qts.trading")
         self._stream = MarketStream()
         self._acct   = AccountStream()
+        self._klines = KlineStream()
         self._bridge = AsyncBridge()
 
     def do_startup(self) -> None:
@@ -1374,13 +1527,14 @@ class QTSApplication(Adw.Application):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
-        # Arrancar async bridge + streams (mercado + cuenta en paralelo)
+        # Arrancar async bridge + streams (mercado + cuenta + klines en paralelo)
         self._bridge.start()
         self._bridge.submit(self._stream.start())
         self._bridge.submit(self._acct.start())
+        self._bridge.submit(self._klines.start())
 
     def do_activate(self) -> None:
-        win = MainWindow(app=self, stream=self._stream, acct=self._acct)
+        win = MainWindow(app=self, stream=self._stream, acct=self._acct, klines=self._klines)
         win.present()
 
 

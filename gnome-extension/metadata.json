@@ -1,0 +1,8 @@
+{
+  "name": "QTS — Quantum Trading System",
+  "description": "Panel indicator for QTS: shows live price, absorption signal, opportunity score, and open positions from Bybit.",
+  "uuid": "qts-indicator@qts.trading",
+  "version": 6,
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": ""
+}
