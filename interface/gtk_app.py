@@ -618,6 +618,9 @@ class IntelPanel(Gtk.Box):
         lbl.add_css_class("qts-mono")
         lbl.set_xalign(0)
         lbl.set_use_markup(True)
+        # Ancho máximo fijo: evita que el panel se ensanche cuando cambia el texto
+        lbl.set_max_width_chars(36)
+        lbl.set_ellipsize(Pango.EllipsizeMode.END)
         return lbl
 
     def _row_label(self) -> Gtk.Label:
@@ -625,6 +628,8 @@ class IntelPanel(Gtk.Box):
         lbl.add_css_class("qts-mono-sm")
         lbl.set_xalign(0)
         lbl.set_use_markup(True)
+        lbl.set_max_width_chars(38)
+        lbl.set_ellipsize(Pango.EllipsizeMode.END)
         return lbl
 
     def _sep(self) -> Gtk.Separator:
@@ -1043,13 +1048,16 @@ class MainWindow(Adw.ApplicationWindow):
         self._ob_panel.set_hexpand(True)
         self._tape_panel.set_hexpand(True)
 
-        # IntelPanel dentro de ScrolledWindow — ancho fijo, scroll vertical
+        # IntelPanel dentro de ScrolledWindow — ancho 100% fijo
+        # set_propagate_natural_width(False): el ScrolledWindow NO hereda el
+        # ancho natural del hijo → etiquetas largas no ensanchan la columna.
         self._intel_panel = IntelPanel()
         self._intel_panel.set_hexpand(False)
         intel_scroll = Gtk.ScrolledWindow()
         intel_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         intel_scroll.set_child(self._intel_panel)
         intel_scroll.set_size_request(310, -1)
+        intel_scroll.set_propagate_natural_width(False)
         intel_scroll.set_hexpand(False)
         intel_scroll.set_vexpand(True)
 
