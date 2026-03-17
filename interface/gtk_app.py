@@ -29,6 +29,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
+from core.absorption import AbsorptionDetector, AbsorptionSignal, NEUTRAL_SIGNAL
 from core.config import settings
 from streams.market import CandleCVD, MarketState, MarketStream
 
@@ -240,6 +241,50 @@ class BuyPctBar(Gtk.DrawingArea):
         cr.fill()
 
 
+# ─── Widget: Score Bar (Cairo) ───────────────────────────────────────────────
+
+class ScoreBar(Gtk.DrawingArea):
+    """
+    Barra de score 0-100 con color configurable.
+    Usada para el score de absorción.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_size_request(-1, 10)
+        self.set_hexpand(True)
+        self._score: float = 0.0
+        self._color: tuple  = RGB["over"]
+        self.set_draw_func(self._draw)
+
+    def update(self, score: float, color_key: str) -> None:
+        self._score = max(0.0, min(100.0, score))
+        self._color = RGB.get(color_key, RGB["over"])
+        self.queue_draw()
+
+    def _draw(self, _area, cr, width: int, height: int) -> None:
+        radius = height / 2
+
+        # Fondo
+        cr.set_source_rgba(*RGB["surf"], 1.0)
+        cr.arc(radius, radius, radius, math.pi / 2, 3 * math.pi / 2)
+        cr.arc(width - radius, radius, radius, -math.pi / 2, math.pi / 2)
+        cr.close_path()
+        cr.fill()
+
+        if self._score < 1:
+            return
+
+        # Relleno proporcional al score
+        fill_w = max(radius * 2, width * self._score / 100)
+        alpha  = 0.5 + self._score / 200   # 0.5 en score=0, 1.0 en score=100
+        cr.set_source_rgba(*self._color, alpha)
+        cr.arc(radius, radius, radius, math.pi / 2, 3 * math.pi / 2)
+        cr.arc(fill_w - radius, radius, radius, -math.pi / 2, math.pi / 2)
+        cr.close_path()
+        cr.fill()
+
+
 # ─── Panel: Orderbook ────────────────────────────────────────────────────────
 
 class OrderBookPanel(Gtk.Box):
@@ -338,6 +383,7 @@ class IntelPanel(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.add_css_class("qts-card")
         self.set_size_request(310, -1)
+        self._absorption = AbsorptionDetector()
 
         # Título
         title = Gtk.Label(label="INTELIGENCIA")
@@ -411,6 +457,30 @@ class IntelPanel(Gtk.Box):
         self._liq_short_lbl = self._mlabel()
         for w in [self._liq_long_lbl, self._liq_short_lbl]:
             self.append(w)
+
+        self.append(self._sep())
+
+        # Absorción
+        abs_sec = Gtk.Label(label="ABSORCIÓN")
+        abs_sec.add_css_class("qts-section")
+        abs_sec.set_xalign(0)
+        self.append(abs_sec)
+
+        # Fila: label de señal + score
+        self._abs_signal_lbl = self._mlabel()
+        self.append(self._abs_signal_lbl)
+
+        # Barra de score
+        self._abs_bar = ScoreBar()
+        self.append(self._abs_bar)
+
+        # Componentes del score
+        self._abs_detail_lbl = self._mlabel()
+        self.append(self._abs_detail_lbl)
+
+        # Razones
+        self._abs_reason_lbl = self._mlabel()
+        self.append(self._abs_reason_lbl)
 
         self.append(self._sep())
 
@@ -519,6 +589,45 @@ class IntelPanel(Gtk.Box):
         self._liq_short_lbl.set_markup(
             self._kv("Liq SHORT ", fm(state.liq_short_total), HEX["buy"])
         )
+
+        # ── Absorción ──────────────────────────────────────────────────────────
+        sig = self._absorption.analyze(state)
+        col = HEX[sig.color_key]
+
+        if sig.is_signal:
+            strength = (
+                "FUERTE"   if sig.score >= 70 else
+                "MODERADA" if sig.score >= 45 else
+                "DÉBIL"
+            )
+            self._abs_signal_lbl.set_markup(
+                f'<span color="{col}" weight="bold">{sig.label}</span>'
+                f'<span color="{HEX["sub"]}">  {strength}</span>'
+            )
+            self._abs_bar.update(sig.score, sig.color_key)
+            self._abs_detail_lbl.set_markup(
+                f'<span color="{HEX["sub"]}" size="small">'
+                f'CVD:{sig.cvd_div}  Flujo:{sig.flow_eff}  Agr:{sig.aggression}  OB:{sig.ob_stress}'
+                f'  <b>{sig.score}/100</b></span>'
+            )
+            if sig.reasons:
+                self._abs_reason_lbl.set_markup(
+                    f'<span color="{HEX["over"]}" size="small">'
+                    + " · ".join(GLib.markup_escape_text(r) for r in sig.reasons)
+                    + "</span>"
+                )
+            else:
+                self._abs_reason_lbl.set_text("")
+        else:
+            self._abs_signal_lbl.set_markup(
+                f'<span color="{HEX["over"]}">Sin señal</span>'
+            )
+            self._abs_bar.update(0, "over")
+            self._abs_detail_lbl.set_text("")
+            self._abs_reason_lbl.set_text("")
+
+        # Store last signal for StatsBar access
+        self._last_signal = sig
 
         # Status
         if state.connected:
@@ -678,7 +787,7 @@ class StatsBar(Gtk.Box):
             f'<span color="{color}"{w}>{GLib.markup_escape_text(text)}</span>'
         )
 
-    def update(self, state: MarketState) -> None:
+    def update(self, state: MarketState, sig: "AbsorptionSignal | None" = None) -> None:
         self._set("CVD",      fm(state.cvd, sign=True),      sc(state.cvd), bold=True)
         self._set("Δ",        fm(state.session_delta, sign=True), sc(state.session_delta), bold=True)
         self._set("Compras",  f"{state.buy_pct:.1f}%",        sc(state.buy_pct - 50))
@@ -690,10 +799,17 @@ class StatsBar(Gtk.Box):
             self._set("Spot",  "──", HEX["over"])
             self._set("Basis", "──", HEX["over"])
 
-        # Placeholders para Fases 2-4
-        self._set("Régimen",    "──", HEX["over"])
-        self._set("Absorción",  "──", HEX["over"])
-        self._set("Score",      "──", HEX["over"])
+        # Fase 2: Absorción
+        if sig and sig.is_signal:
+            short = "COMP" if sig.side == "BUY" else "VEND"
+            self._set("Absorción", short,        HEX[sig.color_key], bold=True)
+            self._set("Score",     f"{sig.score}", HEX[sig.color_key], bold=True)
+        else:
+            self._set("Absorción", "──", HEX["over"])
+            self._set("Score",     "──", HEX["over"])
+
+        # Placeholder Fase 4
+        self._set("Régimen", "──", HEX["over"])
 
 
 # ─── Ventana Principal ────────────────────────────────────────────────────────
@@ -805,7 +921,8 @@ class MainWindow(Adw.ApplicationWindow):
             self._ob_panel.update(state)
             self._intel_panel.update(state)
             self._tape_panel.update(state)
-            self._stats.update(state)
+            sig = getattr(self._intel_panel, "_last_signal", None)
+            self._stats.update(state, sig)
         return True   # True = continuar el timer
 
 
