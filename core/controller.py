@@ -27,6 +27,7 @@ from core.order_model import (
     OrderResult, ControllerState,
 )
 from core.strategy import StrategyEngine
+from core.config import settings
 from core.db import save_trade
 import core.notifier as notifier
 
@@ -41,14 +42,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("qts.controller")
 
-SCAN_INTERVAL      = 30
 PROPOSAL_TTL       = 60
-BREAKEVEN_AT_PCT   = 0.40
-TRAILING_AT_PCT    = 0.70
 TRAIL_MIN_MOVE_PCT = 0.003
-BE_HOLD_TIME_S     = 30     # secs el precio debe mantenerse >= BE para activar
-PROFIT_LOCK_PCT    = 0.60   # mover SL a profit parcial cuando progress >= 60%
 PROFIT_LOCK_RATIO  = 0.40   # SL se mueve a entry + 40% del sl_dist
+# scan_interval_s, breakeven_pct, profit_lock_pct, trailing_pct, be_hold_time_s vienen de settings
 
 
 class TradeController:
@@ -92,6 +89,7 @@ class TradeController:
 
         self._last_error:    str   = ""
         self._last_error_ts: float = 0.0
+        self._scan_log:      str   = ""   # último resultado del scan
 
         self.max_duration_min: int = 0    # 0 = sin límite
         self.multi_trades:     int = 1    # cuántos trades en paralelo para alcanzar el goal
@@ -99,6 +97,8 @@ class TradeController:
         self._pnl_captured:  Set[str]         = set()   # trades con pnl_at_open ya capturado
         self._last_upnl:     Dict[str, float]  = {}      # último unrealized PnL conocido
         self._be_since:      Dict[str, float]  = {}      # cuándo progress alcanzó BE threshold
+        self._duration_set_ts: float           = time.time()  # cuándo se configuró max_duration
+        self._open_ts:       Dict[str, float]  = {}  # monotonic timestamp al confirmar OPEN
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -126,6 +126,11 @@ class TradeController:
 
     def set_max_duration(self, minutes: int) -> None:
         self.max_duration_min = max(0, minutes)
+        # Registrar cuándo se configuró el límite.
+        # El límite SOLO aplica a trades abiertos DESPUÉS de este momento.
+        # Esto evita cerrar posiciones existentes al cambiar la configuración.
+        if minutes > 0:
+            self._duration_set_ts = time.time()
 
     def set_multi_trades(self, n: int) -> None:
         self.multi_trades = max(1, min(10, n))
@@ -160,6 +165,8 @@ class TradeController:
 
     def force_scan(self) -> None:
         self._last_scan = 0.0
+        self._scan_log  = "🔍 Escaneando…"
+        self._notify()
 
     def on_update(self, callback: Callable[[ControllerState], None]) -> None:
         self._callbacks.append(callback)
@@ -167,7 +174,7 @@ class TradeController:
     @property
     def state(self) -> ControllerState:
         prop_age = int(time.monotonic() - self._proposal_ts) if self._proposal else 0
-        scan_in  = max(0, int(SCAN_INTERVAL - (time.monotonic() - self._last_scan)))
+        scan_in  = max(0, int(settings.scan_interval_s - (time.monotonic() - self._last_scan)))
         return ControllerState(
             mode           = self.mode,
             goal_usd       = self.goal_usd,
@@ -177,6 +184,7 @@ class TradeController:
             last_result    = self._log[-1] if self._log else None,
             scan_in        = scan_in,
             status_msg     = self._status_msg(),
+            scan_log       = self._scan_log,
         )
 
     @property
@@ -214,6 +222,7 @@ class TradeController:
             # Solo bloquea nuevas entradas — nunca cierra posiciones activas.
             # Cerrar posiciones activas es decisión del trader, no del sistema.
             self._proposal = None
+            self._scan_log = f"🔴 Circuit breaker activo — {risk.message}"
             return
 
         if self._pending_exec:
@@ -226,7 +235,7 @@ class TradeController:
 
         # Scan periódico
         if self._proposal is None:
-            if (time.monotonic() - self._last_scan) >= SCAN_INTERVAL:
+            if (time.monotonic() - self._last_scan) >= settings.scan_interval_s:
                 self._last_scan = time.monotonic()
                 self._run_scan(states, account, techs, opps, risk)
 
@@ -252,13 +261,22 @@ class TradeController:
         # Solo escanear símbolos sin posición activa
         available = [s for s in self._symbols if s not in self._active]
 
+        # Recopilar scores para feedback
+        scores: dict[str, int] = {}
         for sym in available:
             opp  = opps.get(sym)
             tech = techs.get(sym)
+            if opp:
+                scores[sym] = opp.score
             log.debug("scan %s: score=%s has_data=%s",
                       sym,
                       opp.score if opp else "n/a",
                       tech.has_data if tech else "n/a")
+
+        if not available:
+            self._scan_log = "⏭ Todos los símbolos ya tienen posición activa"
+            self._notify()
+            return
 
         goal_per_trade = self.goal_usd / max(1, self.multi_trades)
         result = self._strategy.scan_all(
@@ -278,14 +296,31 @@ class TradeController:
             if ok:
                 self._proposal    = proposal
                 self._proposal_ts = time.monotonic()
+                self._scan_log = (
+                    f"✓ Setup encontrado: {sym.replace('USDT','')}  "
+                    f"score={proposal.opp_score}  R:R {proposal.rr_ratio:.1f}"
+                )
                 log.info("Nueva propuesta: %s", proposal.summary())
                 if self.mode == AutoMode.SUGGEST:
                     notifier.proposal_ready(sym, proposal.side, proposal.opp_score, self.goal_usd)
                 self._notify()
             else:
+                self._scan_log = f"✗ {sym.replace('USDT','')}: rechazado — {reason}"
                 log.info("Propuesta descartada (pre-flight): %s — %s", proposal.symbol, reason)
+                self._notify()
         else:
-            log.info("Scan: sin setup válido (score < 55 o filtros técnicos)")
+            # Mostrar los top scores para que el usuario sepa qué tan cerca está
+            if scores:
+                top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:4]
+                score_str = "  ".join(
+                    f"{s.replace('USDT','')}: {sc}" for s, sc in top
+                )
+                best = top[0][1]
+                self._scan_log = f"✗ Sin setup (min 55)  —  {score_str}"
+            else:
+                self._scan_log = "✗ Sin datos de mercado aún"
+            log.info("Scan: sin setup válido — scores: %s", scores)
+            self._notify()
 
     # ── Pre-flight ────────────────────────────────────────────────────────────
 
@@ -355,6 +390,7 @@ class TradeController:
                 trade.state       = TradeState.OPEN
                 trade.result      = result
                 trade.opened_at   = int(time.time())
+                self._open_ts[req.symbol] = time.monotonic()  # gracia para WS latency
                 trade.entry_price = req.entry_price
                 trade.pnl_at_open = 0.0   # se establece en primer tick con account data
                 self._trail_high[req.symbol] = req.entry_price
@@ -453,10 +489,13 @@ class TradeController:
             if not trade.is_active:
                 continue
 
-            # Cierre por duración máxima
+            # Cierre por duración máxima.
+            # SOLO aplica a trades abiertos DESPUÉS de que se configuró el límite.
+            # Nunca cierra trades que ya estaban activos cuando se cambió la configuración.
             if (
                 self.max_duration_min > 0
                 and trade.opened_at > 0
+                and trade.opened_at >= self._duration_set_ts
                 and (int(time.time()) - trade.opened_at) >= self.max_duration_min * 60
             ):
                 log.info("Duración máxima alcanzada: %s (%dm) — cerrando", sym, self.max_duration_min)
@@ -466,10 +505,16 @@ class TradeController:
 
             pos = account.positions.get(sym)
             if pos is None or pos.size <= 0:
-                # Requerir 3 ticks consecutivos sin posición antes de marcar como cerrado.
-                # Esto evita falsos cierres durante reconexiones o carga inicial del WS.
+                # Período de gracia: los primeros 5 segundos después de confirmar OPEN
+                # el WebSocket puede no haber enviado la posición todavía.
+                # Sin esta gracia, el trade se marcaría CLOSED antes de que llegue el WS update.
+                open_since = time.monotonic() - self._open_ts.get(sym, 0)
+                if open_since < 5.0:
+                    continue
+                # Requerir 15 ticks consecutivos (~1.5s) sin posición antes de marcar cerrado.
+                # 3 ticks = 300ms era insuficiente para latencia real del exchange.
                 self._close_confirm[sym] = self._close_confirm.get(sym, 0) + 1
-                if self._close_confirm[sym] < 3:
+                if self._close_confirm[sym] < 15:
                     continue
                 trade.state        = TradeState.CLOSED
                 trade.closed_at    = int(time.time())
@@ -498,6 +543,7 @@ class TradeController:
             self._pnl_captured.discard(sym)
             self._last_upnl.pop(sym, None)
             self._be_since.pop(sym, None)
+            self._open_ts.pop(sym, None)
         if closed:
             self._notify()
 
@@ -550,22 +596,22 @@ class TradeController:
         now      = time.monotonic()
 
         # ── Rastrear cuándo el precio alcanzó el umbral de breakeven ──────────
-        if progress >= BREAKEVEN_AT_PCT:
+        if progress >= settings.breakeven_pct / 100:
             if sym not in self._be_since:
                 self._be_since[sym] = now
                 log.debug("BE threshold alcanzado: %s (%.0f%%)", sym, progress * 100)
-        elif progress < BREAKEVEN_AT_PCT * 0.80:
+        elif progress < settings.breakeven_pct / 100 * 0.80:
             # Hysteresis: resetear si el precio cae más del 20% bajo el umbral
             if sym in self._be_since:
                 log.debug("BE threshold perdido: %s (%.0f%%)", sym, progress * 100)
             self._be_since.pop(sym, None)
 
-        be_held = (now - self._be_since.get(sym, now)) >= BE_HOLD_TIME_S
+        be_held = (now - self._be_since.get(sym, now)) >= settings.be_hold_time_s
 
         # ── Breakeven (40% por >= 30s) ────────────────────────────────────────
         if (
             trade.state == TradeState.OPEN
-            and progress >= BREAKEVEN_AT_PCT
+            and progress >= settings.breakeven_pct / 100
             and be_held
             and sl != entry
         ):
@@ -583,7 +629,7 @@ class TradeController:
         # ── Profit lock (60%) — asegura ganancia parcial ──────────────────────
         elif (
             trade.state == TradeState.BREAKEVEN
-            and progress >= PROFIT_LOCK_PCT
+            and progress >= settings.profit_lock_pct / 100
             and (now - self._last_sl_upd.get(sym, 0)) >= 5.0
         ):
             lock_sl = (entry + sl_dist * PROFIT_LOCK_RATIO) if is_long else (entry - sl_dist * PROFIT_LOCK_RATIO)
@@ -597,7 +643,7 @@ class TradeController:
         # ── Trailing (70%) ────────────────────────────────────────────────────
         elif (
             trade.state in (TradeState.BREAKEVEN, TradeState.TRAILING)
-            and progress >= TRAILING_AT_PCT
+            and progress >= settings.trailing_pct / 100
             and (now - self._last_sl_upd.get(sym, 0)) >= 5.0
         ):
             atr = sl_dist / 1.5
@@ -658,6 +704,7 @@ class TradeController:
             self._pnl_captured.discard(symbol)
             self._last_upnl.pop(symbol, None)
             self._be_since.pop(symbol, None)
+            self._open_ts.pop(symbol, None)
             del self._active[symbol]
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)
@@ -697,5 +744,5 @@ class TradeController:
             return f"Propuesta lista ({age}s) — confirma o rechaza"
         if self.mode == AutoMode.MANUAL:
             return "Modo MANUAL — señales activas"
-        remaining = int(SCAN_INTERVAL - (time.monotonic() - self._last_scan))
+        remaining = int(settings.scan_interval_s - (time.monotonic() - self._last_scan))
         return f"Escaneando en {max(0, remaining)}s…"

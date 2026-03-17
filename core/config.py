@@ -35,8 +35,19 @@ class Settings(BaseSettings):
     candle_interval: int = 60   # segundos por vela de CVD (60 = 1 min)
 
     # Risk Management (Fase 5)
-    max_daily_loss_pct: float = 2.0
-    max_trades_per_day: int = 10
+    max_daily_loss_pct:      float = 2.0
+    max_trades_per_day:      int   = 10
+    circuit_breaker_enabled: bool  = True
+
+    # Protección activa (breakeven / trailing)
+    breakeven_pct:    float = 40.0   # % del TP distance para activar breakeven
+    profit_lock_pct:  float = 60.0   # % para profit lock
+    trailing_pct:     float = 70.0   # % para trailing stop
+    be_hold_time_s:   int   = 30     # segundos que el precio debe mantenerse en BE
+
+    # Estrategia
+    min_scan_score:   int   = 55     # score mínimo para generar propuesta
+    scan_interval_s:  int   = 30     # segundos entre scans automáticos
 
     @property
     def symbol_list(self) -> List[str]:

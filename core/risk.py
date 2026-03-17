@@ -87,7 +87,7 @@ class RiskFortress:
         max_loss = settings.max_daily_loss_pct   # negativo: -2.0 = -2%
 
         # ── CIRCUIT BREAKER: pérdida total (realizada + no realizada) ─────────
-        if total_exposure_pct <= -abs(max_loss):
+        if settings.circuit_breaker_enabled and total_exposure_pct <= -abs(max_loss):
             return RiskStatus(
                 level="CIRCUIT_BREAKER", color_key="sell", icon="🔴",
                 message=f"STOP — pérdida diaria {total_exposure_pct:.1f}% ≥ límite -{abs(max_loss):.1f}%",

@@ -211,7 +211,7 @@ class StrategyEngine:
         Retorna None si no hay setup válido.
         """
         # ── Filtros mínimos ────────────────────────────────────────────────
-        if opp.score < MIN_SCORE:
+        if opp.score < settings.min_scan_score:
             return None
 
         if not opp.is_actionable:

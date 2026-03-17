@@ -151,3 +151,4 @@ class ControllerState:
     status_msg:      str              = ""
     error_msg:       str              = ""
     scan_in:         int              = 0
+    scan_log:        str              = ""   # último resultado del scan (para UI)

@@ -701,6 +701,7 @@ class CommandCenter(Gtk.Box):
         self._jnl_log_len:  int   = -1
         self._market_states: dict = {}
         self._hist_ts:      float = 0.0
+        self._last_cs:      Optional[ControllerState] = None
 
         controller.on_update(self._on_controller_update)
         self._build()
@@ -957,6 +958,7 @@ class CommandCenter(Gtk.Box):
         GLib.idle_add(self._render_controller_state, cs)
 
     def _render_controller_state(self, cs: ControllerState) -> bool:
+        self._last_cs = cs
         self._render_mode(cs.mode)
         self._render_proposal(cs)
         self._render_log_for_journal()
@@ -984,10 +986,37 @@ class CommandCenter(Gtk.Box):
     def _render_proposal(self, cs: ControllerState) -> None:
         prop = cs.proposal
         if prop is None:
-            self._prop_header.set_markup(
-                f'<span color="{HEX["over"]}">Sin propuesta — escaneando oportunidades…</span>'
-            )
-            for w in [self._prop_levels, self._prop_sizing, self._prop_ttp, self._prop_timer]:
+            # Determinar color y texto del log de scan
+            log = cs.scan_log
+            if log.startswith("✓"):
+                log_col = HEX["buy"]
+            elif log.startswith("✗"):
+                log_col = HEX["sell"]
+            elif log.startswith("🔴"):
+                log_col = HEX["sell"]
+            elif log.startswith("🔍"):
+                log_col = HEX["warn"]
+            else:
+                log_col = HEX["over"]
+
+            if log:
+                self._prop_header.set_markup(
+                    f'<span color="{log_col}" weight="bold">{GLib.markup_escape_text(log)}</span>'
+                )
+            else:
+                self._prop_header.set_markup(
+                    f'<span color="{HEX["over"]}">Sin propuesta — esperando escaneo…</span>'
+                )
+
+            # Mostrar countdown al próximo scan automático
+            if cs.mode != AutoMode.MANUAL and cs.scan_in > 0:
+                self._prop_levels.set_markup(
+                    f'<span color="{HEX["over"]}" size="small">Próximo scan en {cs.scan_in}s</span>'
+                )
+            else:
+                self._prop_levels.set_text("")
+
+            for w in [self._prop_sizing, self._prop_ttp, self._prop_timer]:
                 w.set_text("")
             self._confirm_row.set_visible(False)
             return
@@ -1128,6 +1157,11 @@ class CommandCenter(Gtk.Box):
         self._render_balance(account)
         self._render_active_trades(account, self._market_states)
         self._render_simulation(sim)
+        # Refrescar countdown del scan en cada tick (scan_in cambia cada segundo)
+        if self._last_cs and self._last_cs.proposal is None:
+            cs = self._controller.state
+            self._last_cs = cs
+            self._render_proposal(cs)
 
     def _render_balance(self, account: "AccountState") -> None:
         bal = account.balance
