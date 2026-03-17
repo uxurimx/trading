@@ -47,6 +47,7 @@ from core.controller import TradeController
 from core.order_model import AutoMode
 from interface.order_panel import OrderPanel
 from interface.command_center import CommandCenter
+from interface.journal_view import JournalView
 from streams.account import AccountStream, AccountState, Position, AccountBalance
 from streams.klines import KlineStream
 from streams.market import CandleCVD, MarketState, MarketStream
@@ -1457,6 +1458,12 @@ class MainWindow(Adw.ApplicationWindow):
             market_box, "market", "📊 Mercado", "view-grid-symbolic"
         )
 
+        # ── Pestaña 3: Journal ──────────────────────────────────────────
+        self._journal_view = JournalView()
+        self._stack.add_titled_with_icon(
+            self._journal_view, "journal", "📋 Journal", "document-open-symbolic"
+        )
+
         # ── Timer de refresco (100ms = 10fps) ─────────────────
         GLib.timeout_add(100, self._refresh)
 
@@ -1615,6 +1622,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._order_panel.update(self.acct.state, risk, sim_dict)
         self._cmd_center.update(self.acct.state, risk, sim_dict,
                                 market_states=self.stream.states)
+        self._journal_view.refresh()
 
         # ── Escribir JSON para la extensión GNOME Shell (cada ~2 s) ────────
         self._status_writer.tick(

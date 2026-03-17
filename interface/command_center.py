@@ -201,11 +201,12 @@ def _trade_risk_analysis(trade: "TradeRecord", pos: Optional["Position"],
         lines.append(f"💸 Funding est. 4h: -${funding_cost_4h:.3f} (notional ${notional:.1f})")
 
     # Tiempo vs progreso
+    elapsed_str = _fmt_duration_s(int(elapsed_min * 60))
     if elapsed_min > 30 and prog_pct < 20:
-        lines.append(f"⚠ {int(elapsed_min)}min y solo {prog_pct:.0f}% de progreso — mercado lento")
+        lines.append(f"⚠ {elapsed_str} y solo {prog_pct:.0f}% de progreso — mercado lento")
         lines.append("  → Considera aumentar el límite de tiempo o ajustar el SL")
     elif elapsed_min > 60 and prog_pct < 50:
-        lines.append(f"⏱ {int(elapsed_min)}min transcurridos — progreso moderado ({prog_pct:.0f}%)")
+        lines.append(f"⏱ {elapsed_str} transcurridos — progreso moderado ({prog_pct:.0f}%)")
     elif prog_pct >= 50:
         lines.append(f"✓ Buen progreso: {prog_pct:.0f}% del camino al TP")
 
@@ -250,8 +251,11 @@ class TradePriceChart(Gtk.DrawingArea):
         self.queue_draw()
 
     def _draw(self, _area, cr, w: int, h: int) -> None:
-        lo  = min(self._sl, self._mark) * 0.9985
-        hi  = max(self._tp, self._mark) * 1.0015
+        prices = [p for p in [self._sl, self._tp, self._mark, self._entry] if p > 0]
+        if not prices:
+            return
+        lo  = min(prices) * 0.9985
+        hi  = max(prices) * 1.0015
         rng = hi - lo or 1e-9
 
         def px(price: float) -> float:
@@ -423,10 +427,12 @@ class TradeCard(Gtk.Box):
         self._lev_lbl      = _ml()
         self._notional_lbl = _ml()
         self._eta_lbl      = _ml()
+        self._risk_now_lbl = _ml()
         prog_row.append(self._prog)
         prog_row.append(self._lev_lbl)
         prog_row.append(self._notional_lbl)
         prog_row.append(self._eta_lbl)
+        prog_row.append(self._risk_now_lbl)
         self.append(prog_row)
 
         # ── Fila 4: advertencia inline (solo visible cuando hay alerta) ─
@@ -568,6 +574,21 @@ class TradeCard(Gtk.Box):
         self._notional_lbl.set_markup(
             f'<span color="{HEX["sub"]}" size="small">${notional:,.1f}</span>'
         )
+
+        # Riesgo actual en SL: cuánto ganarías/perderías si el SL se activa ahora
+        if trade.current_sl > 0 and entry > 0 and req.qty > 0:
+            if req.side == "Buy":
+                risk_now = req.qty * (trade.current_sl - entry)
+            else:
+                risk_now = req.qty * (entry - trade.current_sl)
+            sign_r = "+" if risk_now >= 0 else ""
+            risk_col = HEX["buy"] if risk_now >= 0 else HEX["sell"]
+            self._risk_now_lbl.set_markup(
+                f'<span color="{HEX["sub"]}" size="small">SL↓</span>'
+                f'<span color="{risk_col}" size="small" weight="bold">{sign_r}${risk_now:.2f}</span>'
+            )
+        else:
+            self._risk_now_lbl.set_text("")
 
         # Indicador de gestión automática (inline, compacto)
         if trade.auto_mode == AutoMode.FULL_AUTO:

@@ -43,9 +43,12 @@ log = logging.getLogger("qts.controller")
 
 SCAN_INTERVAL      = 30
 PROPOSAL_TTL       = 60
-BREAKEVEN_AT_PCT   = 0.40   # mover SL a entrada cuando progreso >= 40% hacia TP
-TRAILING_AT_PCT    = 0.70   # activar trailing cuando progreso >= 70%
+BREAKEVEN_AT_PCT   = 0.40
+TRAILING_AT_PCT    = 0.70
 TRAIL_MIN_MOVE_PCT = 0.003
+BE_HOLD_TIME_S     = 30     # secs el precio debe mantenerse >= BE para activar
+PROFIT_LOCK_PCT    = 0.60   # mover SL a profit parcial cuando progress >= 60%
+PROFIT_LOCK_RATIO  = 0.40   # SL se mueve a entry + 40% del sl_dist
 
 
 class TradeController:
@@ -93,6 +96,9 @@ class TradeController:
         self.max_duration_min: int = 0    # 0 = sin límite
         self.multi_trades:     int = 1    # cuántos trades en paralelo para alcanzar el goal
         self._close_confirm:   Dict[str, int] = {}  # ticks consecutivos sin posición
+        self._pnl_captured:  Set[str]         = set()   # trades con pnl_at_open ya capturado
+        self._last_upnl:     Dict[str, float]  = {}      # último unrealized PnL conocido
+        self._be_since:      Dict[str, float]  = {}      # cuándo progress alcanzó BE threshold
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -189,6 +195,12 @@ class TradeController:
     ) -> None:
         self._sync_active_trades(account)
 
+        # Capturar baseline de PnL al primer tick activo del trade
+        for sym, trade in self._active.items():
+            if trade.is_active and sym not in self._pnl_captured:
+                trade.pnl_at_open = account.daily_pnl
+                self._pnl_captured.add(sym)
+
         # Gestionar trades activos SIEMPRE (respeta el modo por-trade).
         # El modo global MANUAL solo bloquea nuevas entradas, no la gestión
         # de trades que el usuario ha activado individualmente con AUTO.
@@ -199,9 +211,8 @@ class TradeController:
             return
 
         if risk.is_breaker:
-            if self._active:
-                log.warning("Circuit breaker — cerrando todas las posiciones")
-                self.close_now()
+            # Solo bloquea nuevas entradas — nunca cierra posiciones activas.
+            # Cerrar posiciones activas es decisión del trader, no del sistema.
             self._proposal = None
             return
 
@@ -389,6 +400,12 @@ class TradeController:
             if sym in self._active or sym in self._pending_exec:
                 continue
             # Crear OrderRequest sintético desde la posición real de Bybit
+            sl_dist  = abs(pos.entry_price - pos.stop_loss)  if pos.stop_loss  > 0 else 0.0
+            tp_dist  = abs(pos.take_profit - pos.entry_price) if pos.take_profit > 0 else 0.0
+            risk_usd = pos.size * sl_dist
+            goal_usd = pos.size * tp_dist
+            rr       = tp_dist / sl_dist if sl_dist > 0 else 1.5
+            lev      = max(1, int(pos.leverage)) if pos.leverage else 1
             req = OrderRequest(
                 symbol      = sym,
                 side        = pos.side,
@@ -396,7 +413,10 @@ class TradeController:
                 entry_price = pos.entry_price,
                 sl_price    = pos.stop_loss,
                 tp_price    = pos.take_profit,
-                rr_ratio    = 1.5,
+                risk_usd    = risk_usd,
+                goal_usd    = goal_usd,
+                rr_ratio    = max(1.0, rr),
+                leverage    = lev,
             )
             # created_time viene en ms desde Bybit
             opened = (pos.created_time // 1000) if pos.created_time > 1_000_000_000_000 else (
@@ -453,7 +473,12 @@ class TradeController:
                     continue
                 trade.state        = TradeState.CLOSED
                 trade.closed_at    = int(time.time())
-                trade.pnl_usd      = account.daily_pnl - trade.pnl_at_open
+                # Preferir upnl del último tick (más directo que delta daily_pnl)
+                last_upnl = self._last_upnl.get(sym)
+                if last_upnl is not None and abs(last_upnl) >= 0.001:
+                    trade.pnl_usd = last_upnl
+                else:
+                    trade.pnl_usd = account.daily_pnl - trade.pnl_at_open
                 trade.close_reason = "SL/TP/manual"
                 log.info("Trade cerrado: %s  PnL≈$%.2f", sym, trade.pnl_usd)
                 self._log.append(trade)
@@ -461,6 +486,7 @@ class TradeController:
                 notifier.trade_closed(sym, trade.pnl_usd, trade.close_reason)
                 closed.append(sym)
             else:
+                self._last_upnl[sym] = pos.unrealized_pnl  # rastrear PnL no realizado
                 self._close_confirm.pop(sym, None)  # posición activa → resetear contador
 
         for sym in closed:
@@ -469,6 +495,9 @@ class TradeController:
             self._trail_low.pop(sym, None)
             self._last_sl_upd.pop(sym, None)
             self._close_confirm.pop(sym, None)
+            self._pnl_captured.discard(sym)
+            self._last_upnl.pop(sym, None)
+            self._be_since.pop(sym, None)
         if closed:
             self._notify()
 
@@ -500,8 +529,6 @@ class TradeController:
         if not pos or pos.size <= 0:
             return
 
-        # Precio en tiempo real del ticker (se actualiza con cada trade)
-        # pos.mark_price es estático — solo cambia cuando Bybit manda posición
         ms   = states.get(sym) if states else None
         mark = (ms.ticker.last_price if ms and ms.ticker.last_price > 0
                 else pos.mark_price if pos.mark_price > 0
@@ -522,24 +549,52 @@ class TradeController:
         progress = (mark - entry) / tp_dist if is_long else (entry - mark) / tp_dist
         now      = time.monotonic()
 
-        # ── Breakeven ─────────────────────────────────────────────────────
+        # ── Rastrear cuándo el precio alcanzó el umbral de breakeven ──────────
+        if progress >= BREAKEVEN_AT_PCT:
+            if sym not in self._be_since:
+                self._be_since[sym] = now
+                log.debug("BE threshold alcanzado: %s (%.0f%%)", sym, progress * 100)
+        elif progress < BREAKEVEN_AT_PCT * 0.80:
+            # Hysteresis: resetear si el precio cae más del 20% bajo el umbral
+            if sym in self._be_since:
+                log.debug("BE threshold perdido: %s (%.0f%%)", sym, progress * 100)
+            self._be_since.pop(sym, None)
+
+        be_held = (now - self._be_since.get(sym, now)) >= BE_HOLD_TIME_S
+
+        # ── Breakeven (40% por >= 30s) ────────────────────────────────────────
         if (
             trade.state == TradeState.OPEN
             and progress >= BREAKEVEN_AT_PCT
+            and be_held
             and sl != entry
         ):
-            new_sl = entry
-            log.info("Breakeven: %s SL → %s", sym, new_sl)
+            # Mover a entry + pequeño buffer (5% del SL_dist) para cubrir spread
+            buffer = sl_dist * 0.05
+            new_sl = (entry + buffer) if is_long else (entry - buffer)
+            log.info("Breakeven: %s SL → %.5g (mantenido %.0fs)", sym, new_sl, now - self._be_since[sym])
             trade.state      = TradeState.BREAKEVEN
             trade.current_sl = new_sl
-            self._bridge.submit(
-                self._executor.set_sl_tp(sym, sl=new_sl, side=req.side)
-            )
+            self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "breakeven"))
             self._last_sl_upd[sym] = now
             notifier.breakeven_activated(sym, new_sl)
             self._notify()
 
-        # ── Trailing ──────────────────────────────────────────────────────
+        # ── Profit lock (60%) — asegura ganancia parcial ──────────────────────
+        elif (
+            trade.state == TradeState.BREAKEVEN
+            and progress >= PROFIT_LOCK_PCT
+            and (now - self._last_sl_upd.get(sym, 0)) >= 5.0
+        ):
+            lock_sl = (entry + sl_dist * PROFIT_LOCK_RATIO) if is_long else (entry - sl_dist * PROFIT_LOCK_RATIO)
+            if (is_long and lock_sl > trade.current_sl) or (not is_long and lock_sl < trade.current_sl):
+                log.info("Profit lock: %s SL → %.5g (+%.0f%% del riesgo asegurado)", sym, lock_sl, PROFIT_LOCK_RATIO * 100)
+                trade.current_sl = lock_sl
+                self._bridge.submit(self._modify_sl_safe(sym, lock_sl, req.side, "profit-lock"))
+                self._last_sl_upd[sym] = now
+                self._notify()
+
+        # ── Trailing (70%) ────────────────────────────────────────────────────
         elif (
             trade.state in (TradeState.BREAKEVEN, TradeState.TRAILING)
             and progress >= TRAILING_AT_PCT
@@ -554,9 +609,7 @@ class TradeController:
                     first_trail = trade.state != TradeState.TRAILING
                     trade.state      = TradeState.TRAILING
                     trade.current_sl = new_sl
-                    self._bridge.submit(
-                        self._executor.set_sl_tp(sym, sl=new_sl, side=req.side)
-                    )
+                    self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "trailing"))
                     self._last_sl_upd[sym] = now
                     if first_trail:
                         notifier.trailing_activated(sym, new_sl)
@@ -569,13 +622,25 @@ class TradeController:
                     first_trail = trade.state != TradeState.TRAILING
                     trade.state      = TradeState.TRAILING
                     trade.current_sl = new_sl
-                    self._bridge.submit(
-                        self._executor.set_sl_tp(sym, sl=new_sl, side=req.side)
-                    )
+                    self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "trailing"))
                     self._last_sl_upd[sym] = now
                     if first_trail:
                         notifier.trailing_activated(sym, new_sl)
                     self._notify()
+
+    async def _modify_sl_safe(self, sym: str, new_sl: float, side: str, reason: str) -> None:
+        """Envía modificación de SL con retry automático en caso de fallo."""
+        import asyncio as _aio
+        for attempt in range(2):
+            try:
+                await self._executor.set_sl_tp(sym, sl=new_sl, side=side)
+                log.info("SL %s OK: %s → %.5g", reason, sym, new_sl)
+                return
+            except Exception as exc:
+                log.error("SL %s fallo #%d: %s → %.5g: %s", reason, attempt+1, sym, new_sl, exc)
+                if attempt == 0:
+                    await _aio.sleep(1.5)
+        log.error("SL %s no se pudo mover: %s", reason, sym)
 
     async def _do_close(self, symbol: str, req: OrderRequest) -> None:
         result = await self._executor.close_position(symbol, req.qty, req.side)
@@ -590,6 +655,9 @@ class TradeController:
             self._log.append(trade)
             save_trade(trade)
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
+            self._pnl_captured.discard(symbol)
+            self._last_upnl.pop(symbol, None)
+            self._be_since.pop(symbol, None)
             del self._active[symbol]
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)

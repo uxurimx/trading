@@ -201,3 +201,64 @@ def get_journal_stats() -> dict:
             "worst_trade": 0.0, "avg_rr": 0.0, "avg_score": 0.0,
             "best_symbol": "──",
         }
+
+
+def get_all_trades(limit: int = 200) -> list:
+    """Retorna historial completo de trades para el Journal."""
+    try:
+        con = get_connection()
+        rows = con.execute("""
+            SELECT id, symbol, side, auto_mode, state,
+                   entry_price, sl_price, tp_price, qty, risk_usd,
+                   rr_ratio, opp_score, pnl_usd, close_reason,
+                   opened_at, closed_at, duration_s
+            FROM trade_journal
+            ORDER BY closed_at DESC LIMIT ?
+        """, (limit,)).fetchall()
+        con.close()
+        return [
+            {
+                "id":           r[0],
+                "symbol":       r[1],
+                "side":         r[2] or "",
+                "auto_mode":    r[3] or "",
+                "state":        r[4],
+                "entry_price":  float(r[5] or 0),
+                "sl_price":     float(r[6] or 0),
+                "tp_price":     float(r[7] or 0),
+                "qty":          float(r[8] or 0),
+                "risk_usd":     float(r[9] or 0),
+                "rr_ratio":     float(r[10] or 0),
+                "opp_score":    int(r[11] or 0),
+                "pnl_usd":      float(r[12] or 0),
+                "close_reason": r[13] or "",
+                "opened_at":    int(r[14] or 0),
+                "closed_at":    int(r[15] or 0),
+                "duration_s":   int(r[16] or 0),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        log.error("get_all_trades falló: %s", e)
+        return []
+
+
+def get_cumulative_pnl() -> list:
+    """Retorna [(closed_at, cum_pnl)] para el gráfico de equity curve."""
+    try:
+        con = get_connection()
+        rows = con.execute("""
+            SELECT closed_at, pnl_usd FROM trade_journal
+            WHERE state = 'CLOSED' AND closed_at > 0
+            ORDER BY closed_at ASC
+        """).fetchall()
+        con.close()
+        cum = 0.0
+        result = []
+        for ts, pnl in rows:
+            cum += float(pnl or 0)
+            result.append((int(ts), cum))
+        return result
+    except Exception as e:
+        log.error("get_cumulative_pnl falló: %s", e)
+        return []
