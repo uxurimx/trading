@@ -19,7 +19,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Pango
 
-from core.order_model import AutoMode, TradeState, ControllerState, MAX_POSITIONS
+from core.order_model import AutoMode, TradeState, ControllerState
 from core.db import get_journal_stats
 
 if TYPE_CHECKING:
@@ -330,6 +330,10 @@ class TradeCard(Gtk.Box):
         self._time_lbl  = _ml()
         self._sym_lbl.set_hexpand(True)
 
+        self._mode_btn = Gtk.Button(label="▶ AUTO")
+        self._mode_btn.add_css_class("flat")
+        self._mode_btn.connect("clicked", self._on_mode_toggle)
+
         close_btn = Gtk.Button(label="✗")
         close_btn.add_css_class("destructive-action")
         close_btn.set_size_request(32, -1)
@@ -343,6 +347,7 @@ class TradeCard(Gtk.Box):
         summary.append(self._sym_lbl)
         summary.append(self._state_lbl)
         summary.append(self._pnl_lbl)
+        summary.append(self._mode_btn)
         summary.append(expand_btn)
         summary.append(close_btn)
         self.append(summary)
@@ -409,6 +414,16 @@ class TradeCard(Gtk.Box):
         self._revealer.set_reveal_child(self._expanded)
         self._expand_btn.set_label("▲ Ocultar" if self._expanded else "▼ Detalles")
 
+    def _on_mode_toggle(self, _btn) -> None:
+        if not self._symbol:
+            return
+        trade = self._controller._active.get(self._symbol)
+        if trade:
+            new_mode = (AutoMode.MANUAL
+                        if trade.auto_mode == AutoMode.FULL_AUTO
+                        else AutoMode.FULL_AUTO)
+            self._controller.set_trade_mode(self._symbol, new_mode)
+
     def show_trade(self, trade: "TradeRecord", mark: float, upnl: float) -> None:
         self.set_visible(True)
         req = trade.request
@@ -434,6 +449,14 @@ class TradeCard(Gtk.Box):
         self._state_lbl.set_markup(
             f'<span color="{HEX[s_color]}" weight="bold">{s_label}</span>'
         )
+
+        # Botón de modo: muestra el estado actual y permite cambiarlo
+        if trade.auto_mode == AutoMode.FULL_AUTO:
+            self._mode_btn.set_label("⏸ MANUAL")
+            self._mode_btn.set_tooltip_text("Click para volver a modo MANUAL")
+        else:
+            self._mode_btn.set_label("▶ AUTO")
+            self._mode_btn.set_tooltip_text("Click para activar gestión automática (breakeven + trailing)")
 
         sign    = "+" if upnl >= 0 else ""
         pnl_col = HEX["buy"] if upnl >= 0 else HEX["sell"]
@@ -628,7 +651,7 @@ class CommandCenter(Gtk.ScrolledWindow):
 
         # ── Trades activos ───────────────────────────────────────────────
         trades_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._trades_title = _section(f"TRADES ACTIVOS (0/{MAX_POSITIONS})")
+        self._trades_title = _section("TRADES ACTIVOS (0)")
         trades_header.append(self._trades_title)
         close_all_btn = Gtk.Button(label="✗ Cerrar todo")
         close_all_btn.add_css_class("destructive-action")
@@ -637,12 +660,9 @@ class CommandCenter(Gtk.ScrolledWindow):
         trades_header.append(close_all_btn)
         inner.append(trades_header)
 
-        self._trade_cards: list[TradeCard] = []
-        for _ in range(MAX_POSITIONS):
-            card = TradeCard(self._controller)
-            card.clear()
-            self._trade_cards.append(card)
-            inner.append(card)
+        self._trade_cards: dict[str, TradeCard] = {}
+        self._cards_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        inner.append(self._cards_box)
 
         self._no_trades_lbl = _ml()
         self._no_trades_lbl.set_markup(
@@ -864,22 +884,30 @@ class CommandCenter(Gtk.ScrolledWindow):
     def _render_active_trades(self, account: "AccountState") -> None:
         actives = list(self._controller._active.values())
         n = len(actives)
+        active_syms = {t.symbol for t in actives}
 
-        # Actualizar título de la sección
-        self._trades_title.set_text(f"TRADES ACTIVOS ({n}/{MAX_POSITIONS})")
+        # Actualizar título
+        self._trades_title.set_text(f"TRADES ACTIVOS ({n})")
         self._no_trades_lbl.set_visible(n == 0)
 
-        for i, card in enumerate(self._trade_cards):
-            if i < len(actives):
-                trade = actives[i]
-                sym   = trade.symbol
-                pos   = account.positions.get(sym)
-                mark  = pos.mark_price if pos and pos.mark_price > 0 else (
+        # Eliminar cards de trades ya cerrados
+        for sym in list(self._trade_cards.keys()):
+            if sym not in active_syms:
+                card = self._trade_cards.pop(sym)
+                self._cards_box.remove(card)
+
+        # Crear/actualizar cards
+        for trade in actives:
+            sym = trade.symbol
+            if sym not in self._trade_cards:
+                card = TradeCard(self._controller)
+                self._trade_cards[sym] = card
+                self._cards_box.append(card)
+            pos   = account.positions.get(sym)
+            mark  = pos.mark_price if pos and pos.mark_price > 0 else (
                     pos.entry_price if pos else 0.0)
-                upnl  = pos.unrealized_pnl if pos else 0.0
-                card.show_trade(trade, mark, upnl)
-            else:
-                card.clear()
+            upnl  = pos.unrealized_pnl if pos else 0.0
+            self._trade_cards[sym].show_trade(trade, mark, upnl)
 
     def _render_simulation(self, sim: Optional[dict]) -> None:
         if not sim or "error" in sim:

@@ -137,7 +137,7 @@ class TradeRecord:
 
 # ─── Estado del controlador (para notificar a la UI) ─────────────────────────
 
-MAX_POSITIONS: int = 3    # máximo de trades simultáneos
+MAX_POSITIONS: int = 20   # slots de UI (sin límite real en el controller)
 
 
 @dataclass

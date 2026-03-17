@@ -24,7 +24,7 @@ from gi.repository import GLib
 
 from core.order_model import (
     AutoMode, TradeState, TradeRecord, OrderRequest,
-    OrderResult, ControllerState, MAX_POSITIONS,
+    OrderResult, ControllerState,
 )
 from core.strategy import StrategyEngine
 from core.db import save_trade
@@ -119,6 +119,14 @@ class TradeController:
     def set_max_duration(self, minutes: int) -> None:
         self.max_duration_min = max(0, minutes)
 
+    def set_trade_mode(self, symbol: str, mode: AutoMode) -> None:
+        """Cambia el modo de gestión de un trade activo individual."""
+        trade = self._active.get(symbol)
+        if trade:
+            log.info("Trade %s: modo %s → %s", symbol, trade.auto_mode.value, mode.value)
+            trade.auto_mode = mode
+            self._notify()
+
     def approve_proposal(self) -> None:
         if self._proposal and self._proposal.symbol not in self._pending_exec:
             self._execute(self._proposal)
@@ -186,13 +194,9 @@ class TradeController:
             self._proposal = None
             return
 
-        # Gestionar trades activos en FULL_AUTO
-        if self._active and self.mode == AutoMode.FULL_AUTO:
+        # Gestionar trades activos (por modo individual de cada trade)
+        if self._active:
             self._manage_active_trades(account, states)
-
-        # Si estamos al límite de posiciones, no escanear
-        if len(self._active) >= MAX_POSITIONS:
-            return
 
         if self._pending_exec:
             return
@@ -278,8 +282,7 @@ class TradeController:
             return False, f"ya hay posición activa en {req.symbol}"
         if req.symbol in account.positions:
             return False, f"ya hay posición abierta en {req.symbol}"
-        if len(self._active) >= MAX_POSITIONS:
-            return False, f"máximo {MAX_POSITIONS} posiciones simultáneas"
+        # Sin límite de posiciones simultáneas
         avail = account.balance.available_balance
         if avail > 0 and req.margin > avail * 0.95:
             return False, f"margen requerido ${req.margin:.2f} > disponible ${avail:.2f}"
@@ -458,7 +461,10 @@ class TradeController:
         states:  Dict[str, "MarketState"],
     ) -> None:
         for sym, trade in list(self._active.items()):
-            self._manage_one(sym, trade, account)
+            # Solo gestiona trades con modo FULL_AUTO (global o por trade)
+            effective = trade.auto_mode if trade.auto_mode != AutoMode.MANUAL else self.mode
+            if effective == AutoMode.FULL_AUTO:
+                self._manage_one(sym, trade, account)
 
     def _manage_one(
         self,

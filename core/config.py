@@ -18,7 +18,11 @@ class Settings(BaseSettings):
     bybit_testnet: bool = False
 
     # Mercado — str para evitar que pydantic-settings intente parsear como JSON
-    symbols: str = "XRPUSDT,SOLUSDT,BTCUSDT,ETHUSDT,XLMUSDT"
+    symbols: str = (
+        "XRPUSDT,SOLUSDT,BTCUSDT,ETHUSDT,XLMUSDT,"
+        "DOGEUSDT,ADAUSDT,LTCUSDT,AVAXUSDT,LINKUSDT,"
+        "DOTUSDT,NEARUSDT,ATOMUSDT,FTMUSDT,INJUSDT"
+    )
     default_symbol: str = "XRPUSDT"
 
     # WebSocket
