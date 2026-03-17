@@ -1350,9 +1350,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_resizable(True)
         self.add_css_class("qts-window")
 
-        # Maximizar al abrir
-        self.connect("show", lambda _: self.maximize())
-
         # F11 para maximizar/restaurar
         ctrl = Gtk.EventControllerKey()
         ctrl.connect("key-pressed", self._on_key_press)
@@ -1373,17 +1370,19 @@ class MainWindow(Adw.ApplicationWindow):
         self._multi_tech: dict = {}
         self._multi_ctr:  int  = 0
 
-        # ── Layout raíz ────────────────────────────────────────
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.set_content(root)
-
         # ── ViewStack (dos pestañas) ────────────────────────────
         self._stack = Adw.ViewStack()
         self._stack.set_hexpand(True)
         self._stack.set_vexpand(True)
 
-        # ── Header bar (con ViewSwitcher centrado) ──────────────
-        root.append(self._build_header())
+        # ── Layout raíz: ToolbarView (forma correcta en libadwaita)
+        # Garantiza que el header tiene altura fija y el stack recibe
+        # exactamente el resto — esto permite que los ScrolledWindow
+        # dentro del stack tengan un techo real y puedan hacer scroll.
+        toolbar_view = Adw.ToolbarView()
+        toolbar_view.add_top_bar(self._build_header())
+        toolbar_view.set_content(self._stack)
+        self.set_content(toolbar_view)
 
         # ── Pestaña 1: CommandCenter (sin barras extra — más espacio vertical)
         self._cmd_center = CommandCenter(self.controller, self._strategy, self._executor)
@@ -1445,8 +1444,6 @@ class MainWindow(Adw.ApplicationWindow):
         self._stack.add_titled_with_icon(
             market_box, "market", "📊 Mercado", "view-grid-symbolic"
         )
-
-        root.append(self._stack)
 
         # ── Timer de refresco (100ms = 10fps) ─────────────────
         GLib.timeout_add(100, self._refresh)

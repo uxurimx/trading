@@ -87,14 +87,19 @@ def _fmt_duration(opened_at: int) -> str:
     if not opened_at:
         return "──"
     elapsed = int(time.time() - opened_at)
+    if elapsed < 0:
+        return "??"
     if elapsed < 60:
         return f"{elapsed}s"
-    elif elapsed < 3600:
+    if elapsed < 3600:
         return f"{elapsed // 60}m {elapsed % 60}s"
-    else:
+    if elapsed < 86400:
         h = elapsed // 3600
         m = (elapsed % 3600) // 60
         return f"{h}h {m}m"
+    d = elapsed // 86400
+    h = (elapsed % 86400) // 3600
+    return f"{d}d {h}h"
 
 
 def _estimate_ttp(entry: float, current: float, tp: float,
@@ -229,7 +234,7 @@ class TradePriceChart(Gtk.DrawingArea):
 
     def __init__(self) -> None:
         super().__init__()
-        self.set_size_request(-1, 72)
+        self.set_size_request(-1, 52)
         self.set_hexpand(True)
         self._entry = self._sl = self._tp = self._mark = 0.0
         self._side  = "Buy"
@@ -366,14 +371,15 @@ class TradeCard(Gtk.Box):
         self._build()
 
     def _build(self) -> None:
-        # ── Fila 1: símbolo · estado · PnL · modo · expand · cerrar ───
+        # ── Fila 1: símbolo · estado · PnL · duración · modo · expand · cerrar ──
         summary = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         summary.set_margin_start(6); summary.set_margin_end(6)
-        summary.set_margin_top(4);   summary.set_margin_bottom(1)
+        summary.set_margin_top(4);   summary.set_margin_bottom(2)
 
         self._sym_lbl   = _ml()
         self._state_lbl = _ml()
         self._pnl_lbl   = _ml()
+        self._dur_lbl   = _ml()   # duración siempre visible
         self._auto_lbl  = _ml()   # muestra estado AUTO / MANUAL
         self._sym_lbl.set_hexpand(True)
 
@@ -386,7 +392,7 @@ class TradeCard(Gtk.Box):
         close_btn.set_size_request(30, -1)
         close_btn.connect("clicked", self._on_close)
 
-        expand_btn = Gtk.Button(label="▼")
+        expand_btn = Gtk.Button(label="▼ Detalle")
         expand_btn.add_css_class("flat")
         expand_btn.connect("clicked", self._on_toggle)
         self._expand_btn = expand_btn
@@ -394,26 +400,41 @@ class TradeCard(Gtk.Box):
         summary.append(self._sym_lbl)
         summary.append(self._state_lbl)
         summary.append(self._pnl_lbl)
+        summary.append(self._dur_lbl)
         summary.append(self._auto_lbl)
         summary.append(self._mode_btn)
         summary.append(expand_btn)
         summary.append(close_btn)
         self.append(summary)
 
-        # ── Fila 2: progreso + duración + ETA ─────────────────────────
+        # ── Fila 2: gráfico siempre visible ────────────────────────────
+        self._chart = TradePriceChart()
+        self._chart.set_margin_start(6); self._chart.set_margin_end(6)
+        self.append(self._chart)
+
+        # ── Fila 3: progreso + lev + notional + ETA ────────────────────
         prog_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         prog_row.set_margin_start(6); prog_row.set_margin_end(6)
-        prog_row.set_margin_bottom(3)
+        prog_row.set_margin_bottom(2)
 
         self._prog = Gtk.ProgressBar()
         self._prog.set_show_text(True)
         self._prog.set_hexpand(True)
-        self._dur_lbl = _ml()
-        self._eta_lbl = _ml()
+        self._lev_lbl      = _ml()
+        self._notional_lbl = _ml()
+        self._eta_lbl      = _ml()
         prog_row.append(self._prog)
-        prog_row.append(self._dur_lbl)
+        prog_row.append(self._lev_lbl)
+        prog_row.append(self._notional_lbl)
         prog_row.append(self._eta_lbl)
         self.append(prog_row)
+
+        # ── Fila 4: advertencia inline (solo visible cuando hay alerta) ─
+        self._warn_lbl = _ml()
+        self._warn_lbl.set_margin_start(8); self._warn_lbl.set_margin_end(8)
+        self._warn_lbl.set_margin_bottom(2)
+        self._warn_lbl.set_visible(False)
+        self.append(self._warn_lbl)
 
         # ── Detalle (revealer) ─────────────────────────────────────────
         self._revealer = Gtk.Revealer()
@@ -425,25 +446,18 @@ class TradeCard(Gtk.Box):
         detail_box.set_margin_bottom(6)
         detail_box.append(_sep())
 
-        # Niveles
         self._levels_lbl  = _ml()
         self._sizing_lbl  = _ml()
         self._opened_lbl  = _ml()
         self._reasons_lbl = _ml()
         self._reasons_lbl.set_wrap(True)
         self._reasons_lbl.set_max_width_chars(50)
-
-        # Gráfico
-        self._chart = TradePriceChart()
-
-        # Análisis de riesgo
         self._risk_lbl1 = _ml()
         self._risk_lbl2 = _ml()
         self._risk_lbl3 = _ml()
         self._risk_lbl4 = _ml()
 
         for w in [self._levels_lbl, self._sizing_lbl, self._opened_lbl,
-                  self._chart,
                   self._reasons_lbl, self._risk_lbl1, self._risk_lbl2,
                   self._risk_lbl3, self._risk_lbl4]:
             detail_box.append(w)
@@ -535,14 +549,24 @@ class TradeCard(Gtk.Box):
             self._prog.set_fraction(0.0)
             self._prog.set_text(f"entry {_fp(entry)}")
 
-        # Tiempo
+        # Duración (siempre visible en header)
         dur = _fmt_duration(trade.opened_at)
         eta = _estimate_ttp(entry, mark, req.tp_price, trade.opened_at, req.side)
         self._dur_lbl.set_markup(
-            f'<span color="{HEX["sub"]}" size="small">⏱{dur}</span>'
+            f'<span color="{HEX["sub"]}" size="small">⏱ {dur}</span>'
         )
         self._eta_lbl.set_markup(
-            f'<span color="{HEX["teal"]}" size="small">→{eta}</span>'
+            f'<span color="{HEX["teal"]}" size="small">→TP {eta}</span>'
+        )
+
+        # Apalancamiento y valor nocional
+        lev = req.leverage if req.leverage else 1
+        notional = req.qty * entry
+        self._lev_lbl.set_markup(
+            f'<span color="{HEX["warn"]}" size="small">{lev}x</span>'
+        )
+        self._notional_lbl.set_markup(
+            f'<span color="{HEX["sub"]}" size="small">${notional:,.1f}</span>'
         )
 
         # Indicador de gestión automática (inline, compacto)
@@ -599,7 +623,7 @@ class TradeCard(Gtk.Box):
         else:
             self._reasons_lbl.set_text("")
 
-        # Gráfico
+        # Gráfico (siempre visible)
         self._chart.update(entry, trade.current_sl, req.tp_price, mark, req.side)
 
         # Análisis de riesgo
@@ -613,6 +637,17 @@ class TradeCard(Gtk.Box):
                 )
             else:
                 lbl.set_text("")
+
+        # Advertencia inline (primera línea crítica siempre visible)
+        warn = next((l for l in risk_lines if l.startswith(("⚠", "⏱", "💸"))), "")
+        if warn:
+            self._warn_lbl.set_markup(
+                f'<span color="{HEX["warn"]}" size="small">'
+                + GLib.markup_escape_text(warn) + "</span>"
+            )
+            self._warn_lbl.set_visible(True)
+        else:
+            self._warn_lbl.set_visible(False)
 
     def clear(self) -> None:
         self.set_visible(False)
