@@ -305,10 +305,21 @@ class TradeController:
         self._active = trade
 
         async def _do() -> None:
-            # Configurar leverage antes de entrar
             await self._executor.set_leverage(req.symbol, req.leverage)
             result = await self._executor.place_market_bracket(req)
-            # Volver al main thread de GTK para actualizar estado
+            # Bybit ignora SL/TP en market orders si el fill es instantáneo.
+            # Enviamos set_sl_tp inmediatamente después del fill como confirmación.
+            if result.success and (req.sl_price > 0 or req.tp_price > 0):
+                import asyncio as _aio
+                await _aio.sleep(0.5)   # pequeña pausa para que Bybit registre la posición
+                await self._executor.set_sl_tp(
+                    req.symbol,
+                    sl   = req.sl_price,
+                    tp   = req.tp_price,
+                    side = req.side,
+                )
+                log.info("SL/TP confirmados: %s  SL=%s  TP=%s",
+                         req.symbol, req.sl_price, req.tp_price)
             GLib.idle_add(self._on_order_result, result, req)
 
         self._bridge.submit(_do())
