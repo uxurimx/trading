@@ -1346,7 +1346,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self.set_title("QTS — Quantum Trading System")
         self.set_default_size(1200, 720)
-        self.set_size_request(600, 380)
+        self.set_size_request(700, 300)
         self.set_resizable(True)
         self.add_css_class("qts-window")
 
@@ -1426,6 +1426,7 @@ class MainWindow(Adw.ApplicationWindow):
         intel_scroll.set_child(self._intel_panel)
         intel_scroll.set_size_request(310, -1)
         intel_scroll.set_propagate_natural_width(False)
+        intel_scroll.set_propagate_natural_height(False)
         intel_scroll.set_hexpand(False)
         intel_scroll.set_vexpand(True)
 
@@ -1435,7 +1436,18 @@ class MainWindow(Adw.ApplicationWindow):
         content.append(intel_scroll)
         content.append(self._tape_panel)
         content.append(self._order_panel)
-        market_box.append(content)
+
+        # CRÍTICO: envolver content en ScrolledWindow con propagate_natural_height=False.
+        # Adw.ViewStack mide TODAS las páginas para calcular la altura mínima de la ventana.
+        # Sin este wrap, OrderBookPanel+TapePanel (400-500px de mínimo) fuerzan
+        # el mínimo del ViewStack a ~650px → la ventana queda fija cerca de la altura de pantalla.
+        content_scroll = Gtk.ScrolledWindow()
+        content_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        content_scroll.set_vexpand(True)
+        content_scroll.set_hexpand(True)
+        content_scroll.set_propagate_natural_height(False)
+        content_scroll.set_child(content)
+        market_box.append(content_scroll)
 
         # Stats bar dentro del tab de mercado
         self._stats = StatsBar()

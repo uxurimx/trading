@@ -806,6 +806,7 @@ class CommandCenter(Gtk.Box):
         left_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         left_scroll.set_vexpand(True)
         left_scroll.set_hexpand(True)
+        left_scroll.set_propagate_natural_height(False)
         self._trade_cards: dict[str, TradeCard] = {}
         self._cards_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._cards_box.set_margin_start(P); self._cards_box.set_margin_end(P)
@@ -830,6 +831,7 @@ class CommandCenter(Gtk.Box):
         right_scroll.set_vexpand(True)
         right_scroll.set_size_request(310, -1)
         right_scroll.set_hexpand(False)
+        right_scroll.set_propagate_natural_height(False)
 
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         right.set_margin_start(6); right.set_margin_end(6)
