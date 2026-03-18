@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "qts-trading": {
+      "command": "python",
+      "args": ["/home/dev/Projects/trading/mcp_server.py"]
+    }
+  }
+}
