@@ -303,13 +303,16 @@ class TradePriceChart(Gtk.DrawingArea):
         self._plk_pct:   float = 0.60
         self._trail_pct: float = 0.70
         self._sr_levels: list  = []
+        self._ob_bids: dict   = {}   # snapshot de bids del orderbook
+        self._ob_asks: dict   = {}   # snapshot de asks del orderbook
+        self._vol_trades: list = []  # trades recientes para volume trail
         self.set_draw_func(self._draw)
 
     def update(self, entry: float, sl: float, tp: float, mark: float, side: str,
                trail_best: float = 0.0, trail_worst: float = 0.0,
                be_pct: float = 0.40, sg_pct: float = 0.30,
                plk_pct: float = 0.60, trail_pct: float = 0.70,
-               klines: list = None) -> None:
+               klines: list = None, market_state=None) -> None:
         self._entry = entry
         self._sl    = sl
         self._tp    = tp
@@ -337,6 +340,15 @@ class TradePriceChart(Gtk.DrawingArea):
                 self._sr_levels = []
         else:
             self._sr_levels = []
+        if market_state is not None:
+            ob = market_state.orderbook
+            self._ob_bids     = dict(ob.bids)
+            self._ob_asks     = dict(ob.asks)
+            self._vol_trades  = list(market_state.trades)
+        else:
+            self._ob_bids    = {}
+            self._ob_asks    = {}
+            self._vol_trades = []
         self.queue_draw()
 
     def _draw(self, _area, cr, w: int, h: int) -> None:
@@ -381,6 +393,34 @@ class TradePriceChart(Gtk.DrawingArea):
             cr.rectangle(x_tp, 0, x_entry - x_tp, h)
         cr.fill()
 
+        # ── Liquidez del orderbook (overlay de intensidad de bids/asks) ──────
+        N_BINS   = 60
+        bin_size = rng / N_BINS
+        if bin_size > 0 and (self._ob_bids or self._ob_asks):
+            bid_bins = [0.0] * N_BINS
+            ask_bins = [0.0] * N_BINS
+            for price, qty in self._ob_bids.items():
+                idx = int((price - lo) / bin_size)
+                if 0 <= idx < N_BINS:
+                    bid_bins[idx] += qty
+            for price, qty in self._ob_asks.items():
+                idx = int((price - lo) / bin_size)
+                if 0 <= idx < N_BINS:
+                    ask_bins[idx] += qty
+            max_bid = max(bid_bins) or 1.0
+            max_ask = max(ask_bins) or 1.0
+            bw = w / N_BINS + 0.5
+            for i in range(N_BINS):
+                bx = i * w / N_BINS
+                if bid_bins[i] > 0:
+                    a = min(0.22, (bid_bins[i] / max_bid) ** 0.5 * 0.22)
+                    cr.set_source_rgba(*RGB["buy"], a)
+                    cr.rectangle(bx, 0, bw, h); cr.fill()
+                if ask_bins[i] > 0:
+                    a = min(0.22, (ask_bins[i] / max_ask) ** 0.5 * 0.22)
+                    cr.set_source_rgba(*RGB["sell"], a)
+                    cr.rectangle(bx, 0, bw, h); cr.fill()
+
         # ── Niveles S/R (klines) ───────────────────────────────────────────────
         cr.set_line_width(0.8)
         cr.set_dash([2, 3], 0)
@@ -417,13 +457,36 @@ class TradePriceChart(Gtk.DrawingArea):
                 cr.show_text(lbl)
             cr.set_dash([], 0)
 
-        # ── Progreso real (Entry → Mark) ───────────────────────────────────────
+        # ── Volume trail (barra de progreso con intensidad de volumen) ────────
         is_winning = (self._mark > self._entry) if is_long else (self._mark < self._entry)
         prog_color = RGB["buy"] if is_winning else RGB["sell"]
-        cr.set_source_rgba(*prog_color, 0.38)
-        x0 = min(x_entry, x_mark)
-        cr.rectangle(x0, mid - 6, abs(x_mark - x_entry), 12)
-        cr.fill()
+        bar_y = mid - 6
+        bar_h = 12
+        if self._vol_trades and bin_size > 0:
+            buy_bins  = [0.0] * N_BINS
+            sell_bins = [0.0] * N_BINS
+            for t in self._vol_trades:
+                idx = int((t.price - lo) / bin_size)
+                if 0 <= idx < N_BINS:
+                    if t.side == "Buy":
+                        buy_bins[idx] += t.qty
+                    else:
+                        sell_bins[idx] += t.qty
+            max_vol = max(max(buy_bins), max(sell_bins)) or 1.0
+            bw = w / N_BINS + 0.5
+            for i in range(N_BINS):
+                bv = buy_bins[i]; sv = sell_bins[i]; tv = bv + sv
+                if tv <= 0:
+                    continue
+                a   = min(0.90, (tv / max_vol) ** 0.5 * 0.90)
+                col = RGB["buy"] if bv >= sv else RGB["sell"]
+                cr.set_source_rgba(*col, a)
+                cr.rectangle(i * w / N_BINS, bar_y, bw, bar_h); cr.fill()
+        else:
+            # Sin datos de volumen: barra plana clásica entry→mark
+            cr.set_source_rgba(*prog_color, 0.38)
+            x0 = min(x_entry, x_mark)
+            cr.rectangle(x0, bar_y, abs(x_mark - x_entry), bar_h); cr.fill()
 
         # ── Marcadores de excursión máxima y mínima ────────────────────────────
         # threshold: solo mostrar si se aleja más del 0.03% de la entrada
@@ -717,7 +780,7 @@ class TradeCard(Gtk.Box):
                 )
 
     def show_trade(self, trade: "TradeRecord", mark: float, upnl: float,
-                   klines: list = None) -> None:
+                   klines: list = None, market_state=None) -> None:
         self.set_visible(True)
         req = trade.request
         if not req:
@@ -885,13 +948,14 @@ class TradeCard(Gtk.Box):
             trail_worst = self._controller._trail_high.get(trade.symbol, 0.0)
         self._chart.update(
             entry, trade.current_sl, req.tp_price, mark, req.side,
-            trail_best  = trail_best,
-            trail_worst = trail_worst,
-            be_pct   = _settings.breakeven_pct  / 100,
-            sg_pct   = 0.30,
-            plk_pct  = _settings.profit_lock_pct / 100,
-            trail_pct= _settings.trailing_pct    / 100,
-            klines   = klines,
+            trail_best   = trail_best,
+            trail_worst  = trail_worst,
+            be_pct       = _settings.breakeven_pct  / 100,
+            sg_pct       = 0.30,
+            plk_pct      = _settings.profit_lock_pct / 100,
+            trail_pct    = _settings.trailing_pct    / 100,
+            klines       = klines,
+            market_state = market_state,
         )
 
         # Análisis de riesgo
@@ -1581,7 +1645,7 @@ class CommandCenter(Gtk.Box):
 
             total_upnl += upnl
             k1h = self._klines_store.get(sym, "60") if self._klines_store else []
-            self._trade_cards[sym].show_trade(trade, mark, upnl, klines=k1h)
+            self._trade_cards[sym].show_trade(trade, mark, upnl, klines=k1h, market_state=ms)
 
         # Actualizar encabezado
         self._trades_title.set_text(f"ACTIVOS ({n})")
