@@ -5,6 +5,7 @@ JournalView — Historial completo de trades con equity curve y estadísticas.
 """
 from __future__ import annotations
 
+import datetime
 import math
 import time
 from typing import List
@@ -145,6 +146,138 @@ class EquityChart(Gtk.DrawingArea):
         cr.move_to(tx, ty); cr.show_text(label)
 
 
+# ─── TradeCard ────────────────────────────────────────────────────────────────
+
+class _TradeCard(Gtk.Box):
+    """Fila de trade con resumen compacto y detalle expandible al hacer click."""
+
+    def __init__(self) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._expanded = False
+
+        # ── Fila resumen (clickable) ──────────────────────────────────────────
+        self._summary = _ml()
+        self._summary.set_margin_top(2)
+        self._summary.set_margin_bottom(2)
+        self._summary.set_cursor_from_name("pointer")
+
+        click = Gtk.GestureClick()
+        click.connect("released", self._on_click)
+        self._summary.add_controller(click)
+        self.append(self._summary)
+
+        # ── Detalle expandible ────────────────────────────────────────────────
+        self._revealer = Gtk.Revealer()
+        self._revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self._revealer.set_transition_duration(150)
+        self._revealer.set_reveal_child(False)
+
+        detail_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        detail_box.set_margin_start(20)
+        detail_box.set_margin_end(8)
+        detail_box.set_margin_top(3)
+        detail_box.set_margin_bottom(5)
+
+        self._det_position = _ml()
+        self._det_pnl      = _ml()
+        self._det_time     = _ml()
+        detail_box.append(self._det_position)
+        detail_box.append(self._det_pnl)
+        detail_box.append(self._det_time)
+
+        self._revealer.set_child(detail_box)
+        self.append(self._revealer)
+        self.append(_sep())
+
+    def _on_click(self, _gc, _n, _x, _y) -> None:
+        self._expanded = not self._expanded
+        self._revealer.set_reveal_child(self._expanded)
+
+    def update(self, idx: int, t: dict) -> None:
+        sym    = t["symbol"]
+        side   = t["side"]
+        pnl    = t["pnl_usd"]
+        reason = (t["close_reason"] or "──")[:14]
+        dur    = _dur(t["duration_s"])
+        entry  = t["entry_price"]
+        sl     = t["sl_price"]
+        tp     = t["tp_price"]
+        rr     = t["rr_ratio"]
+        score  = t["opp_score"]
+        qty    = t["qty"]
+        risk   = t["risk_usd"]
+        auto   = t["auto_mode"] or ""
+        opened = t["opened_at"]
+        closed = t["closed_at"]
+
+        # Hora de cierre
+        hora = (datetime.datetime.fromtimestamp(closed / 1000).strftime("%H:%M")
+                if closed > 0 else "──")
+
+        pnl_col  = HEX["buy"] if pnl >= 0 else HEX["sell"]
+        side_col = HEX["buy"] if side.upper() in ("BUY", "LONG") else HEX["sell"]
+        sign     = "+" if pnl >= 0 else ""
+
+        # ── Fila resumen ──────────────────────────────────────────────────────
+        self._summary.set_markup(
+            f'<span color="{HEX["sub"]}">{idx:>3}</span>'
+            f'  <span color="{HEX["text"]}" weight="bold">{sym:<7}</span>'
+            f' <span color="{side_col}">{side[:4]:^6}</span>'
+            f' <span color="{pnl_col}" weight="bold">{sign}${pnl:>6.2f}</span>  '
+            f'<span color="{HEX["warn"]}">{reason:<14}</span>'
+            f' <span color="{HEX["sub"]}">{dur:>7}</span>  '
+            f'<span color="{HEX["sub"]}">'
+            f'{_fp(entry):>10} {_fp(sl):>10} {_fp(tp):>10}'
+            f'</span>  '
+            f'<span color="{HEX["teal"]}">{rr:>5.1f}</span>'
+            f' <span color="{HEX["blue"]}">{score:>4}</span>'
+            f'  <span color="{HEX["sub"]}">{hora}</span>'
+        )
+
+        # ── Detalle ───────────────────────────────────────────────────────────
+        notional  = qty * entry if entry > 0 else 0.0
+        fee_entry = entry * qty * 0.00055 if entry > 0 else 0.0
+        # Estimar precio de cierre según SL/TP y signo del PnL
+        close_est = (tp if (pnl > 0 and tp > 0) else (sl if sl > 0 else entry))
+        fee_exit  = close_est * qty * 0.00055 if close_est > 0 else 0.0
+        total_fee = fee_entry + fee_exit
+        gross_pnl = pnl + total_fee
+
+        open_str  = (datetime.datetime.fromtimestamp(opened / 1000)
+                     .strftime("%Y-%m-%d %H:%M:%S") if opened > 0 else "──")
+        close_str = (datetime.datetime.fromtimestamp(closed / 1000)
+                     .strftime("%Y-%m-%d %H:%M:%S") if closed > 0 else "──")
+
+        self._det_position.set_markup(
+            f'<span color="{HEX["sub"]}">Qty: </span>'
+            f'<span color="{HEX["text"]}">{qty:.4f}</span>'
+            f'  <span color="{HEX["sub"]}">Nocional: </span>'
+            f'<span color="{HEX["text"]}">${notional:,.2f}</span>'
+            f'  <span color="{HEX["sub"]}">Riesgo: </span>'
+            f'<span color="{HEX["sell"]}">${risk:.2f}</span>'
+            f'  <span color="{HEX["sub"]}">Modo: </span>'
+            f'<span color="{HEX["blue"]}">{auto}</span>'
+        )
+        self._det_pnl.set_markup(
+            f'<span color="{HEX["sub"]}">Bruto≈: </span>'
+            f'<span color="{pnl_col}">{sign}${gross_pnl:.4f}</span>'
+            f'  <span color="{HEX["sub"]}">Fees≈: </span>'
+            f'<span color="{HEX["sell"]}">-${total_fee:.4f}</span>'
+            f'  <span color="{HEX["sub"]}">Neto: </span>'
+            f'<span color="{pnl_col}" weight="bold">{sign}${pnl:.4f}</span>'
+            f'  <span color="{HEX["sub"]}">Entry fee: </span>'
+            f'<span color="{HEX["sell"]}">-${fee_entry:.4f}</span>'
+            f'  <span color="{HEX["sub"]}">Exit fee: </span>'
+            f'<span color="{HEX["sell"]}">-${fee_exit:.4f}</span>'
+        )
+        self._det_time.set_markup(
+            f'<span color="{HEX["sub"]}">Apertura: </span>'
+            f'<span color="{HEX["text"]}">{open_str}</span>'
+            f'  <span color="{HEX["sub"]}">Cierre: </span>'
+            f'<span color="{HEX["text"]}">{close_str}</span>'
+        )
+
+
 # ─── JournalView ──────────────────────────────────────────────────────────────
 
 class JournalView(Gtk.Box):
@@ -157,7 +290,7 @@ class JournalView(Gtk.Box):
         self.set_hexpand(True)
         self.set_vexpand(True)
         self._last_refresh: float = 0.0
-        self._row_labels:   list  = []
+        self._trade_cards:  list  = []
         self._build()
 
     def _build(self) -> None:
@@ -264,62 +397,19 @@ class JournalView(Gtk.Box):
         )
 
     def _update_trades(self, trades: list) -> None:
-        # Reconstruir filas (max 150 trades, muy rápido)
-        needed = len(trades)
-        current = len(self._row_labels)
+        needed  = len(trades)
+        current = len(self._trade_cards)
 
-        # Añadir labels que faltan
-        while len(self._row_labels) < needed:
-            lbl = _ml()
-            lbl.set_margin_bottom(1)
-            self._rows_box.append(lbl)
-            self._row_labels.append(lbl)
+        # Añadir TradeCards que faltan
+        while len(self._trade_cards) < needed:
+            card = _TradeCard()
+            self._rows_box.append(card)
+            self._trade_cards.append(card)
 
-        # Ocultar labels sobrantes
+        # Ocultar sobrantes
         for i in range(needed, current):
-            self._row_labels[i].set_visible(False)
+            self._trade_cards[i].set_visible(False)
 
         for i, t in enumerate(trades):
-            lbl = self._row_labels[i]
-            lbl.set_visible(True)
-            lbl.set_markup(self._trade_markup(i + 1, t))
-
-    def _trade_markup(self, n: int, t: dict) -> str:
-        sym    = t["symbol"].replace("USDT", "")
-        side   = t["side"] or "?"
-        pnl    = t["pnl_usd"]
-        reason = (t["close_reason"] or t["state"] or "?")[:13]
-        dur    = _dur(t["duration_s"])
-        entry  = _fp(t["entry_price"])
-        sl     = _fp(t["sl_price"])
-        tp_p   = _fp(t["tp_price"])
-        rr     = t["rr_ratio"]
-        score  = t["opp_score"]
-        ts     = t["closed_at"]
-
-        arrow    = "▲" if side == "Buy" else "▼"
-        side_col = HEX["buy"] if side == "Buy" else HEX["sell"]
-        pnl_col  = HEX["buy"] if pnl >= 0 else HEX["sell"]
-        pnl_str  = f"{'+' if pnl >= 0 else ''}${pnl:.2f}"
-
-        time_str = (time.strftime("%m/%d %H:%M", time.localtime(ts))
-                    if ts > 0 else "──")
-
-        rr_col = HEX["buy"] if rr >= 2.0 else (HEX["warn"] if rr >= 1.5 else HEX["sell"])
-        sc_col = HEX["buy"] if score >= 70 else (HEX["warn"] if score >= 55 else HEX["sub"])
-
-        return (
-            f'<span color="{HEX["over"]}" font_family="monospace">{n:>3}</span>'
-            f'  <span color="{side_col}" font_family="monospace" weight="bold">'
-            f'{arrow} {sym:<6}</span>'
-            f' <span color="{side_col}" font_family="monospace">{side:^6}</span>'
-            f' <span color="{pnl_col}" font_family="monospace" weight="bold">{pnl_str:>8}</span>'
-            f'  <span color="{HEX["sub"]}" font_family="monospace">{reason:<14}</span>'
-            f' <span color="{HEX["over"]}" font_family="monospace">{dur:>7}</span>'
-            f'  <span color="{HEX["text"]}" font_family="monospace">{entry:>10}</span>'
-            f' <span color="{HEX["sell"]}" font_family="monospace">{sl:>10}</span>'
-            f' <span color="{HEX["buy"]}" font_family="monospace">{tp_p:>10}</span>'
-            f'  <span color="{rr_col}" font_family="monospace">{rr:>5.1f}</span>'
-            f' <span color="{sc_col}" font_family="monospace">{score:>4}</span>'
-            f'  <span color="{HEX["sub"]}" font_family="monospace">{time_str}</span>'
-        )
+            self._trade_cards[i].set_visible(True)
+            self._trade_cards[i].update(i + 1, t)

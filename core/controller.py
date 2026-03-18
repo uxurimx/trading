@@ -570,16 +570,10 @@ class TradeController:
                 self._close_confirm[sym] = self._close_confirm.get(sym, 0) + 1
                 if self._close_confirm[sym] < 15:
                     continue
-                trade.state        = TradeState.CLOSED
-                trade.closed_at    = int(time.time())
-                # Preferir upnl del último tick (más directo que delta daily_pnl)
-                last_upnl = self._last_upnl.get(sym)
-                if last_upnl is not None and abs(last_upnl) >= 0.001:
-                    trade.pnl_usd = last_upnl
-                else:
-                    trade.pnl_usd = account.daily_pnl - trade.pnl_at_open
-                trade.close_reason = "SL/TP/manual"
-                log.info("Trade cerrado: %s  PnL≈$%.2f", sym, trade.pnl_usd)
+                trade.state     = TradeState.CLOSED
+                trade.closed_at = int(time.time())
+                trade.pnl_usd, trade.close_reason = self._compute_close_pnl(sym, trade)
+                log.info("Trade cerrado: %s  PnL=$%.4f  (%s)", sym, trade.pnl_usd, trade.close_reason)
                 self._log.append(trade)
                 save_trade(trade)
                 notifier.trade_closed(sym, trade.pnl_usd, trade.close_reason)
@@ -992,6 +986,59 @@ class TradeController:
                     await _aio.sleep(1.5)
         log.error("SL %s no se pudo mover: %s", reason, sym)
 
+    def _compute_close_pnl(self, sym: str, trade: "TradeRecord") -> tuple[float, str]:
+        """
+        Calcula el PnL neto real cuando una posición desaparece de Bybit.
+
+        Método: detecta si fue SL o TP comparando el último uPnL con los
+        gross PnL esperados, luego resta las fees de entrada y salida.
+
+        Retorna (pnl_usd, close_reason).
+        """
+        req = trade.request
+        if not req or req.qty <= 0 or trade.entry_price <= 0:
+            return 0.0, "SL/TP"
+
+        entry   = trade.entry_price
+        qty     = req.qty
+        is_long = req.side == "Buy"
+        sl      = trade.current_sl
+        tp      = trade.current_tp
+
+        # Gross PnL esperado si SL o TP fue tocado
+        sl_gross = ((sl  - entry) if is_long else (entry - sl))  * qty
+        tp_gross = ((tp  - entry) if is_long else (entry - tp))  * qty if tp > 0 else None
+
+        # Último unrealized PnL observado (precio justo antes de desaparecer)
+        last_upnl = self._last_upnl.get(sym, 0.0)
+
+        # Decidir qué nivel fue tocado: el que más se aproxime a last_upnl
+        if tp_gross is not None:
+            midpoint = (sl_gross + tp_gross) / 2
+            if last_upnl >= midpoint:
+                close_price = tp
+                gross_pnl   = tp_gross
+                reason      = "TP"
+            else:
+                close_price = sl
+                gross_pnl   = sl_gross
+                reason      = "SL"
+        else:
+            close_price = sl
+            gross_pnl   = sl_gross
+            reason      = "SL"
+
+        # Fees taker: 0.055% por lado = 0.11% RT
+        exit_fee  = abs(close_price * qty) * 0.00055
+        entry_fee = abs(entry       * qty) * 0.00055
+        net_pnl   = gross_pnl - exit_fee - entry_fee
+
+        log.debug(
+            "_compute_close_pnl %s: gross=%.4f fees=%.4f net=%.4f (%s)",
+            sym, gross_pnl, exit_fee + entry_fee, net_pnl, reason,
+        )
+        return round(net_pnl, 4), reason
+
     async def _do_close(self, symbol: str, req: OrderRequest) -> None:
         result = await self._executor.close_position(symbol, req.qty, req.side)
         GLib.idle_add(self._on_close_result, symbol, result)
@@ -999,9 +1046,19 @@ class TradeController:
     def _on_close_result(self, symbol: str, result: OrderResult) -> bool:
         trade = self._active.get(symbol)
         if trade:
-            trade.state       = TradeState.CLOSED
-            trade.closed_at   = int(time.time())
+            trade.state        = TradeState.CLOSED
+            trade.closed_at    = int(time.time())
             trade.close_reason = "manual" if result.success else result.error_msg
+            # PnL manual: último unrealized PnL conocido menos fee de salida
+            req  = trade.request
+            last = self._last_upnl.get(symbol, 0.0)
+            if req and req.qty > 0:
+                close_px  = trade.entry_price or req.entry_price
+                exit_fee  = abs(close_px * req.qty) * 0.00055
+                entry_fee = abs((trade.entry_price or req.entry_price) * req.qty) * 0.00055
+                trade.pnl_usd = last - exit_fee - entry_fee
+            else:
+                trade.pnl_usd = last
             self._log.append(trade)
             save_trade(trade)
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)

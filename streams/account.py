@@ -296,10 +296,11 @@ class AccountStream:
 
         elif topic == "execution":
             for item in data:
-                pnl = float(item.get("closedSize", 0) or 0)
-                # Acumular PnL realizado del fill
+                # execPnl = gross position PnL (sin fees)
+                # execFee = fee de esta ejecución (siempre positivo = costo)
                 realized = float(item.get("execPnl", 0) or 0)
-                self.state.daily_pnl += realized
+                fee      = float(item.get("execFee",  0) or 0)
+                self.state.daily_pnl += realized - fee
 
         elif topic == "wallet":
             for item in data:
