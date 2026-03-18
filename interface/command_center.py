@@ -21,12 +21,14 @@ from gi.repository import GLib, Gtk, Pango
 
 from core.order_model import AutoMode, TradeState, ControllerState
 from core.db import get_journal_stats, get_recent_trades
+from core.config import settings as _settings
 
 if TYPE_CHECKING:
     from core.controller import TradeController
     from core.order_model import TradeRecord
     from streams.account import AccountState, Position
     from core.risk import RiskStatus
+    from streams.klines import KlineStore
 
 
 # ─── Paleta ───────────────────────────────────────────────────────────────────
@@ -232,37 +234,109 @@ def _trade_risk_analysis(trade: "TradeRecord", pos: Optional["Position"],
     return lines[:4]
 
 
+# ─── Utilidades de análisis S/R ───────────────────────────────────────────────
+
+def _find_sr_levels(klines: list, lo: float, hi: float) -> list:
+    """
+    Calcula pivots S/R desde klines (formato Bybit: [ts, o, h, l, c, v], newest first).
+    Devuelve lista de (price, touch_count) dentro del rango [lo, hi] con >= 2 toques.
+    """
+    if not klines or len(klines) < 5:
+        return []
+    try:
+        highs = [float(k[2]) for k in klines]
+        lows  = [float(k[3]) for k in klines]
+        candidates: list[float] = []
+        for i in range(2, len(klines) - 2):
+            h = highs[i]
+            l = lows[i]
+            if h > max(highs[i-2], highs[i-1], highs[i+1], highs[i+2]):
+                candidates.append(h)
+            if l < min(lows[i-2], lows[i-1], lows[i+1], lows[i+2]):
+                candidates.append(l)
+        if not candidates:
+            return []
+        # Clusterizar niveles cercanos (dentro del 0.25%)
+        clusters: list[list] = []
+        for price in sorted(candidates):
+            if not clusters or abs(price - clusters[-1][0]) / (clusters[-1][0] or 1) > 0.0025:
+                clusters.append([price, 1])
+            else:
+                n = clusters[-1][1]
+                clusters[-1][0] = (clusters[-1][0] * n + price) / (n + 1)
+                clusters[-1][1] += 1
+        return [(lv, cnt) for (lv, cnt) in clusters if lo <= lv <= hi and cnt >= 2]
+    except Exception:
+        return []
+
+
 # ─── Gráfico mini del trade ───────────────────────────────────────────────────
+
+# Colores para líneas de acción automática
+_COL_SG    = (0.95, 0.77, 0.06)   # Smart Guard — ámbar
+_COL_BE    = (0.58, 0.87, 0.76)   # Breakeven  — teal
+_COL_PLK   = (0.47, 0.85, 0.93)   # Profit lock — cian
+_COL_TRAIL = (0.78, 0.55, 1.00)   # Trailing    — lavanda
+_COL_HWM   = (1.00, 0.60, 0.10)   # High water mark — naranja
+
 
 class TradePriceChart(Gtk.DrawingArea):
     """
-    Mini gráfico horizontal mostrando SL → Entry → TP con precio actual.
-    El relleno de progreso muestra cuánto ha avanzado el trade.
+    Gráfico horizontal SL → Entry → TP con:
+    · Zonas S/R desde klines (pivots)
+    · Líneas de acción automática (Smart Guard, BE, Profit Lock, Trailing)
+    · High water mark del trade
+    · Precio actual con progreso
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self.set_size_request(-1, 52)
+        self.set_size_request(-1, 76)
         self.set_hexpand(True)
         self._entry = self._sl = self._tp = self._mark = 0.0
         self._side  = "Buy"
+        self._trail_extreme: float = 0.0
+        self._be_pct:    float = 0.40
+        self._sg_pct:    float = 0.30
+        self._plk_pct:   float = 0.60
+        self._trail_pct: float = 0.70
+        self._sr_levels: list  = []
         self.set_draw_func(self._draw)
 
-    def update(self, entry: float, sl: float, tp: float,
-               mark: float, side: str) -> None:
+    def update(self, entry: float, sl: float, tp: float, mark: float, side: str,
+               trail_extreme: float = 0.0,
+               be_pct: float = 0.40, sg_pct: float = 0.30,
+               plk_pct: float = 0.60, trail_pct: float = 0.70,
+               klines: list = None) -> None:
         self._entry = entry
         self._sl    = sl
         self._tp    = tp
         self._mark  = mark if mark > 0 else entry
         self._side  = side
+        self._trail_extreme = trail_extreme
+        self._be_pct   = be_pct
+        self._sg_pct   = sg_pct
+        self._plk_pct  = plk_pct
+        self._trail_pct = trail_pct
+        if klines and len(klines) >= 5:
+            prices = [p for p in [sl, tp, mark, entry] if p > 0]
+            if prices:
+                lo = min(prices) * 0.997
+                hi = max(prices) * 1.003
+                self._sr_levels = _find_sr_levels(klines, lo, hi)
+            else:
+                self._sr_levels = []
+        else:
+            self._sr_levels = []
         self.queue_draw()
 
     def _draw(self, _area, cr, w: int, h: int) -> None:
-        prices = [p for p in [self._sl, self._tp, self._mark, self._entry] if p > 0]
+        prices = [p for p in [self._sl, self._tp, self._mark, self._entry,
+                               self._trail_extreme] if p > 0]
         if not prices:
             return
-        lo  = min(prices) * 0.9985
-        hi  = max(prices) * 1.0015
+        lo  = min(prices) * 0.9982
+        hi  = max(prices) * 1.0018
         rng = hi - lo or 1e-9
 
         def px(price: float) -> float:
@@ -273,72 +347,134 @@ class TradePriceChart(Gtk.DrawingArea):
         cr.rectangle(0, 0, w, h)
         cr.fill()
 
-        mid = h / 2
+        mid  = h / 2
+        PAD  = 10   # padding vertical para líneas de acción (zona superior)
 
-        # Zona de pérdida (SL → Entry): rojo tenue
-        x_sl    = px(self._sl)
-        x_entry = px(self._entry)
-        x_tp    = px(self._tp)
-        x_mark  = px(self._mark)
+        x_sl    = px(self._sl)    if self._sl    > 0 else 0.0
+        x_entry = px(self._entry) if self._entry > 0 else w / 2
+        x_tp    = px(self._tp)    if self._tp    > 0 else w
+        x_mark  = px(self._mark)  if self._mark  > 0 else x_entry
 
-        cr.set_source_rgba(*RGB["sell"], 0.12)
-        if self._side == "Buy":
+        is_long = self._side == "Buy"
+
+        # ── Zonas de pérdida/ganancia (fondo) ─────────────────────────────────
+        cr.set_source_rgba(*RGB["sell"], 0.10)
+        if is_long:
             cr.rectangle(x_sl, 0, x_entry - x_sl, h)
         else:
             cr.rectangle(x_entry, 0, x_sl - x_entry, h)
         cr.fill()
 
-        # Zona de ganancia (Entry → TP): verde tenue
-        cr.set_source_rgba(*RGB["buy"], 0.12)
-        if self._side == "Buy":
+        cr.set_source_rgba(*RGB["buy"], 0.10)
+        if is_long:
             cr.rectangle(x_entry, 0, x_tp - x_entry, h)
         else:
             cr.rectangle(x_tp, 0, x_entry - x_tp, h)
         cr.fill()
 
-        # Progreso real (Entry → Mark)
-        is_winning = (self._mark > self._entry) if self._side == "Buy" else (self._mark < self._entry)
+        # ── Niveles S/R ────────────────────────────────────────────────────────
+        cr.set_font_size(7.5)
+        cr.set_line_width(0.8)
+        cr.set_dash([2, 3], 0)
+        for (lv, cnt) in self._sr_levels:
+            xr = px(lv)
+            # soporte (debajo del mark) en verde; resistencia (encima) en rojo
+            is_support = lv < self._mark
+            col = RGB["buy"] if is_support else RGB["sell"]
+            alpha = 0.30 + min(0.25, cnt * 0.07)
+            cr.set_source_rgba(*col, alpha)
+            cr.move_to(xr, 0); cr.line_to(xr, h); cr.stroke()
+        cr.set_dash([], 0)
+
+        # ── Líneas de acción automática ────────────────────────────────────────
+        if self._entry > 0 and self._tp > 0:
+            tp_dist = abs(self._tp - self._entry)
+            actions = [
+                (self._sg_pct,    _COL_SG,    "SG"),
+                (self._be_pct,    _COL_BE,    "BE"),
+                (self._plk_pct,   _COL_PLK,   "PL"),
+                (self._trail_pct, _COL_TRAIL, "TR"),
+            ]
+            cr.set_font_size(7.5)
+            cr.set_line_width(1.0)
+            cr.set_dash([3, 4], 0)
+            for (frac, col, lbl) in actions:
+                if is_long:
+                    price = self._entry + frac * tp_dist
+                else:
+                    price = self._entry - frac * tp_dist
+                xa = px(price)
+                cr.set_source_rgba(*col, 0.55)
+                cr.move_to(xa, PAD); cr.line_to(xa, h - 12); cr.stroke()
+                # Etiqueta pequeña arriba
+                ext = cr.text_extents(lbl)
+                cr.set_source_rgba(*col, 0.75)
+                cr.move_to(max(1.0, xa - ext[2] / 2), PAD - 1)
+                cr.show_text(lbl)
+            cr.set_dash([], 0)
+
+        # ── Progreso real (Entry → Mark) ───────────────────────────────────────
+        is_winning = (self._mark > self._entry) if is_long else (self._mark < self._entry)
         prog_color = RGB["buy"] if is_winning else RGB["sell"]
-        cr.set_source_rgba(*prog_color, 0.35)
-        if self._side == "Buy":
-            x0 = min(x_entry, x_mark)
-            cr.rectangle(x0, mid - 6, abs(x_mark - x_entry), 12)
-        else:
-            x0 = min(x_entry, x_mark)
-            cr.rectangle(x0, mid - 6, abs(x_mark - x_entry), 12)
+        cr.set_source_rgba(*prog_color, 0.38)
+        x0 = min(x_entry, x_mark)
+        cr.rectangle(x0, mid - 6, abs(x_mark - x_entry), 12)
         cr.fill()
 
-        # ── Líneas verticales ──────────────────────────────────────────
-        # SL (rojo)
-        cr.set_source_rgba(*RGB["sell"], 0.9)
+        # ── High water mark ────────────────────────────────────────────────────
+        if self._trail_extreme > 0:
+            xe = px(self._trail_extreme)
+            # Pequeño triángulo / diamond en color naranja
+            cr.set_source_rgba(*_COL_HWM, 0.85)
+            cr.set_line_width(1.2)
+            # Marca vertical con tick superior/inferior
+            cr.move_to(xe, mid - 8); cr.line_to(xe, mid + 8); cr.stroke()
+            # Cabeza de flecha hacia el TP
+            if is_long:
+                cr.move_to(xe,     mid - 8)
+                cr.line_to(xe + 5, mid - 3)
+                cr.line_to(xe - 5, mid - 3)
+            else:
+                cr.move_to(xe,     mid + 8)
+                cr.line_to(xe + 5, mid + 3)
+                cr.line_to(xe - 5, mid + 3)
+            cr.close_path(); cr.fill()
+            # Etiqueta "MAX"
+            cr.set_font_size(7)
+            ext = cr.text_extents("MAX")
+            cr.set_source_rgba(*_COL_HWM, 0.80)
+            tx = max(1.0, min(w - ext[2] - 1, xe - ext[2] / 2))
+            cr.move_to(tx, mid - 11); cr.show_text("MAX")
+
+        # ── Líneas verticales principales ─────────────────────────────────────
         cr.set_line_width(2)
-        cr.move_to(x_sl, 8); cr.line_to(x_sl, h - 8); cr.stroke()
+        cr.set_source_rgba(*RGB["sell"], 0.9)
+        cr.move_to(x_sl, 10); cr.line_to(x_sl, h - 10); cr.stroke()
 
-        # TP (verde)
         cr.set_source_rgba(*RGB["buy"], 0.9)
-        cr.move_to(x_tp, 8); cr.line_to(x_tp, h - 8); cr.stroke()
+        cr.move_to(x_tp, 10); cr.line_to(x_tp, h - 10); cr.stroke()
 
-        # Entry (blanco tenue)
         cr.set_source_rgba(0.9, 0.9, 0.9, 0.5)
         cr.set_line_width(1)
         cr.set_dash([4, 3], 0)
         cr.move_to(x_entry, 0); cr.line_to(x_entry, h); cr.stroke()
         cr.set_dash([], 0)
 
-        # Mark price (círculo blanco relleno)
+        # ── Mark price (círculo) ───────────────────────────────────────────────
         cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
         cr.arc(x_mark, mid, 5, 0, 2 * math.pi); cr.fill()
-        # borde de color
         cr.set_source_rgba(*prog_color, 1.0)
         cr.set_line_width(2)
         cr.arc(x_mark, mid, 5, 0, 2 * math.pi); cr.stroke()
 
-        # ── Etiquetas de precio ────────────────────────────────────────
+        # ── Etiquetas de precio (abajo) ────────────────────────────────────────
         cr.set_font_size(9)
 
         def _label(price: float, color, align: str = "center") -> None:
+            if price <= 0:
+                return
             text = _fp(price)
-            xb, _yb, tw, _th, _dx, _dy = cr.text_extents(text)
+            _xb, _yb, tw, _th, _dx, _dy = cr.text_extents(text)
             xp = px(price)
             if align == "left":
                 tx = max(2.0, xp + 3)
@@ -347,7 +483,7 @@ class TradePriceChart(Gtk.DrawingArea):
             else:
                 tx = max(2.0, xp - tw / 2)
             cr.set_source_rgba(*color, 0.9)
-            cr.move_to(tx, h - 4)
+            cr.move_to(tx, h - 3)
             cr.show_text(text)
 
         _label(self._sl,    RGB["sell"], "left")
@@ -356,7 +492,7 @@ class TradePriceChart(Gtk.DrawingArea):
 
         # Mark price label above circle
         text = _fp(self._mark)
-        xb, _yb, tw, _th, _dx, _dy = cr.text_extents(text)
+        _xb, _yb, tw, _th, _dx, _dy = cr.text_extents(text)
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.9)
         cr.move_to(max(2.0, x_mark - tw / 2), mid - 9)
         cr.show_text(text)
@@ -516,7 +652,8 @@ class TradeCard(Gtk.Box):
                     "Click para activar gestión automática (breakeven + trailing)"
                 )
 
-    def show_trade(self, trade: "TradeRecord", mark: float, upnl: float) -> None:
+    def show_trade(self, trade: "TradeRecord", mark: float, upnl: float,
+                   klines: list = None) -> None:
         self.set_visible(True)
         req = trade.request
         if not req:
@@ -672,8 +809,19 @@ class TradeCard(Gtk.Box):
         else:
             self._reasons_lbl.set_text("")
 
-        # Gráfico (siempre visible)
-        self._chart.update(entry, trade.current_sl, req.tp_price, mark, req.side)
+        # Gráfico (siempre visible) — con S/R, thresholds de acción y HWM
+        is_long   = req.side == "Buy"
+        trail_ext = (self._controller._trail_high.get(trade.symbol, 0.0) if is_long
+                     else self._controller._trail_low.get(trade.symbol, 0.0))
+        self._chart.update(
+            entry, trade.current_sl, req.tp_price, mark, req.side,
+            trail_extreme = trail_ext,
+            be_pct   = _settings.breakeven_pct  / 100,
+            sg_pct   = 0.30,                          # SMART_GUARD_MIN_PROGRESS
+            plk_pct  = _settings.profit_lock_pct / 100,
+            trail_pct= _settings.trailing_pct    / 100,
+            klines   = klines,
+        )
 
         # Análisis de riesgo
         risk_lines = _trade_risk_analysis(trade, None, mark)
@@ -717,6 +865,7 @@ class CommandCenter(Gtk.Box):
         controller: "TradeController",
         strategy,
         executor,
+        klines_store: "KlineStore | None" = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_hexpand(True)
@@ -724,6 +873,7 @@ class CommandCenter(Gtk.Box):
 
         self._controller    = controller
         self._strategy      = strategy
+        self._klines_store  = klines_store
         self._executor      = executor
         self._jnl_ts:       float = 0.0
         self._jnl_log_len:  int   = -1
@@ -1359,7 +1509,8 @@ class CommandCenter(Gtk.Box):
                 upnl = pos.unrealized_pnl if pos else 0.0
 
             total_upnl += upnl
-            self._trade_cards[sym].show_trade(trade, mark, upnl)
+            k1h = self._klines_store.get(sym, "60") if self._klines_store else []
+            self._trade_cards[sym].show_trade(trade, mark, upnl, klines=k1h)
 
         # Actualizar encabezado
         self._trades_title.set_text(f"ACTIVOS ({n})")

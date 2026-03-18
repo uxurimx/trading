@@ -398,22 +398,26 @@ class BybitExecutor:
             log.error("close_position exception: %s", e)
             return OrderResult(success=False, error_msg=str(e))
 
-    async def get_position_open_time(self, symbol: str) -> int:
+    async def get_position_open_time(self, symbol: str, since_ms: int = 0) -> int:
         """
         Recupera el timestamp real de apertura de la posición consultando el historial
         de ejecuciones de Bybit. Retorna Unix timestamp en segundos, o 0 si falla.
-        Útil para mostrar la duración correcta de posiciones importadas/reconciliadas.
+        since_ms: sólo buscar ejecuciones a partir de este timestamp en ms (createdTime).
         """
         try:
-            data = await self._get("/v5/execution/list", {
+            params: dict = {
                 "category": "linear",
                 "symbol":   symbol,
                 "execType": "Trade",
                 "limit":    "10",
-            })
+            }
+            # Filtrar desde 5 minutos antes del createdTime para capturar el fill de apertura
+            if since_ms > 1_000_000_000_000:
+                params["startTime"] = str(max(0, since_ms - 300_000))
+            data = await self._get("/v5/execution/list", params)
             items = data.get("result", {}).get("list", [])
-            # Buscar el fill más antiguo reciente (posición actualmente abierta)
-            # Las ejecuciones llegan en orden descendente (más reciente primero)
+            # Ejecutions llegan en orden descendente (más reciente primero).
+            # El más antiguo en la lista filtrada es el fill de apertura.
             for item in reversed(items):
                 exec_time = int(item.get("execTime", 0) or 0)
                 if exec_time > 1_000_000_000_000:   # ms → segundos

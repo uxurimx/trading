@@ -499,9 +499,9 @@ class TradeController:
                 rr_ratio    = max(1.0, rr),
                 leverage    = lev,
             )
-            # Bybit's createdTime suele ser la fecha de listado del contrato,
-            # no la fecha real de apertura de la posición actual.
-            # Usamos time.time() para mostrar desde cuándo el sistema está rastreando.
+            # Usar createdTime de Bybit (ms → s) como estimación inicial.
+            # _resolve_open_time refinará con el historial de ejecuciones.
+            created_s = pos.created_time // 1000 if pos.created_time > 1_600_000_000_000 else 0
             trade = TradeRecord(
                 symbol      = sym,
                 request     = req,
@@ -509,7 +509,7 @@ class TradeController:
                 entry_price = pos.entry_price,
                 current_sl  = pos.stop_loss,
                 current_tp  = pos.take_profit,
-                opened_at   = int(time.time()),
+                opened_at   = created_s if created_s > 0 else int(time.time()),
                 auto_mode   = AutoMode.FULL_AUTO,  # gestión automática por defecto
             )
             self._active[sym] = trade
@@ -521,7 +521,7 @@ class TradeController:
                 self._proposal = None
                 log.info("Propuesta de %s cancelada — posición importada de Bybit", sym)
             # Intentar recuperar el tiempo real de apertura desde el historial de Bybit
-            self._bridge.submit(self._resolve_open_time(sym))
+            self._bridge.submit(self._resolve_open_time(sym, hint_ms=pos.created_time))
             log.info(
                 "Posición importada de Bybit: %s %s %.4f @ %.5g  SL=%s  TP=%s",
                 sym, pos.side, pos.size, pos.entry_price,
@@ -955,17 +955,16 @@ class TradeController:
         except Exception as exc:
             log.error("_clear_tp_and_trail error: %s — %s", sym, exc)
 
-    async def _resolve_open_time(self, sym: str) -> None:
+    async def _resolve_open_time(self, sym: str, hint_ms: int = 0) -> None:
         """
         Recupera el timestamp real de apertura desde el historial de Bybit y lo aplica
         al trade activo. Se ejecuta una vez tras reconciliar una posición importada.
         """
-        open_time = await self._executor.get_position_open_time(sym)
+        open_time = await self._executor.get_position_open_time(sym, since_ms=hint_ms)
         if open_time > 0:
             def _apply():
                 trade = self._active.get(sym)
-                if trade and trade.opened_at > time.time() - 120:
-                    # Solo actualizar si el trade fue importado recientemente (< 2 min)
+                if trade:
                     trade.opened_at = open_time
                     log.info("Open time recuperado: %s → %s",
                              sym, time.strftime("%Y-%m-%d %H:%M", time.localtime(open_time)))

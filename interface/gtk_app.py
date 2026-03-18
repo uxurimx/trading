@@ -1388,7 +1388,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_content(toolbar_view)
 
         # ── Pestaña 1: CommandCenter (sin barras extra — más espacio vertical)
-        self._cmd_center = CommandCenter(self.controller, self._strategy, self._executor)
+        self._cmd_center = CommandCenter(self.controller, self._strategy, self._executor,
+                                         klines_store=self.klines.store)
         self._stack.add_titled_with_icon(
             self._cmd_center, "orders", "⚡ Órdenes", "go-next-symbolic"
         )
