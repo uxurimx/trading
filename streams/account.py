@@ -21,9 +21,12 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+log = logging.getLogger("qts.account")
 
 import aiohttp
 import websockets
@@ -262,7 +265,7 @@ class AccountStream:
                         try:
                             msg = json.loads(raw)
                             self._handle_private(msg)
-                        except (json.JSONDecodeError, KeyError):
+                        except Exception:
                             pass
 
             except (
@@ -274,8 +277,16 @@ class AccountStream:
                     self.state.connected = False
                     await asyncio.sleep(min(backoff, 60.0))
                     backoff = min(backoff * 2, 60.0)
+
             except asyncio.CancelledError:
                 return
+
+            except Exception as exc:
+                log.warning("_connect_private unexpected error: %s — reconectando", exc)
+                if self._running:
+                    self.state.connected = False
+                    await asyncio.sleep(min(backoff, 60.0))
+                    backoff = min(backoff * 2, 60.0)
 
     def _handle_private(self, msg: dict) -> None:
         topic = msg.get("topic", "")

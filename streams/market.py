@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -31,6 +32,8 @@ import websockets.exceptions
 
 from core.config import settings
 from core.liquidity import VolumeProfile
+
+log = logging.getLogger("qts.market")
 
 
 # ─── Dataclasses ─────────────────────────────────────────────────────────────
@@ -466,7 +469,7 @@ class MarketStream:
                             msg = json.loads(raw)
                             if "topic" in msg:
                                 handler(symbol, msg)
-                        except (json.JSONDecodeError, KeyError):
+                        except Exception:
                             pass
 
             except (
@@ -481,6 +484,13 @@ class MarketStream:
 
             except asyncio.CancelledError:
                 return
+
+            except Exception as exc:
+                log.warning("_connect(%s) unexpected error: %s — reconectando", symbol, exc)
+                if self._running:
+                    self.states[symbol].connected = False
+                    await asyncio.sleep(min(backoff, 30.0))
+                    backoff = min(backoff * 2, 30.0)
 
     # ── Conexiones por símbolo ────────────────────────────────────────────────
 
@@ -527,7 +537,7 @@ class MarketStream:
                             msg = json.loads(raw)
                             if "topic" in msg:
                                 self._handle_futures(symbol, msg)
-                        except (json.JSONDecodeError, KeyError):
+                        except Exception:
                             pass
 
             except (
@@ -543,6 +553,13 @@ class MarketStream:
             except asyncio.CancelledError:
                 return
 
+            except Exception as exc:
+                log.warning("_connect_futures_ws(%s) unexpected error: %s — reconectando", symbol, exc)
+                if self._running:
+                    self.states[symbol].connected = False
+                    await asyncio.sleep(min(backoff, 30.0))
+                    backoff = min(backoff * 2, 30.0)
+
     async def _connect_spot(self, symbol: str) -> None:
         env   = "test" if settings.bybit_testnet else "live"
         url   = self._URL[f"spot_{env}"]
@@ -553,9 +570,13 @@ class MarketStream:
 
     async def start(self) -> None:
         self._running = True
-        futures_tasks = [self._connect_futures(sym) for sym in settings.symbol_list]
-        spot_tasks    = [self._connect_spot(sym)    for sym in settings.symbol_list]
-        await asyncio.gather(*futures_tasks, *spot_tasks)
+        # Crear tasks independientes: un fallo en un símbolo no afecta a los demás
+        tasks = []
+        for sym in settings.symbol_list:
+            tasks.append(asyncio.ensure_future(self._connect_futures(sym)))
+            tasks.append(asyncio.ensure_future(self._connect_spot(sym)))
+        # Esperar con return_exceptions=True: los errores no cancelan otras tasks
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def stop(self) -> None:
         self._running = False

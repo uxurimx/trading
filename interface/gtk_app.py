@@ -1562,6 +1562,13 @@ class MainWindow(Adw.ApplicationWindow):
         if not state:
             return
 
+        # ── Watchdog: si los datos llevan >20s sin actualizarse, reconectar stream ──
+        stale_s = time.time() - state.last_update if state.last_update > 0 else 0
+        if stale_s > 20 and state.last_update > 0:
+            # Reiniciar stream del símbolo en el loop async
+            self._bridge.submit(self.stream._connect_futures(self._sym))
+            state.last_update = time.time()  # evitar re-disparar en el siguiente tick
+
         # ── Calcular todos los signals (orden importa: cada uno usa el anterior)
         trend  = self._trend_analyzer.analyze(state)
         sig    = self._abs_detector.analyze(state)

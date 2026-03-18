@@ -296,6 +296,7 @@ class TradePriceChart(Gtk.DrawingArea):
         self._entry = self._sl = self._tp = self._mark = 0.0
         self._side  = "Buy"
         self._trail_extreme: float = 0.0
+        self._fee_be:        float = 0.0   # precio de BE real (entrada + fees RT)
         self._be_pct:    float = 0.40
         self._sg_pct:    float = 0.30
         self._plk_pct:   float = 0.60
@@ -318,6 +319,14 @@ class TradePriceChart(Gtk.DrawingArea):
         self._sg_pct   = sg_pct
         self._plk_pct  = plk_pct
         self._trail_pct = trail_pct
+        # Precio de breakeven real: entrada + fees de ida y vuelta (0.055% × 2)
+        # Para LONG: sube el precio mínimo de cierre para cubrir fees
+        # Para SHORT: baja el precio máximo de cierre para cubrir fees
+        if entry > 0:
+            fee_rt = entry * 0.0011   # 0.055% entrada + 0.055% salida
+            self._fee_be = entry + fee_rt if side == "Buy" else entry - fee_rt
+        else:
+            self._fee_be = 0.0
         if klines and len(klines) >= 5:
             prices = [p for p in [sl, tp, mark, entry] if p > 0]
             if prices:
@@ -454,11 +463,29 @@ class TradePriceChart(Gtk.DrawingArea):
         cr.set_source_rgba(*RGB["buy"], 0.9)
         cr.move_to(x_tp, 10); cr.line_to(x_tp, h - 10); cr.stroke()
 
+        # Entry (punteada tenue)
         cr.set_source_rgba(0.9, 0.9, 0.9, 0.5)
         cr.set_line_width(1)
         cr.set_dash([4, 3], 0)
         cr.move_to(x_entry, 0); cr.line_to(x_entry, h); cr.stroke()
         cr.set_dash([], 0)
+
+        # ── Fee-BE: precio mínimo real para no perder (entrada + comisiones RT) ──
+        if self._fee_be > 0:
+            x_fee_be = px(self._fee_be)
+            # Línea sólida blanca con distinta opacidad
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.70)
+            cr.set_line_width(1.5)
+            cr.set_dash([6, 3], 0)
+            cr.move_to(x_fee_be, 0); cr.line_to(x_fee_be, h); cr.stroke()
+            cr.set_dash([], 0)
+            # Etiqueta "FEE-BE" en la parte de arriba
+            cr.set_font_size(7.5)
+            lbl = "FEE-BE"
+            ext = cr.text_extents(lbl)
+            tx = max(1.0, min(w - ext[2] - 1, x_fee_be + 2))
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.75)
+            cr.move_to(tx, 9); cr.show_text(lbl)
 
         # ── Mark price (círculo) ───────────────────────────────────────────────
         cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
