@@ -48,6 +48,15 @@ PROFIT_LOCK_RATIO  = 0.40   # SL se mueve a entry + 40% del sl_dist
 MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 # scan_interval_s, breakeven_pct, profit_lock_pct, trailing_pct, be_hold_time_s vienen de settings
 
+# ── Smart Profit Guard ────────────────────────────────────────────────────────
+# Bloquea ganancias parciales cuando hay confluencia de señales de debilitamiento.
+# Actúa a partir del 30% de progreso, antes que el breakeven estándar (40%).
+SMART_GUARD_MIN_PROGRESS = 0.30   # umbral mínimo para activar el guard
+SMART_GUARD_WEAKNESS_REQ = 3      # puntuación de debilidad necesaria (0-6)
+SMART_GUARD_LOCK_FRAC    = 0.45   # bloquear 45% de las ganancias actuales
+SMART_GUARD_ATR_ROOM     = 0.65   # dar mínimo 0.65×ATR de espacio desde el mark
+SMART_GUARD_COOLDOWN     = 10.0   # segundos mínimos entre ajustes consecutivos
+
 
 class TradeController:
     """
@@ -677,8 +686,51 @@ class TradeController:
 
         be_held = (now - self._be_since.get(sym, now)) >= settings.be_hold_time_s
 
-        # ── Breakeven (40% por >= 30s) ────────────────────────────────────────
+        # ── Smart Profit Guard (30%+ con señales de debilitamiento) ─────────
+        # Evalúa CVD, OI, momentum y orderbook. Si hay confluencia de debilidad,
+        # mueve el SL a ganancias parciales sin ahogar el trade (respeta 0.65×ATR).
+        # Actúa antes que el breakeven estándar y para estados OPEN y BREAKEVEN.
         if (
+            progress >= SMART_GUARD_MIN_PROGRESS
+            and trade.state not in (TradeState.TRAILING,)
+            and (now - self._last_sl_upd.get(sym, 0)) >= SMART_GUARD_COOLDOWN
+        ):
+            weak = self._weakness_score(sym, trade, mark, ms)
+            if weak >= SMART_GUARD_WEAKNESS_REQ:
+                # SL objetivo: bloquear el 45% de las ganancias actuales
+                locked_frac = progress * SMART_GUARD_LOCK_FRAC
+                atr = sl_dist / 1.5   # estimación de ATR desde la distancia SL original
+                if is_long:
+                    desired_sl  = entry + locked_frac * tp_dist
+                    min_room_sl = mark  - atr * SMART_GUARD_ATR_ROOM
+                    new_sl = min(desired_sl, min_room_sl)   # nunca más apretado que 0.65×ATR
+                else:
+                    desired_sl  = entry - locked_frac * tp_dist
+                    min_room_sl = mark  + atr * SMART_GUARD_ATR_ROOM
+                    new_sl = max(desired_sl, min_room_sl)
+
+                improves = ((is_long and new_sl > trade.current_sl) or
+                            (not is_long and new_sl < trade.current_sl))
+                if improves:
+                    room_atr = abs(mark - new_sl) / atr if atr > 0 else 0
+                    log.info(
+                        "SmartGuard: %s prog=%.0f%% weak=%d  SL %.5g→%.5g "
+                        "(lock=%.0f%% ganancias, room=%.1f×ATR)",
+                        sym, progress * 100, weak,
+                        trade.current_sl, new_sl,
+                        locked_frac * 100, room_atr,
+                    )
+                    trade.current_sl = new_sl
+                    if (is_long and new_sl > entry) or (not is_long and new_sl < entry):
+                        trade.state = TradeState.BREAKEVEN
+                    self._bridge.submit(
+                        self._modify_sl_safe(sym, new_sl, req.side, "smart-guard")
+                    )
+                    self._last_sl_upd[sym] = now
+                    self._notify()
+
+        # ── Breakeven (40% por >= 30s) ────────────────────────────────────────
+        elif (
             trade.state == TradeState.OPEN
             and progress >= settings.breakeven_pct / 100
             and be_held
@@ -830,6 +882,66 @@ class TradeController:
                 score += 2 if up_moves >= 4 else (1 if up_moves == 3 else 0)
             else:
                 score += 2 if dn_moves >= 4 else (1 if dn_moves == 3 else 0)
+
+        return score
+
+    def _weakness_score(
+        self,
+        sym:   str,
+        trade: "TradeRecord",
+        mark:  float,
+        ms:    Optional["MarketState"],
+    ) -> int:
+        """
+        Evalúa señales de debilitamiento del movimiento actual (0-6 puntos).
+        Cuanto más alto, mayor la probabilidad de pullback o reversión.
+
+        Señales:
+          · CVD: velas contra la dirección del trade (últimas 5) → +0/+1/+2
+          · OI velocity: posiciones cerrándose (negativo)         → +1
+          · Price momentum: precio frenando/revirtiendo           → +0/+1/+2
+          · Orderbook imbalance: presión contraria al trade       → +0/+1
+        """
+        if not ms or not trade.request:
+            return 0
+
+        is_long = trade.request.side == "Buy"
+        score   = 0
+
+        # 1. CVD: ¿mayoría de velas van CONTRA el trade?
+        candles = list(ms.cvd_candles)[-5:]
+        if len(candles) >= 3:
+            bear = sum(1 for c in candles if c.delta < 0)
+            bull = len(candles) - bear
+            if is_long:
+                score += 2 if bear >= 4 else (1 if bear == 3 else 0)
+            else:
+                score += 2 if bull >= 4 else (1 if bull == 3 else 0)
+
+        # 2. OI velocity: posiciones cerrándose = pérdida de convicción
+        if ms.oi_velocity < -0.3:
+            score += 1
+
+        # 3. Price momentum: últimas 5 muestras revirtiendo
+        ph = list(ms._price_history)[-5:]
+        if len(ph) >= 3:
+            prices   = [p for _, p in ph]
+            up_moves = sum(1 for i in range(1, len(prices)) if prices[i] > prices[i - 1])
+            dn_moves = len(prices) - 1 - up_moves
+            if is_long:
+                score += 2 if dn_moves >= 4 else (1 if dn_moves == 3 else 0)
+            else:
+                score += 2 if up_moves >= 4 else (1 if up_moves == 3 else 0)
+
+        # 4. Orderbook imbalance: ¿más asks que bids (long) o bids que asks (short)?
+        try:
+            imbal = ms.orderbook.imbalance
+            if is_long and imbal < -0.20:
+                score += 1
+            elif not is_long and imbal > 0.20:
+                score += 1
+        except AttributeError:
+            pass
 
         return score
 
