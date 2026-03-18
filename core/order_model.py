@@ -114,6 +114,9 @@ class TradeRecord:
     opened_at:       int          = 0
     closed_at:       int          = 0
 
+    signal_health:    int         = -1   # debilidad actual 0-6 (-1=sin datos); ver _weakness_score
+    signal_timeframe: str         = "15m"  # timeframe base del setup (ATR + señal)
+
     @property
     def is_active(self) -> bool:
         return self.state in (TradeState.OPEN, TradeState.BREAKEVEN, TradeState.TRAILING)

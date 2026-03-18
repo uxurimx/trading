@@ -42,7 +42,7 @@ from core.trend        import TrendAnalyzer
 from core.regime       import RegimeClassifier, OpportunityScorer
 from core.technicals   import TechIndicators
 from core.executor     import BybitExecutor
-from core.config       import settings
+from core.config       import settings, SPEED_CONFIGS
 from streams.market    import MarketStream
 from streams.account   import AccountStream
 from streams.klines    import KlineStream
@@ -127,8 +127,9 @@ async def _signal_loop() -> None:
                 regime     = _regime.classify(ms, trend)
                 opp        = _scorer.score(absorption, regime, trend, lmap)
 
-                # ATR desde klines (si disponibles)
-                k15  = _klines.store.get(sym, "15")
+                # ATR desde klines — usa el kline rápido del nivel de velocidad activo
+                fast_key = SPEED_CONFIGS.get(settings.speed_level, SPEED_CONFIGS["standard"])["fast"]
+                k15  = _klines.store.get(sym, fast_key)
                 atr  = TechIndicators.atr(k15, 14) if k15 else 0.0
                 rsi  = TechIndicators.rsi(TechIndicators.closes(k15), 14) if k15 else 50.0
 

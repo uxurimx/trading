@@ -1607,8 +1607,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         positions = account.open_positions()
         if positions:
-            k15 = self.klines.store.get(self._sym, "15")
-            k1h = self.klines.store.get(self._sym, "60")
+            k15 = self.klines.store.get(self._sym, settings.fast_kline)
+            k1h = self.klines.store.get(self._sym, settings.slow_kline)
             if k15 and k1h:
                 self._tech_signal = self._tech_analyzer.analyze(positions[0], k15, k1h)
 
@@ -1688,8 +1688,8 @@ class MainWindow(Adw.ApplicationWindow):
                 lm_s  = self._liq_analyzer.analyze(st)
                 rg_s  = self._regime_clf.classify(st, tr_s)
                 new_opp[sym] = self._opp_scorer.score(sig_s, rg_s, tr_s, lm_s)
-                k15 = self.klines.store.get(sym, "15")
-                k1h = self.klines.store.get(sym, "60")
+                k15 = self.klines.store.get(sym, settings.fast_kline)
+                k1h = self.klines.store.get(sym, settings.slow_kline)
                 if k15 and k1h:
                     dummy = _Pos(
                         symbol=sym, side="Buy", size=1,

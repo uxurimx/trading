@@ -57,6 +57,10 @@ SMART_GUARD_LOCK_FRAC    = 0.45   # bloquear 45% de las ganancias actuales
 SMART_GUARD_ATR_ROOM     = 0.65   # dar mínimo 0.65×ATR de espacio desde el mark
 SMART_GUARD_COOLDOWN     = 10.0   # segundos mínimos entre ajustes consecutivos
 
+# ── Breakeven fee-based ───────────────────────────────────────────────────────
+# RT fees (0.055% × 2) + margen de seguridad (0.05%) para garantizar PnL ≥ 0
+_BE_FEE_PCT = 0.00055 * 2 + 0.0005   # 0.16% del precio de entrada
+
 
 class TradeController:
     """
@@ -432,9 +436,10 @@ class TradeController:
 
         if result.success:
             if trade:
-                trade.state       = TradeState.OPEN
-                trade.result      = result
-                trade.opened_at   = int(time.time())
+                trade.state            = TradeState.OPEN
+                trade.result           = result
+                trade.opened_at        = int(time.time())
+                trade.signal_timeframe = settings.speed_cfg["tf_label"]
                 self._open_ts[req.symbol] = time.monotonic()  # gracia para WS latency
                 trade.entry_price = req.entry_price
                 trade.pnl_at_open = 0.0   # se establece en primer tick con account data
@@ -732,8 +737,8 @@ class TradeController:
             and be_held
             and sl != entry
         ):
-            # Mover a entry + pequeño buffer (5% del SL_dist) para cubrir spread
-            buffer = sl_dist * 0.05
+            # Mover a entry + fees RT (0.11%) + margen seguridad (0.05%) = 0.16%
+            buffer = entry * _BE_FEE_PCT
             new_sl = (entry + buffer) if is_long else (entry - buffer)
             log.info("Breakeven: %s SL → %.5g (mantenido %.0fs)", sym, new_sl, now - self._be_since[sym])
             trade.state      = TradeState.BREAKEVEN
@@ -831,6 +836,9 @@ class TradeController:
                     if first_trail:
                         notifier.trailing_activated(sym, new_sl)
                     self._notify()
+
+        # ── Actualizar salud del setup ─────────────────────────────────────────
+        trade.signal_health = self._weakness_score(sym, trade, mark, ms)
 
     def _continuation_score(
         self,

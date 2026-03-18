@@ -650,11 +650,12 @@ class TradeCard(Gtk.Box):
         summary.set_margin_start(6); summary.set_margin_end(6)
         summary.set_margin_top(4);   summary.set_margin_bottom(2)
 
-        self._sym_lbl   = _ml()
-        self._state_lbl = _ml()
-        self._pnl_lbl   = _ml()
-        self._dur_lbl   = _ml()   # duración siempre visible
-        self._auto_lbl  = _ml()   # muestra estado AUTO / MANUAL
+        self._sym_lbl          = _ml()
+        self._state_lbl        = _ml()
+        self._pnl_lbl          = _ml()
+        self._dur_lbl          = _ml()   # duración siempre visible
+        self._auto_lbl         = _ml()   # muestra estado AUTO / MANUAL
+        self._signal_health_lbl = _ml()  # salud del setup en tiempo real
         self._sym_lbl.set_hexpand(True)
 
         self._mode_btn = Gtk.Button(label="▶ AUTO")
@@ -675,6 +676,7 @@ class TradeCard(Gtk.Box):
         summary.append(self._state_lbl)
         summary.append(self._pnl_lbl)
         summary.append(self._dur_lbl)
+        summary.append(self._signal_health_lbl)
         summary.append(self._auto_lbl)
         summary.append(self._mode_btn)
         summary.append(expand_btn)
@@ -730,10 +732,11 @@ class TradeCard(Gtk.Box):
         detail_box.set_margin_bottom(6)
         detail_box.append(_sep())
 
-        self._levels_lbl  = _ml()
-        self._sizing_lbl  = _ml()
-        self._opened_lbl  = _ml()
-        self._reasons_lbl = _ml()
+        self._levels_lbl    = _ml()
+        self._sizing_lbl    = _ml()
+        self._opened_lbl    = _ml()
+        self._timeframe_lbl = _ml()   # timeframe del setup + breakeven fee-based
+        self._reasons_lbl   = _ml()
         self._reasons_lbl.set_wrap(True)
         self._reasons_lbl.set_max_width_chars(50)
         self._risk_lbl1 = _ml()
@@ -742,7 +745,8 @@ class TradeCard(Gtk.Box):
         self._risk_lbl4 = _ml()
 
         for w in [self._levels_lbl, self._sizing_lbl, self._opened_lbl,
-                  self._reasons_lbl, self._risk_lbl1, self._risk_lbl2,
+                  self._timeframe_lbl, self._reasons_lbl,
+                  self._risk_lbl1, self._risk_lbl2,
                   self._risk_lbl3, self._risk_lbl4]:
             detail_box.append(w)
 
@@ -896,6 +900,20 @@ class TradeCard(Gtk.Box):
             f'  {score_s}'
         )
 
+        # Indicador de salud del setup (weakness_score 0-6)
+        h = trade.signal_health
+        if h < 0:
+            health_text, health_color = "──", "sub"
+        elif h <= 1:
+            health_text, health_color = "● OK",      "buy"
+        elif h <= 3:
+            health_text, health_color = "● VIGILAR", "warn"
+        else:
+            health_text, health_color = "● DÉBIL",   "sell"
+        self._signal_health_lbl.set_markup(
+            f'<span color="{HEX[health_color]}" size="small" weight="bold">{health_text}</span>'
+        )
+
         # Indicador de gestión automática (inline, compacto)
         if trade.auto_mode == AutoMode.FULL_AUTO:
             auto_map = {
@@ -925,6 +943,17 @@ class TradeCard(Gtk.Box):
             f'<span color="{HEX["text"]}">{dur}</span>'
             f'  <span color="{HEX["sub"]}">Lev: </span>'
             f'<span color="{HEX["text"]}">{req.leverage}x</span>'
+        )
+
+        # Timeframe del setup + precio de breakeven
+        be_price = (entry * (1 + 0.0016) if req.side == "Buy"
+                    else entry * (1 - 0.0016))
+        self._timeframe_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">TF </span>'
+            f'<span color="{HEX["blue"]}">{trade.signal_timeframe}</span>'
+            f'  <span color="{HEX["sub"]}">BE real </span>'
+            f'<span color="{HEX["over"]}">{_fp(be_price)}</span>'
+            f'  <span color="{HEX["sub"]}" size="small">(entry+fees 0.11%+buf 0.05%)</span>'
         )
 
         if req.reasons:

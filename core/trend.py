@@ -27,17 +27,35 @@ if TYPE_CHECKING:
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-TIMEFRAMES: List[Tuple[str, int, int]] = [
-    # (etiqueta, segundos, peso)
-    ("1m",   60,      1),
-    ("3m",   180,     2),
-    ("5m",   300,     3),
-    ("30m",  1800,    8),
-    ("1h",   3600,   13),
-    ("6h",   21600,  21),
-]
+# Timeframes por nivel de velocidad  (etiqueta, segundos, peso Fibonacci)
+_TF_BY_SPEED: dict = {
+    "scalp": [
+        ("1m",   60,   1),
+        ("3m",   180,  2),
+        ("5m",   300,  3),
+        ("15m",  900,  5),
+    ],
+    "fast": [
+        ("1m",   60,   1),
+        ("3m",   180,  2),
+        ("5m",   300,  3),
+        ("15m",  900,  5),
+        ("30m",  1800, 8),
+    ],
+    "standard": [
+        ("1m",   60,      1),
+        ("3m",   180,     2),
+        ("5m",   300,     3),
+        ("30m",  1800,    8),
+        ("1h",   3600,   13),
+        ("6h",   21600,  21),
+    ],
+}
 
-TOTAL_WEIGHT  = sum(w for _, _, w in TIMEFRAMES)   # 48
+# Referencia para compatibilidad (refleja standard, se lee dinámicamente en analyze)
+TIMEFRAMES   = _TF_BY_SPEED["standard"]
+TOTAL_WEIGHT = sum(w for _, _, w in TIMEFRAMES)   # 48
+
 THRESHOLD_PCT = 0.03    # % mínimo de movimiento para considerar direccional
 SAMPLE_SECS   = 30.0    # cada cuántos segundos muestreamos el precio en MarketState
 
@@ -102,6 +120,7 @@ class TrendAnalyzer:
     """
 
     def analyze(self, state: "MarketState") -> TrendSignal:
+        from core.config import settings
         price = state.ticker.last_price
         if price <= 0:
             return NEUTRAL_TREND
@@ -110,16 +129,17 @@ class TrendAnalyzer:
         if not history:
             return NEUTRAL_TREND
 
+        active_tfs = _TF_BY_SPEED.get(settings.speed_level, _TF_BY_SPEED["standard"])
         now     = history[-1][0]   # timestamp del último sample
         tfs: List[TFTrend] = []
 
-        for label, seconds, weight in TIMEFRAMES:
+        for label, seconds, weight in active_tfs:
             tf = self._eval_tf(label, seconds, weight, price, history, now)
             tfs.append(tf)
 
         # ── Score ponderado ────────────────────────────────────────────────────
-        bull_w = sum(tf.weight for tf in tfs if tf.direction > 0)
-        bear_w = sum(tf.weight for tf in tfs if tf.direction < 0)
+        bull_w = sum(tf.weight for tf in tfs if tf.direction  > 0)
+        bear_w = sum(tf.weight for tf in tfs if tf.direction  < 0)
         data_w = sum(tf.weight for tf in tfs if tf.has_data)
 
         if data_w == 0:

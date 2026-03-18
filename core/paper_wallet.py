@@ -293,6 +293,9 @@ class PaperExecutor:
     def _hedge_mode(self):
         return self._real._hedge_mode
 
+    def get_info(self, symbol: str):
+        return self._real.get_info(symbol)
+
     def round_qty(self, symbol: str, qty: float) -> float:
         return self._real.round_qty(symbol, qty)
 

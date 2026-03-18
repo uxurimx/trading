@@ -1,8 +1,39 @@
 from __future__ import annotations
 
-from typing import List
+from typing import Any, Dict, List
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# ─── Niveles de velocidad ──────────────────────────────────────────────────────
+# Define qué klines y timeframes usa cada modo.
+#   fast      = kline principal para ATR/EMAs (base de la señal)
+#   slow      = kline de contexto (EMA50/200, RSI lento)
+#   tf_label  = etiqueta mostrada en UI
+
+SPEED_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "scalp": {
+        "fast": "1",   "fast_limit": 100,
+        "slow": "5",   "slow_limit": 100,
+        "tf_label": "1m",
+        "label": "SCALP",
+        "desc": "Trades 1–5 min · ATR 1m",
+    },
+    "fast": {
+        "fast": "5",   "fast_limit": 80,
+        "slow": "15",  "slow_limit": 80,
+        "tf_label": "5m",
+        "label": "FAST",
+        "desc": "Trades 5–20 min · ATR 5m",
+    },
+    "standard": {
+        "fast": "15",  "fast_limit": 80,
+        "slow": "60",  "slow_limit": 220,
+        "tf_label": "15m",
+        "label": "STANDARD",
+        "desc": "Trades 20–120 min · ATR 15m",
+    },
+}
 
 
 class Settings(BaseSettings):
@@ -54,6 +85,19 @@ class Settings(BaseSettings):
     # Estrategia
     min_scan_score:   int   = 55     # score mínimo para generar propuesta
     scan_interval_s:  int   = 30     # segundos entre scans automáticos
+    speed_level:      str   = "standard"  # "scalp" | "fast" | "standard"
+
+    @property
+    def speed_cfg(self) -> Dict[str, Any]:
+        return SPEED_CONFIGS.get(self.speed_level, SPEED_CONFIGS["standard"])
+
+    @property
+    def fast_kline(self) -> str:
+        return self.speed_cfg["fast"]
+
+    @property
+    def slow_kline(self) -> str:
+        return self.speed_cfg["slow"]
 
     # Paper trading
     paper_trading:  bool  = False

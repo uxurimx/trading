@@ -14,7 +14,7 @@ from typing import Dict, List
 
 import aiohttp
 
-from core.config import settings
+from core.config import settings, SPEED_CONFIGS
 
 
 _BASE = "https://api-testnet.bybit.com" if settings.bybit_testnet else "https://api.bybit.com"
@@ -94,13 +94,16 @@ class KlineStream:
 
     async def _fetch(self, symbol: str) -> None:
         try:
+            cfg = SPEED_CONFIGS.get(settings.speed_level, SPEED_CONFIGS["standard"])
+            fi, fl = cfg["fast"], cfg["fast_limit"]
+            si, sl = cfg["slow"], cfg["slow_limit"]
             async with aiohttp.ClientSession() as session:
-                k15, k1h = await asyncio.gather(
-                    self._get(session, symbol, "15",  80),
-                    self._get(session, symbol, "60", 220),
+                kfast, kslow = await asyncio.gather(
+                    self._get(session, symbol, fi, fl),
+                    self._get(session, symbol, si, sl),
                 )
-            self.store.set(symbol, "15",  k15)
-            self.store.set(symbol, "60",  k1h)
+            self.store.set(symbol, fi, kfast)
+            self.store.set(symbol, si, kslow)
         except Exception:
             pass
 

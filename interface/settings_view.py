@@ -12,7 +12,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, Pango
 
-from core.config import settings
+from core.config import settings, SPEED_CONFIGS
 
 
 # ─── Helpers de layout ────────────────────────────────────────────────────────
@@ -230,6 +230,44 @@ class SettingsView(Gtk.ScrolledWindow):
         # ── Estrategia / Scan ────────────────────────────────────────────────
         box.append(_section("ESTRATEGIA"))
 
+        # Selector de nivel de velocidad
+        speed_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._speed_btns: dict[str, Gtk.ToggleButton] = {}
+        first_btn = None
+        for key in ("scalp", "fast", "standard"):
+            cfg  = SPEED_CONFIGS[key]
+            btn  = Gtk.ToggleButton(label=f"{cfg['label']}\n{cfg['desc']}")
+            btn.set_hexpand(True)
+            btn.get_child().set_justify(Gtk.Justification.CENTER)
+            if first_btn is None:
+                first_btn = btn
+            else:
+                btn.set_group(first_btn)
+            if settings.speed_level == key:
+                btn.set_active(True)
+            btn.connect("toggled", self._on_speed_toggled, key)
+            speed_box.append(btn)
+            self._speed_btns[key] = btn
+
+        self._speed_hint = Gtk.Label()
+        self._speed_hint.set_xalign(0)
+        self._speed_hint.set_margin_start(8)
+        self._speed_hint.set_margin_bottom(4)
+        self._update_speed_hint()
+
+        speed_lbl = Gtk.Label(label="Velocidad de trades")
+        speed_lbl.set_xalign(0)
+        speed_lbl.set_size_request(220, -1)
+        speed_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        speed_row.set_margin_start(8)
+        speed_row.set_margin_end(8)
+        speed_row.set_margin_top(2)
+        speed_row.set_margin_bottom(2)
+        speed_row.append(speed_lbl)
+        speed_row.append(speed_box)
+        box.append(speed_row)
+        box.append(self._speed_hint)
+
         self._score_sp = _spin(30, 95, settings.min_scan_score, 1, 0)
         self._score_sp.connect("value-changed", lambda sp: setattr(settings, "min_scan_score", int(sp.get_value())))
         box.append(_row("Score mínimo para propuesta",
@@ -278,6 +316,25 @@ class SettingsView(Gtk.ScrolledWindow):
             '</span>'
         )
         box.append(note)
+
+    # ── Speed level handlers ──────────────────────────────────────────────────
+
+    def _on_speed_toggled(self, btn: Gtk.ToggleButton, key: str) -> None:
+        if btn.get_active():
+            settings.speed_level = key
+            self._update_speed_hint()
+
+    def _update_speed_hint(self) -> None:
+        cfg = SPEED_CONFIGS.get(settings.speed_level, SPEED_CONFIGS["standard"])
+        colors = {"scalp": "#ff7b00", "fast": "#f8e45c", "standard": "#57e389"}
+        color  = colors.get(settings.speed_level, "#9a9996")
+        self._speed_hint.set_markup(
+            f'<span foreground="{color}" size="small" weight="bold">{cfg["label"]}</span>'
+            f'<span foreground="#9a9996" size="small"> — kline base: {cfg["tf_label"]}  '
+            f'contexto: {cfg["slow"]}m  {cfg["desc"]}</span>'
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _on_circuit_breaker(self, sw: Gtk.Switch, _param) -> None:
         active = sw.get_active()
