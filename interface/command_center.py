@@ -291,12 +291,13 @@ class TradePriceChart(Gtk.DrawingArea):
 
     def __init__(self) -> None:
         super().__init__()
-        self.set_size_request(-1, 76)
+        self.set_size_request(-1, 80)
         self.set_hexpand(True)
         self._entry = self._sl = self._tp = self._mark = 0.0
         self._side  = "Buy"
-        self._trail_extreme: float = 0.0
-        self._fee_be:        float = 0.0   # precio de BE real (entrada + fees RT)
+        self._trail_best:  float = 0.0   # precio más favorable alcanzado (hacia TP)
+        self._trail_worst: float = 0.0   # precio más desfavorable alcanzado (hacia SL)
+        self._fee_be:      float = 0.0   # breakeven real con fees
         self._be_pct:    float = 0.40
         self._sg_pct:    float = 0.30
         self._plk_pct:   float = 0.60
@@ -305,7 +306,7 @@ class TradePriceChart(Gtk.DrawingArea):
         self.set_draw_func(self._draw)
 
     def update(self, entry: float, sl: float, tp: float, mark: float, side: str,
-               trail_extreme: float = 0.0,
+               trail_best: float = 0.0, trail_worst: float = 0.0,
                be_pct: float = 0.40, sg_pct: float = 0.30,
                plk_pct: float = 0.60, trail_pct: float = 0.70,
                klines: list = None) -> None:
@@ -314,16 +315,15 @@ class TradePriceChart(Gtk.DrawingArea):
         self._tp    = tp
         self._mark  = mark if mark > 0 else entry
         self._side  = side
-        self._trail_extreme = trail_extreme
+        self._trail_best  = trail_best
+        self._trail_worst = trail_worst
         self._be_pct   = be_pct
         self._sg_pct   = sg_pct
         self._plk_pct  = plk_pct
         self._trail_pct = trail_pct
-        # Precio de breakeven real: entrada + fees de ida y vuelta (0.055% × 2)
-        # Para LONG: sube el precio mínimo de cierre para cubrir fees
-        # Para SHORT: baja el precio máximo de cierre para cubrir fees
+        # Breakeven real: entrada + comisiones ida y vuelta (0.055% × 2 = 0.11%)
         if entry > 0:
-            fee_rt = entry * 0.0011   # 0.055% entrada + 0.055% salida
+            fee_rt = entry * 0.0011
             self._fee_be = entry + fee_rt if side == "Buy" else entry - fee_rt
         else:
             self._fee_be = 0.0
@@ -341,11 +341,11 @@ class TradePriceChart(Gtk.DrawingArea):
 
     def _draw(self, _area, cr, w: int, h: int) -> None:
         prices = [p for p in [self._sl, self._tp, self._mark, self._entry,
-                               self._trail_extreme] if p > 0]
+                               self._trail_best, self._trail_worst] if p > 0]
         if not prices:
             return
-        lo  = min(prices) * 0.9982
-        hi  = max(prices) * 1.0018
+        lo  = min(prices) * 0.9980
+        hi  = max(prices) * 1.0020
         rng = hi - lo or 1e-9
 
         def px(price: float) -> float:
@@ -357,7 +357,7 @@ class TradePriceChart(Gtk.DrawingArea):
         cr.fill()
 
         mid  = h / 2
-        PAD  = 10   # padding vertical para líneas de acción (zona superior)
+        PAD  = 11   # zona superior para etiquetas de acción
 
         x_sl    = px(self._sl)    if self._sl    > 0 else 0.0
         x_entry = px(self._entry) if self._entry > 0 else w / 2
@@ -381,16 +381,14 @@ class TradePriceChart(Gtk.DrawingArea):
             cr.rectangle(x_tp, 0, x_entry - x_tp, h)
         cr.fill()
 
-        # ── Niveles S/R ────────────────────────────────────────────────────────
-        cr.set_font_size(7.5)
+        # ── Niveles S/R (klines) ───────────────────────────────────────────────
         cr.set_line_width(0.8)
         cr.set_dash([2, 3], 0)
         for (lv, cnt) in self._sr_levels:
             xr = px(lv)
-            # soporte (debajo del mark) en verde; resistencia (encima) en rojo
             is_support = lv < self._mark
             col = RGB["buy"] if is_support else RGB["sell"]
-            alpha = 0.30 + min(0.25, cnt * 0.07)
+            alpha = 0.28 + min(0.22, cnt * 0.07)
             cr.set_source_rgba(*col, alpha)
             cr.move_to(xr, 0); cr.line_to(xr, h); cr.stroke()
         cr.set_dash([], 0)
@@ -408,14 +406,11 @@ class TradePriceChart(Gtk.DrawingArea):
             cr.set_line_width(1.0)
             cr.set_dash([3, 4], 0)
             for (frac, col, lbl) in actions:
-                if is_long:
-                    price = self._entry + frac * tp_dist
-                else:
-                    price = self._entry - frac * tp_dist
+                price = (self._entry + frac * tp_dist if is_long
+                         else self._entry - frac * tp_dist)
                 xa = px(price)
                 cr.set_source_rgba(*col, 0.55)
                 cr.move_to(xa, PAD); cr.line_to(xa, h - 12); cr.stroke()
-                # Etiqueta pequeña arriba
                 ext = cr.text_extents(lbl)
                 cr.set_source_rgba(*col, 0.75)
                 cr.move_to(max(1.0, xa - ext[2] / 2), PAD - 1)
@@ -430,30 +425,72 @@ class TradePriceChart(Gtk.DrawingArea):
         cr.rectangle(x0, mid - 6, abs(x_mark - x_entry), 12)
         cr.fill()
 
-        # ── High water mark ────────────────────────────────────────────────────
-        if self._trail_extreme > 0:
-            xe = px(self._trail_extreme)
-            # Pequeño triángulo / diamond en color naranja
-            cr.set_source_rgba(*_COL_HWM, 0.85)
-            cr.set_line_width(1.2)
-            # Marca vertical con tick superior/inferior
-            cr.move_to(xe, mid - 8); cr.line_to(xe, mid + 8); cr.stroke()
-            # Cabeza de flecha hacia el TP
-            if is_long:
-                cr.move_to(xe,     mid - 8)
-                cr.line_to(xe + 5, mid - 3)
-                cr.line_to(xe - 5, mid - 3)
+        # ── Marcadores de excursión máxima y mínima ────────────────────────────
+        # threshold: solo mostrar si se aleja más del 0.03% de la entrada
+        min_delta = self._entry * 0.0003 if self._entry > 0 else 0
+
+        def _excursion_marker(price: float, toward_tp: bool) -> None:
+            """Dibuja un marcador de excursión con precio y flecha."""
+            if price <= 0:
+                return
+            # Verificar que se aleja significativamente de la entrada
+            if self._entry > 0 and abs(price - self._entry) < min_delta:
+                return
+            xm = px(price)
+            # Color: verde para MAX (favorable), rojo para MIN (desfavorable)
+            col = _COL_HWM if toward_tp else RGB["sell"]
+            alpha = 0.90
+
+            cr.set_source_rgba(*col, alpha)
+            cr.set_line_width(1.5)
+
+            if toward_tp:
+                # MAX: marcador ARRIBA de la barra (zona superior)
+                bar_top = mid - 6
+                # Línea vertical desde top hasta barra
+                cr.move_to(xm, 4); cr.line_to(xm, bar_top); cr.stroke()
+                # Triángulo apuntando HACIA TP (flecha en la dirección de progreso)
+                tip_y = 4
+                if is_long:  # flecha apunta a la derecha (arriba del eje)
+                    cr.move_to(xm,     tip_y + 6)
+                    cr.line_to(xm - 4, tip_y + 11)
+                    cr.line_to(xm + 4, tip_y + 11)
+                else:        # flecha apunta a la izquierda
+                    cr.move_to(xm,     tip_y + 6)
+                    cr.line_to(xm - 4, tip_y + 11)
+                    cr.line_to(xm + 4, tip_y + 11)
+                cr.close_path(); cr.fill()
+                # Precio encima del marcador
+                cr.set_font_size(7.5)
+                lbl = _fp(price)
+                ext = cr.text_extents(lbl)
+                tx = max(1.0, min(w - ext[2] - 1, xm - ext[2] / 2))
+                cr.set_source_rgba(*col, 0.85)
+                cr.move_to(tx, h - 3)
+                cr.show_text(lbl)
             else:
-                cr.move_to(xe,     mid + 8)
-                cr.line_to(xe + 5, mid + 3)
-                cr.line_to(xe - 5, mid + 3)
-            cr.close_path(); cr.fill()
-            # Etiqueta "MAX"
-            cr.set_font_size(7)
-            ext = cr.text_extents("MAX")
-            cr.set_source_rgba(*_COL_HWM, 0.80)
-            tx = max(1.0, min(w - ext[2] - 1, xe - ext[2] / 2))
-            cr.move_to(tx, mid - 11); cr.show_text("MAX")
+                # MIN: marcador ABAJO de la barra (zona inferior)
+                bar_bot = mid + 6
+                cr.move_to(xm, bar_bot); cr.line_to(xm, h - 4); cr.stroke()
+                # Triángulo apuntando hacia abajo (dirección SL)
+                tip_y = h - 4
+                cr.move_to(xm,     tip_y - 6)
+                cr.line_to(xm - 4, tip_y - 11)
+                cr.line_to(xm + 4, tip_y - 11)
+                cr.close_path(); cr.fill()
+                # Precio debajo (ya está cerca del bottom, ponemos arriba de la línea)
+                cr.set_font_size(7.5)
+                lbl = _fp(price)
+                ext = cr.text_extents(lbl)
+                tx = max(1.0, min(w - ext[2] - 1, xm - ext[2] / 2))
+                cr.set_source_rgba(*col, 0.75)
+                cr.move_to(tx, h - 3)
+                cr.show_text(lbl)
+
+        # Para LONG: trail_best = max precio (hacia TP), trail_worst = min precio (hacia SL)
+        # Para SHORT: trail_best = min precio (hacia TP), trail_worst = max precio (hacia SL)
+        _excursion_marker(self._trail_best,  toward_tp=True)
+        _excursion_marker(self._trail_worst, toward_tp=False)
 
         # ── Líneas verticales principales ─────────────────────────────────────
         cr.set_line_width(2)
@@ -836,15 +873,22 @@ class TradeCard(Gtk.Box):
         else:
             self._reasons_lbl.set_text("")
 
-        # Gráfico (siempre visible) — con S/R, thresholds de acción y HWM
-        is_long   = req.side == "Buy"
-        trail_ext = (self._controller._trail_high.get(trade.symbol, 0.0) if is_long
-                     else self._controller._trail_low.get(trade.symbol, 0.0))
+        # Gráfico con S/R, thresholds de acción y excursiones MAX/MIN
+        is_long = req.side == "Buy"
+        # trail_best  = mejor precio alcanzado (hacia TP)
+        # trail_worst = peor precio alcanzado  (hacia SL)
+        if is_long:
+            trail_best  = self._controller._trail_high.get(trade.symbol, 0.0)
+            trail_worst = self._controller._trail_low.get(trade.symbol, 0.0)
+        else:
+            trail_best  = self._controller._trail_low.get(trade.symbol, 0.0)
+            trail_worst = self._controller._trail_high.get(trade.symbol, 0.0)
         self._chart.update(
             entry, trade.current_sl, req.tp_price, mark, req.side,
-            trail_extreme = trail_ext,
+            trail_best  = trail_best,
+            trail_worst = trail_worst,
             be_pct   = _settings.breakeven_pct  / 100,
-            sg_pct   = 0.30,                          # SMART_GUARD_MIN_PROGRESS
+            sg_pct   = 0.30,
             plk_pct  = _settings.profit_lock_pct / 100,
             trail_pct= _settings.trailing_pct    / 100,
             klines   = klines,
