@@ -223,10 +223,7 @@ class OpportunityScorer:
     ) -> OpportunitySignal:
 
         if not absorption.is_signal:
-            return OpportunitySignal(
-                score=0, direction="NEUTRAL", color_key="over",
-                regime=regime,
-            )
+            return self._technical_only_score(regime, trend, lmap)
 
         reasons: List[str] = []
         direction = "LONG" if absorption.side == "BUY" else "SHORT"
@@ -306,6 +303,81 @@ class OpportunityScorer:
             regime=regime,
             reasons=reasons[:3],
             abs_pts=abs_pts,
+            regime_pts=max(0, regime_pts),
+            trend_pts=max(0, trend_pts),
+            liq_pts=liq_pts,
+        )
+
+    def _technical_only_score(
+        self,
+        regime: RegimeSignal,
+        trend:  "TrendSignal",
+        lmap:   "LiquidityMap",
+    ) -> OpportunitySignal:
+        """
+        Score basado exclusivamente en régimen + tendencia + liquidez (sin absorción).
+        Máximo 55 pts — permite detectar setups de tendencia incluso cuando la
+        señal de absorción no está activa. Con min_scan_score=55 solo los setups
+        técnicos MUY claros generan propuestas.
+        """
+        # Dirección desde la tendencia o el régimen
+        if trend.direction == "ALCISTA" and trend.score >= 45:
+            direction = "LONG"
+        elif trend.direction == "BAJISTA" and trend.score >= 45:
+            direction = "SHORT"
+        elif regime.regime == "TRENDING_UP":
+            direction = "LONG"
+        elif regime.regime == "TRENDING_DOWN":
+            direction = "SHORT"
+        else:
+            # Sin señal de absorción Y sin tendencia clara → genuinamente neutral
+            return OpportunitySignal(score=0, direction="NEUTRAL", color_key="over", regime=regime)
+
+        reasons: List[str] = []
+
+        # Régimen (0-20 pts — sin absorción vale menos)
+        regime_pts = {
+            "TRENDING_UP":   20,
+            "TRENDING_DOWN": 20,
+            "ACCUMULATION":  15,
+            "RANGING":       10,
+            "VOLATILE":       0,
+        }.get(regime.regime, 0)
+        if regime.is_trending:
+            reasons.append(f"tendencia {regime.label} sin absorción")
+
+        # Tendencia (0-25 pts)
+        trend_pts = 0
+        if trend.score >= 40:
+            aligned = (
+                (trend.direction == "ALCISTA" and direction == "LONG") or
+                (trend.direction == "BAJISTA" and direction == "SHORT")
+            )
+            if aligned:
+                trend_pts = int(trend.score / 100 * 25)
+                if trend_pts >= 15:
+                    reasons.append(f"EMA trend {trend.score}% ({trend.direction})")
+            else:
+                trend_pts = -int(trend.score / 100 * 10)
+
+        # Liquidez (0-10 pts — igual que con absorción)
+        liq_pts = 0
+        if lmap.at_hvn:
+            liq_pts = 10
+            reasons.append("precio en HVN")
+        elif lmap.at_lvn:
+            liq_pts = 5
+
+        raw   = regime_pts + trend_pts + liq_pts
+        total = max(0, min(55, raw))   # cap 55: sin absorción nunca es señal máxima
+
+        return OpportunitySignal(
+            score=total,
+            direction=direction,
+            color_key="buy" if direction == "LONG" else "sell",
+            regime=regime,
+            reasons=reasons[:3],
+            abs_pts=0,
             regime_pts=max(0, regime_pts),
             trend_pts=max(0, trend_pts),
             liq_pts=liq_pts,

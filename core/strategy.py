@@ -47,6 +47,29 @@ MAX_RISK_PCT    = 1.5     # % del equity máximo por trade
 MAX_MARGIN_PCT  = 35.0    # % del equity disponible que puede ir a margen
 PROPOSAL_TTL    = 60      # segundos antes de que una propuesta expire
 
+# ── Modo rápido (fast mode) para objetivos pequeños en activos de precio alto ─
+# Cuando el goal en USD es muy pequeño relativo al precio del activo, los
+# multiplicadores ATR estándar generan TPs muy lejanos en valor absoluto.
+# El modo rápido usa SL y TP más ajustados (mínimo RR viable) para que el trade
+# se resuelva en la mitad del recorrido.
+# Ejemplo: SOL $130, goal $0.50 → ratio = 0.0038 → fast mode
+#          SL: 1.0×ATR en lugar de 2.2×ATR  |  TP: 2.2×ATR en lugar de 5.0×ATR
+FAST_GOAL_RATIO  = 0.008   # goal/entry < 0.8% → activar fast mode
+FAST_MODE_SL_MULT = 1.0    # SL justo → más expuesto al ruido, pero trade más rápido
+FAST_MODE_TP_MULT = 2.2    # TP mínimo viable con RR=2.2
+
+# ── Velocity boost para objetivos pequeños ────────────────────────────────────
+# Cuando goal_usd < VELOCITY_GOAL_MAX, se añaden hasta +10 pts de score
+# a símbolos con ATR% en rango 0.5%-3% (sweet spot para resolución rápida).
+VELOCITY_GOAL_MAX = 2.0    # por debajo de este goal activar velocity scoring
+
+# ── Costes de transacción Bybit (perpetuos) ───────────────────────────────────
+TAKER_FEE_RATE  = 0.00055  # 0.055% tarifa taker (market orders)
+MAKER_FEE_RATE  = 0.00020  # 0.020% tarifa maker (limit orders)
+FUNDING_RATE_8H = 0.00010  # 0.010%/8h — estimación conservadora para longs
+#   El funding real varía por par y condiciones de mercado.
+#   Para shorts puede ser negativo (te pagan), para longs es el coste habitual.
+
 
 # ─── Validación ───────────────────────────────────────────────────────────────
 
@@ -56,35 +79,89 @@ class ValidationError(Exception):
 
 # ─── Resultado de análisis sin posición ──────────────────────────────────────
 
+def _adaptive_sl_tp_mult(entry: float, atr: float) -> Tuple[float, float]:
+    """
+    Ajusta multiplicadores ATR según la volatilidad relativa del par (ATR%).
+    Objetivo: SL que no sea víctima del ruido propio del par.
+
+    · >3% de ATR por vela 15m → mercado muy volátil, ATR ya es amplio → sl_mult bajo
+    · <0.7%                   → mercado muy quieto → sl_mult alto para evitar ruido
+    R:R mínimo siempre respetado.
+    """
+    if entry <= 0 or atr <= 0:
+        return ATR_SL_MULT, ATR_TP_MULT
+    atr_pct = atr / entry
+
+    if atr_pct > 0.030:              # >3%: mercado muy volátil
+        sl_m, tp_m = 1.2, 2.8
+    elif atr_pct > 0.015:            # 1.5-3%: normal-alto
+        sl_m, tp_m = 1.5, 3.0
+    elif atr_pct > 0.007:            # 0.7-1.5%: normal-bajo
+        sl_m, tp_m = 1.8, 4.0
+    else:                            # <0.7%: muy quieto (scalping zone)
+        sl_m, tp_m = 2.2, 5.0
+
+    # Garantizar RR >= MIN_RR
+    if sl_m > 0 and tp_m / sl_m < MIN_RR:
+        tp_m = sl_m * MIN_RR
+    return sl_m, tp_m
+
+
+def _velocity_boost(goal_usd: float, entry: float, atr: float) -> int:
+    """
+    Puntos adicionales de score para símbolos con ATR% en rango óptimo para
+    resolución rápida de objetivos pequeños.
+    Solo aplica cuando goal_usd < VELOCITY_GOAL_MAX.
+    Máximo +10 pts cuando ATR% ≈ 1.5% (punto ideal).
+    """
+    if goal_usd >= VELOCITY_GOAL_MAX or entry <= 0 or atr <= 0:
+        return 0
+    atr_pct = atr / entry
+    if atr_pct < 0.005 or atr_pct > 0.030:
+        return 0
+    # Bell curve: máximo en 1.5%, cae a 0 en los bordes (0.5% y 3%)
+    center = 0.015
+    width  = 0.010
+    boost  = max(0.0, 1.0 - abs(atr_pct - center) / width)
+    return int(boost * 10)
+
+
 def _atr_levels(
-    side:     str,
-    entry:    float,
-    atr:      float,
-    support:  float,
+    side:       str,
+    entry:      float,
+    atr:        float,
+    support:    float,
     resistance: float,
+    fast_mode:  bool = False,
 ) -> Tuple[float, float]:
     """
-    Calcula (sl, tp) usando ATR y soporte/resistencia.
-    Para LONG: SL por debajo del soporte (o 1.5x ATR si está muy lejos).
-               TP en resistencia o 3x ATR, lo que dé mejor R:R.
+    Calcula (sl, tp) usando ATR adaptativo y soporte/resistencia.
+    Para LONG: SL por debajo del soporte (o sl_mult × ATR si está muy lejos).
+               TP en resistencia o tp_mult × ATR, lo que dé mejor R:R.
     Para SHORT: inverso.
+    fast_mode: usa multiplicadores ajustados (1.0x SL / 2.2x TP) para trades
+               que se resuelven más rápido (objetivos pequeños en activos de precio alto).
     """
     if atr <= 0:
         return 0.0, 0.0
 
+    if fast_mode:
+        sl_mult, tp_mult = FAST_MODE_SL_MULT, FAST_MODE_TP_MULT
+    else:
+        sl_mult, tp_mult = _adaptive_sl_tp_mult(entry, atr)
+
     if side == "Buy":
-        sl_atr = entry - atr * ATR_SL_MULT
+        sl_atr = entry - atr * sl_mult
         # Si soporte está más cerca que el SL por ATR, usar el soporte como guía
         if support > 0 and support < entry and support > sl_atr:
             sl = support * 0.998  # ligeramente por debajo del soporte
         else:
             sl = sl_atr
 
-        tp_atr = entry + atr * ATR_TP_MULT
+        tp_atr = entry + atr * tp_mult
         # Si hay resistencia y está más cerca que el TP por ATR → usar resistencia
         if resistance > 0 and resistance > entry and resistance < tp_atr:
             tp_from_res = resistance * 0.999
-            # Si la resistencia aún da R:R aceptable, úsala
             sl_dist = entry - sl
             tp_dist_res = tp_from_res - entry
             if sl_dist > 0 and tp_dist_res / sl_dist >= MIN_RR:
@@ -95,13 +172,13 @@ def _atr_levels(
             tp = tp_atr
 
     else:  # Sell
-        sl_atr = entry + atr * ATR_SL_MULT
+        sl_atr = entry + atr * sl_mult
         if resistance > 0 and resistance > entry and resistance < sl_atr:
             sl = resistance * 1.002
         else:
             sl = sl_atr
 
-        tp_atr = entry - atr * ATR_TP_MULT
+        tp_atr = entry - atr * tp_mult
         if support > 0 and support < entry and support > tp_atr:
             tp_from_sup = support * 1.001
             sl_dist = sl - entry
@@ -144,26 +221,37 @@ def _size_for_goal(
     Calcula qty para ganar goal_usd si TP se cumple.
     El binding constraint es: min(qty_for_goal, qty_for_max_loss, qty_for_margin).
     """
-    tp_dist = abs(tp - entry)    # ganancia por contrato si TP se cumple
-    sl_dist = abs(sl - entry)    # pérdida por contrato si SL se activa
+    tp_dist = abs(tp - entry)    # ganancia bruta por contrato si TP se cumple
+    sl_dist = abs(sl - entry)    # pérdida bruta por contrato si SL se activa
 
     if tp_dist <= 0 or sl_dist <= 0:
         return 0.0, 0.0, 0.0, "distancias TP/SL inválidas"
 
-    # ── Qty para alcanzar el goal ──────────────────────────────────────────
-    qty_for_goal = goal_usd / tp_dist
+    # ── Coste round-trip taker (entrada + salida) por unidad ──────────────
+    # Bybit cobra taker fee sobre el notional en cada ejecución.
+    # Calculamos el coste en precio por contrato para incluirlo en el sizing.
+    rt_fee_per_unit = entry * TAKER_FEE_RATE * 2   # entrada + salida
 
-    # ── Qty limitada por pérdida máxima aceptada ───────────────────────────
+    # Ganancia neta real por contrato si TP se cumple (bruta − fees)
+    net_tp_per_unit = tp_dist - rt_fee_per_unit
+    # Pérdida neta real por contrato si SL se activa (bruta + fees)
+    net_sl_per_unit = sl_dist + rt_fee_per_unit
+
+    if net_tp_per_unit <= 0:
+        return 0.0, 0.0, 0.0, "TP insuficiente para cubrir comisiones"
+
+    # ── Qty para alcanzar el goal NETO de comisiones ──────────────────────
+    qty_for_goal = goal_usd / net_tp_per_unit
+
+    # ── Qty limitada por pérdida máxima aceptada (incluyendo fees) ─────────
     if max_loss_usd > 0:
-        # El usuario dijo "no quiero perder más de $X"
-        qty_for_loss = max_loss_usd / sl_dist
+        qty_for_loss = max_loss_usd / net_sl_per_unit
     else:
-        # Fallback: usar % del equity
-        qty_for_loss = (equity * MAX_RISK_PCT / 100) / sl_dist
+        qty_for_loss = (equity * MAX_RISK_PCT / 100) / net_sl_per_unit
 
     # ── Qty limitada por margen disponible ────────────────────────────────
     max_margin    = equity * MAX_MARGIN_PCT / 100
-    qty_for_margin = (max_margin * leverage) / entry  # notional = margin × lev
+    qty_for_margin = (max_margin * leverage) / entry
 
     # El binding constraint es el mínimo de los tres
     qty = min(qty_for_goal, qty_for_loss, qty_for_margin)
@@ -178,10 +266,10 @@ def _size_for_goal(
     if not ok:
         return 0.0, 0.0, 0.0, reason
 
-    # Calcular margen y riesgo real
+    # Calcular margen y riesgo real (incluyendo fees en el riesgo reportado)
     notional = qty * entry
     margin   = notional / leverage
-    risk_usd = qty * sl_dist
+    risk_usd = qty * net_sl_per_unit  # pérdida real si SL se activa
 
     return qty, risk_usd, margin, ""
 
@@ -231,9 +319,18 @@ class StrategyEngine:
 
         side = "Buy" if opp.direction == "LONG" else "Sell"
 
+        # ── Modo rápido: goal pequeño relativo al precio del activo ───────
+        # Activa multiplicadores SL/TP ajustados para resolver el trade más
+        # rápido sin sacrificar el R:R mínimo.
+        fast_mode = (goal_usd / entry < FAST_GOAL_RATIO) if entry > 0 else False
+        if fast_mode:
+            log.debug("propose(%s) fast_mode: goal=%.2f entry=%.4g ratio=%.4f",
+                      symbol, goal_usd, entry, goal_usd / entry)
+
         # ── Niveles SL / TP ────────────────────────────────────────────────
         sl, tp = _atr_levels(
-            side, entry, tech.atr_15m, tech.support, tech.resistance
+            side, entry, tech.atr_15m, tech.support, tech.resistance,
+            fast_mode=fast_mode,
         )
         if sl <= 0 or tp <= 0:
             return None
@@ -314,7 +411,14 @@ class StrategyEngine:
             tech  = techs.get(sym)
             if not state or not opp or not tech:
                 continue
-            if opp.score <= best_score:
+
+            # Velocity boost: para objetivos pequeños, preferir símbolos con
+            # ATR% en rango óptimo para resolución rápida (0.5%-3%).
+            entry = state.ticker.last_price if state.ticker.last_price > 0 else 0
+            vboost = _velocity_boost(goal_usd, entry, tech.atr_15m)
+            effective_score = opp.score + vboost
+
+            if effective_score <= best_score:
                 continue   # no mejora el mejor encontrado hasta ahora
 
             proposal = self.propose(
@@ -322,7 +426,7 @@ class StrategyEngine:
                 executor, leverage, max_loss_usd
             )
             if proposal:
-                best_score  = opp.score
+                best_score  = effective_score
                 best_result = (sym, proposal)
 
         return best_result

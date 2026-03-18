@@ -327,15 +327,17 @@ class BybitExecutor:
 
     async def set_sl_tp(
         self,
-        symbol: str,
-        sl:     float = 0.0,
-        tp:     float = 0.0,
-        side:   str   = "Buy",
+        symbol:   str,
+        sl:       float = 0.0,
+        tp:       float = 0.0,
+        side:     str   = "Buy",
+        clear_tp: bool  = False,
     ) -> bool:
         """
         Modifica SL y/o TP de una posición abierta.
         POST /v5/position/trading-stop
         Pasar 0 en sl o tp para no modificarlo.
+        clear_tp=True envía "0" para eliminar el TP activo (captura extendida).
         """
         body: dict = {
             "category":    "linear",
@@ -348,6 +350,8 @@ class BybitExecutor:
         if tp > 0:
             body["takeProfit"]  = self.format_price(tp)
             body["tpTriggerBy"] = "MarkPrice"
+        elif clear_tp:
+            body["takeProfit"]  = "0"   # Bybit: "0" = eliminar TP existente
 
         if len(body) <= 3:
             return True  # nada que modificar
@@ -393,6 +397,32 @@ class BybitExecutor:
         except Exception as e:
             log.error("close_position exception: %s", e)
             return OrderResult(success=False, error_msg=str(e))
+
+    async def get_position_open_time(self, symbol: str) -> int:
+        """
+        Recupera el timestamp real de apertura de la posición consultando el historial
+        de ejecuciones de Bybit. Retorna Unix timestamp en segundos, o 0 si falla.
+        Útil para mostrar la duración correcta de posiciones importadas/reconciliadas.
+        """
+        try:
+            data = await self._get("/v5/execution/list", {
+                "category": "linear",
+                "symbol":   symbol,
+                "execType": "Trade",
+                "limit":    "10",
+            })
+            items = data.get("result", {}).get("list", [])
+            # Buscar el fill más antiguo reciente (posición actualmente abierta)
+            # Las ejecuciones llegan en orden descendente (más reciente primero)
+            for item in reversed(items):
+                exec_time = int(item.get("execTime", 0) or 0)
+                if exec_time > 1_000_000_000_000:   # ms → segundos
+                    exec_time = exec_time // 1000
+                if exec_time > 0:
+                    return exec_time
+        except Exception as e:
+            log.warning("get_position_open_time(%s): %s", symbol, e)
+        return 0
 
     async def cancel_all_orders(self, symbol: str) -> bool:
         """Cancela todas las órdenes activas del símbolo."""

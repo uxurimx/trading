@@ -45,6 +45,7 @@ log = logging.getLogger("qts.controller")
 PROPOSAL_TTL       = 60
 TRAIL_MIN_MOVE_PCT = 0.003
 PROFIT_LOCK_RATIO  = 0.40   # SL se mueve a entry + 40% del sl_dist
+MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 # scan_interval_s, breakeven_pct, profit_lock_pct, trailing_pct, be_hold_time_s vienen de settings
 
 
@@ -101,6 +102,7 @@ class TradeController:
         self._open_ts:       Dict[str, float]  = {}  # monotonic timestamp al confirmar OPEN
         self._latest_opps:   dict              = {}  # última foto de OpportunitySignal por símbolo
         self._position_seen: Set[str]          = set()  # símbolos vistos al menos 1 vez en WS
+        self._tp_removed:    Set[str]          = set()  # trades con TP eliminado (trail extendido)
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -270,8 +272,9 @@ class TradeController:
         opps:    Dict[str, "OpportunitySignal"],
         risk:    "RiskStatus",
     ) -> None:
-        # Solo escanear símbolos sin posición activa
-        available = [s for s in self._symbols if s not in self._active]
+        # Solo escanear símbolos sin posición activa ni ejecución pendiente
+        available = [s for s in self._symbols
+                     if s not in self._active and s not in self._pending_exec]
 
         # Recopilar scores para feedback
         scores: dict[str, int] = {}
@@ -356,6 +359,14 @@ class TradeController:
             return False, "qty = 0"
         if req.rr_ratio < 1.5:
             return False, f"R:R {req.rr_ratio:.1f} demasiado bajo"
+        # Límite de exposición direccional: evitar sobre-concentración
+        same_dir = sum(
+            1 for t in self._active.values()
+            if t.request and t.request.side == req.side and t.is_active
+        )
+        if same_dir >= MAX_SAME_DIRECTION:
+            side_name = "longs" if req.side == "Buy" else "shorts"
+            return False, f"ya tienes {same_dir} {side_name} simultáneos (máx {MAX_SAME_DIRECTION})"
         return True, ""
 
     # ── Ejecución ─────────────────────────────────────────────────────────────
@@ -479,10 +490,9 @@ class TradeController:
                 rr_ratio    = max(1.0, rr),
                 leverage    = lev,
             )
-            # created_time viene en ms desde Bybit
-            opened = (pos.created_time // 1000) if pos.created_time > 1_000_000_000_000 else (
-                pos.created_time if pos.created_time > 0 else int(time.time())
-            )
+            # Bybit's createdTime suele ser la fecha de listado del contrato,
+            # no la fecha real de apertura de la posición actual.
+            # Usamos time.time() para mostrar desde cuándo el sistema está rastreando.
             trade = TradeRecord(
                 symbol      = sym,
                 request     = req,
@@ -490,8 +500,8 @@ class TradeController:
                 entry_price = pos.entry_price,
                 current_sl  = pos.stop_loss,
                 current_tp  = pos.take_profit,
-                opened_at   = opened,
-                auto_mode   = AutoMode.MANUAL,
+                opened_at   = int(time.time()),
+                auto_mode   = AutoMode.FULL_AUTO,  # gestión automática por defecto
             )
             self._active[sym] = trade
             self._trail_high[sym] = pos.entry_price
@@ -501,6 +511,8 @@ class TradeController:
             if self._proposal and self._proposal.symbol == sym:
                 self._proposal = None
                 log.info("Propuesta de %s cancelada — posición importada de Bybit", sym)
+            # Intentar recuperar el tiempo real de apertura desde el historial de Bybit
+            self._bridge.submit(self._resolve_open_time(sym))
             log.info(
                 "Posición importada de Bybit: %s %s %.4f @ %.5g  SL=%s  TP=%s",
                 sym, pos.side, pos.size, pos.entry_price,
@@ -565,8 +577,22 @@ class TradeController:
                 closed.append(sym)
             else:
                 self._position_seen.add(sym)          # confirmado vía WS al menos una vez
-                self._last_upnl[sym] = pos.unrealized_pnl  # rastrear PnL no realizado
-                self._close_confirm.pop(sym, None)    # posición activa → resetear contador
+                self._last_upnl[sym] = pos.unrealized_pnl
+                self._close_confirm.pop(sym, None)
+
+                # ── Sincronizar qty/SL/TP desde la posición real de Bybit ────────
+                # Maneja fill parcial (qty menor a lo pedido) y cambios manuales de
+                # SL/TP hechos directamente en la app de Bybit.
+                req = trade.request
+                if req:
+                    if pos.size > 0 and abs(pos.size - req.qty) / max(req.qty, 0.0001) > 0.02:
+                        log.info("Qty sync: %s %.4f → %.4f (fill parcial o cierre parcial)",
+                                 sym, req.qty, pos.size)
+                        req.qty = pos.size
+                    if pos.stop_loss > 0 and abs(pos.stop_loss - trade.current_sl) > 1e-7:
+                        trade.current_sl = pos.stop_loss
+                    if pos.take_profit > 0 and abs(pos.take_profit - trade.current_tp) > 1e-7:
+                        trade.current_tp = pos.take_profit
 
         for sym in closed:
             self._active.pop(sym, None)
@@ -579,6 +605,7 @@ class TradeController:
             self._be_since.pop(sym, None)
             self._open_ts.pop(sym, None)
             self._position_seen.discard(sym)
+            self._tp_removed.discard(sym)
         if closed:
             self._notify()
 
@@ -622,9 +649,16 @@ class TradeController:
         if entry <= 0 or tp <= 0 or sl <= 0:
             return
 
-        sl_dist = abs(entry - sl)
         tp_dist = abs(tp - entry)
-        if sl_dist <= 0 or tp_dist <= 0:
+        if tp_dist <= 0:
+            return
+
+        # Usar siempre el SL original para medir distancias de riesgo.
+        # Después del breakeven, trade.current_sl ≈ entry → sl_dist ≈ 0,
+        # lo que rompe los cálculos de profit-lock y trailing.
+        orig_sl = req.sl_price if req.sl_price > 0 else sl
+        sl_dist = abs(entry - orig_sl)
+        if sl_dist <= 0:
             return
 
         progress = (mark - entry) / tp_dist if is_long else (entry - mark) / tp_dist
@@ -675,6 +709,47 @@ class TradeController:
                 self._last_sl_upd[sym] = now
                 self._notify()
 
+        # ── Dynamic TP → Trail extendido (85%) ───────────────────────────────
+        # Cuando el precio está cerca del TP y hay señales claras de continuación,
+        # eliminamos el TP para capturar el movimiento extendido y activamos
+        # trailing ajustado. Criterio: 3+ señales de momentum activas.
+        elif (
+            trade.state in (TradeState.BREAKEVEN, TradeState.TRAILING)
+            and progress >= 0.85
+            and trade.current_tp > 0          # TP activo (no ya eliminado)
+            and sym not in self._tp_removed
+            and (now - self._last_sl_upd.get(sym, 0)) >= 3.0
+        ):
+            cont = self._continuation_score(sym, trade, mark, ms)
+            if cont >= 3:
+                log.info(
+                    "Dynamic TP: %s progress=%.0f%% cont=%d — quitando TP, trail extendido",
+                    sym, progress * 100, cont,
+                )
+                trade.current_tp = 0
+                self._tp_removed.add(sym)
+                # Trail ajustado: ATR×1.0 (más apretado que el estándar 1.5×)
+                # para asegurar ganancias mientras captura el movimiento extendido.
+                atr = sl_dist / 1.5
+                if is_long:
+                    self._trail_high[sym] = mark
+                    new_sl = mark - atr * 1.0
+                else:
+                    self._trail_low[sym] = mark
+                    new_sl = mark + atr * 1.0
+                if ((is_long  and new_sl > trade.current_sl) or
+                    (not is_long and new_sl < trade.current_sl)):
+                    trade.state      = TradeState.TRAILING
+                    trade.current_sl = new_sl
+                    self._bridge.submit(
+                        self._clear_tp_and_trail(sym, new_sl, req.side)
+                    )
+                else:
+                    self._bridge.submit(self._clear_tp(sym, req.side))
+                self._last_sl_upd[sym] = now
+                notifier.trailing_activated(sym, new_sl if new_sl > 0 else trade.current_sl)
+                self._notify()
+
         # ── Trailing (70%) ────────────────────────────────────────────────────
         elif (
             trade.state in (TradeState.BREAKEVEN, TradeState.TRAILING)
@@ -709,6 +784,88 @@ class TradeController:
                         notifier.trailing_activated(sym, new_sl)
                     self._notify()
 
+    def _continuation_score(
+        self,
+        sym:   str,
+        trade: "TradeRecord",
+        mark:  float,
+        ms:    Optional["MarketState"],
+    ) -> int:
+        """
+        Evalúa señales de continuación del movimiento actual (0-5 puntos).
+        Usado para decidir si eliminar el TP y activar trailing extendido.
+
+        Señales:
+          · CVD: últimas 5 velas en la dirección del trade  → +0/+1/+2
+          · OI velocity: OI creciendo (nuevas posiciones)   → +1
+          · Price momentum: últimas 5 muestras de precio    → +0/+1/+2
+        """
+        if not ms or not trade.request:
+            return 0
+
+        is_long = trade.request.side == "Buy"
+        score   = 0
+
+        # 1. CVD: dirección de las últimas 5 velas
+        candles = list(ms.cvd_candles)[-5:]
+        if len(candles) >= 3:
+            bull = sum(1 for c in candles if c.delta > 0)
+            bear = len(candles) - bull
+            if is_long:
+                score += 2 if bull >= 4 else (1 if bull == 3 else 0)
+            else:
+                score += 2 if bear >= 4 else (1 if bear == 3 else 0)
+
+        # 2. OI velocity: OI creciendo → nuevas posiciones abriendo
+        if ms.oi_velocity > 0.5:  # > $0.5/min de crecimiento en OI
+            score += 1
+
+        # 3. Price momentum: últimas 5 muestras de precio
+        ph = list(ms._price_history)[-5:]
+        if len(ph) >= 3:
+            prices   = [p for _, p in ph]
+            up_moves = sum(1 for i in range(1, len(prices)) if prices[i] > prices[i - 1])
+            dn_moves = len(prices) - 1 - up_moves
+            if is_long:
+                score += 2 if up_moves >= 4 else (1 if up_moves == 3 else 0)
+            else:
+                score += 2 if dn_moves >= 4 else (1 if dn_moves == 3 else 0)
+
+        return score
+
+    async def _clear_tp(self, sym: str, side: str) -> None:
+        """Elimina el TP de una posición para capturar movimiento extendido."""
+        try:
+            await self._executor.set_sl_tp(sym, side=side, clear_tp=True)
+            log.info("TP eliminado: %s — trailing extendido activado", sym)
+        except Exception as exc:
+            log.error("_clear_tp error: %s — %s", sym, exc)
+
+    async def _clear_tp_and_trail(self, sym: str, new_sl: float, side: str) -> None:
+        """Elimina el TP y mueve el SL en una sola llamada a Bybit."""
+        try:
+            await self._executor.set_sl_tp(sym, sl=new_sl, side=side, clear_tp=True)
+            log.info("TP→Trail: %s  SL=%.5g  TP eliminado", sym, new_sl)
+        except Exception as exc:
+            log.error("_clear_tp_and_trail error: %s — %s", sym, exc)
+
+    async def _resolve_open_time(self, sym: str) -> None:
+        """
+        Recupera el timestamp real de apertura desde el historial de Bybit y lo aplica
+        al trade activo. Se ejecuta una vez tras reconciliar una posición importada.
+        """
+        open_time = await self._executor.get_position_open_time(sym)
+        if open_time > 0:
+            def _apply():
+                trade = self._active.get(sym)
+                if trade and trade.opened_at > time.time() - 120:
+                    # Solo actualizar si el trade fue importado recientemente (< 2 min)
+                    trade.opened_at = open_time
+                    log.info("Open time recuperado: %s → %s",
+                             sym, time.strftime("%Y-%m-%d %H:%M", time.localtime(open_time)))
+                    self._notify()
+            GLib.idle_add(_apply)
+
     async def _modify_sl_safe(self, sym: str, new_sl: float, side: str, reason: str) -> None:
         """Envía modificación de SL con retry automático en caso de fallo."""
         import asyncio as _aio
@@ -741,6 +898,7 @@ class TradeController:
             self._be_since.pop(symbol, None)
             self._open_ts.pop(symbol, None)
             self._position_seen.discard(symbol)
+            self._tp_removed.discard(symbol)
             del self._active[symbol]
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)

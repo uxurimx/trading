@@ -194,19 +194,26 @@ def _trade_risk_analysis(trade: "TradeRecord", pos: Optional["Position"],
     else:
         prog_pct = 0
 
-    # Funding estimate (8h cycle, ~0.01% avg)
-    notional = req.qty * entry
-    funding_cost_4h = notional * 0.0001 * (4 / 8)
-    if funding_cost_4h > 0.01:
-        lines.append(f"💸 Funding est. 4h: -${funding_cost_4h:.3f} (notional ${notional:.1f})")
+    # Comisiones y funding acumulados (coste real vs PnL bruto)
+    TAKER_FEE  = 0.00055
+    FUNDING_8H = 0.00010
+    notional      = req.qty * entry
+    entry_fee     = notional * TAKER_FEE
+    exit_fee_est  = notional * TAKER_FEE   # estimado sobre precio de entrada
+    elapsed_h     = elapsed_min / 60
+    funding_acc   = notional * FUNDING_8H * max(0, elapsed_h / 8)
+    total_cost    = entry_fee + exit_fee_est + funding_acc
+    if total_cost > 0.005:
+        lines.append(
+            f"💸 Coste total est.: -${total_cost:.3f}  "
+            f"(entrada ${entry_fee:.3f}  salida ~${exit_fee_est:.3f}  "
+            f"funding ${funding_acc:.3f})"
+        )
 
-    # Tiempo vs progreso
-    elapsed_str = _fmt_duration_s(int(elapsed_min * 60))
-    if elapsed_min > 30 and prog_pct < 20:
+    # Tiempo vs progreso (solo avisar si progreso es bajo en los primeros 60 minutos)
+    elapsed_str = _fmt_duration(trade.opened_at) if trade.opened_at else "──"
+    if elapsed_min > 30 and elapsed_min < 120 and prog_pct < 15:
         lines.append(f"⚠ {elapsed_str} y solo {prog_pct:.0f}% de progreso — mercado lento")
-        lines.append("  → Considera aumentar el límite de tiempo o ajustar el SL")
-    elif elapsed_min > 60 and prog_pct < 50:
-        lines.append(f"⏱ {elapsed_str} transcurridos — progreso moderado ({prog_pct:.0f}%)")
     elif prog_pct >= 50:
         lines.append(f"✓ Buen progreso: {prog_pct:.0f}% del camino al TP")
 
@@ -416,24 +423,32 @@ class TradeCard(Gtk.Box):
         self._chart.set_margin_start(6); self._chart.set_margin_end(6)
         self.append(self._chart)
 
-        # ── Fila 3: progreso + lev + notional + ETA ────────────────────
-        prog_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        prog_row.set_margin_start(6); prog_row.set_margin_end(6)
-        prog_row.set_margin_bottom(2)
+        # ── Fila 3: precios Entry/SL/TP + progreso inline ───────────────
+        price_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        price_row.set_margin_start(6); price_row.set_margin_end(6)
+        price_row.set_margin_bottom(2)
 
-        self._prog = Gtk.ProgressBar()
-        self._prog.set_show_text(True)
-        self._prog.set_hexpand(True)
+        self._price_lbl    = _ml()   # Entry / SL / TP + progreso en texto
+        self._price_lbl.set_hexpand(True)
         self._lev_lbl      = _ml()
         self._notional_lbl = _ml()
         self._eta_lbl      = _ml()
         self._risk_now_lbl = _ml()
-        prog_row.append(self._prog)
-        prog_row.append(self._lev_lbl)
-        prog_row.append(self._notional_lbl)
-        prog_row.append(self._eta_lbl)
-        prog_row.append(self._risk_now_lbl)
-        self.append(prog_row)
+        price_row.append(self._price_lbl)
+        price_row.append(self._lev_lbl)
+        price_row.append(self._notional_lbl)
+        price_row.append(self._eta_lbl)
+        price_row.append(self._risk_now_lbl)
+        self.append(price_row)
+
+        # ── Fila 4: sizing (qty, score, meta, riesgo) ───────────────────
+        sizing_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        sizing_row.set_margin_start(6); sizing_row.set_margin_end(6)
+        sizing_row.set_margin_bottom(2)
+        self._sizing_inline_lbl = _ml()
+        self._sizing_inline_lbl.set_hexpand(True)
+        sizing_row.append(self._sizing_inline_lbl)
+        self.append(sizing_row)
 
         # ── Fila 4: advertencia inline (solo visible cuando hay alerta) ─
         self._warn_lbl = _ml()
@@ -541,7 +556,7 @@ class TradeCard(Gtk.Box):
             f'<span color="{pnl_col}" weight="bold" size="large">{sign}${upnl:.2f}</span>'
         )
 
-        # Barra de progreso
+        # Precios inline + progreso como texto (sin barra)
         entry   = trade.entry_price or req.entry_price
         tp_dist = abs(req.tp_price - entry) if entry > 0 else 1
         if tp_dist > 0 and entry > 0:
@@ -549,11 +564,22 @@ class TradeCard(Gtk.Box):
                     else (entry - mark) / tp_dist)
             frac = max(0.0, min(1.0, prog))
             goal_real = req.qty * tp_dist
-            self._prog.set_fraction(frac)
-            self._prog.set_text(f"{sign}${upnl:.2f} / ${goal_real:.2f}  ({frac*100:.0f}%)")
+            pct_col = HEX["buy"] if frac >= 0.4 else HEX["warn"] if frac >= 0.1 else HEX["sell"]
         else:
-            self._prog.set_fraction(0.0)
-            self._prog.set_text(f"entry {_fp(entry)}")
+            frac = 0.0
+            goal_real = req.qty * tp_dist if tp_dist > 0 else 0
+            pct_col = HEX["sub"]
+
+        sl_col = HEX["buy"] if trade.state in (TradeState.BREAKEVEN, TradeState.TRAILING) else HEX["sell"]
+        self._price_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">Entry </span>'
+            f'<span color="{HEX["text"]}">{_fp(entry)}</span>'
+            f'  <span color="{sl_col}">SL {_fp(trade.current_sl)}</span>'
+            f'  <span color="{HEX["buy"]}">TP {_fp(req.tp_price)}</span>'
+            f'  <span color="{HEX["over"]}">│</span>'
+            f'  <span color="{pnl_col}" weight="bold">{sign}${upnl:.2f}</span>'
+            f'  <span color="{pct_col}">({frac*100:.0f}%)</span>'
+        )
 
         # Duración (siempre visible en header)
         dur = _fmt_duration(trade.opened_at)
@@ -590,6 +616,22 @@ class TradeCard(Gtk.Box):
         else:
             self._risk_now_lbl.set_text("")
 
+        # Fila de sizing siempre visible
+        rr_col  = HEX["buy"] if req.rr_ratio >= 2.0 else HEX["warn"]
+        meta    = req.qty * abs(req.tp_price - entry) if entry > 0 else 0
+        score_s = f'<span color="{HEX["blue"]}" size="small">Score {req.opp_score}</span>  ' if req.opp_score > 0 else ""
+        self._sizing_inline_lbl.set_markup(
+            f'<span color="{HEX["sub"]}" size="small">Qty </span>'
+            f'<span color="{HEX["text"]}" size="small">{req.qty}</span>'
+            f'  <span color="{HEX["sub"]}" size="small">R:R </span>'
+            f'<span color="{rr_col}" size="small">{req.rr_ratio:.1f}:1</span>'
+            f'  <span color="{HEX["sub"]}" size="small">Meta </span>'
+            f'<span color="{HEX["buy"]}" size="small">+${meta:.2f}</span>'
+            f'  <span color="{HEX["sub"]}" size="small">Max loss </span>'
+            f'<span color="{HEX["sell"]}" size="small">-${req.risk_usd:.2f}</span>'
+            f'  {score_s}'
+        )
+
         # Indicador de gestión automática (inline, compacto)
         if trade.auto_mode == AutoMode.FULL_AUTO:
             auto_map = {
@@ -606,23 +648,9 @@ class TradeCard(Gtk.Box):
                 f'<span color="{HEX["over"]}" size="small">MANUAL</span>'
             )
 
-        # Detalle (siempre actualizado aunque no esté visible)
-        self._levels_lbl.set_markup(
-            f'<span color="{HEX["sub"]}">Entry </span><span color="{HEX["text"]}">{_fp(entry)}</span>'
-            f'  <span color="{HEX["sell"]}">SL {_fp(trade.current_sl)}</span>'
-            f'  <span color="{HEX["buy"]}">TP {_fp(req.tp_price)}</span>'
-            f'  <span color="{HEX["sub"]}">R:R </span>'
-            f'<span color="{HEX["buy"]}">{req.rr_ratio:.1f}:1</span>'
-        )
-        self._sizing_lbl.set_markup(
-            f'<span color="{HEX["sub"]}">Qty </span><span color="{HEX["text"]}">{req.qty}</span>'
-            f'  <span color="{HEX["sub"]}">Score </span>'
-            f'<span color="{HEX["blue"]}">{req.opp_score}</span>'
-            f'  <span color="{HEX["sub"]}">Meta </span>'
-            f'<span color="{HEX["buy"]}">+${req.qty * abs(req.tp_price - entry):.2f}</span>'
-            f'  <span color="{HEX["sub"]}">Riesgo </span>'
-            f'<span color="{HEX["sell"]}">-${req.risk_usd:.2f}</span>'
-        )
+        # Detalle expandible — info adicional no visible en las filas inline
+        self._levels_lbl.set_text("")   # ya mostrado inline
+        self._sizing_lbl.set_text("")   # ya mostrado inline
 
         opened_str = (time.strftime("%H:%M:%S", time.localtime(trade.opened_at))
                       if trade.opened_at else "──")
@@ -1306,12 +1334,27 @@ class CommandCenter(Gtk.Box):
                    pos.mark_price if pos and pos.mark_price > 0 else (
                    pos.entry_price if pos else 0.0))
 
-            # PnL no realizado en tiempo real calculado desde el ticker
+            # PnL NETO en tiempo real: precio bruto menos comisiones y funding acumulado.
+            # Bybit debita entry_fee inmediatamente y funding cada 8h del balance,
+            # pero unrealisedPnl solo refleja el movimiento de precio → siempre parece
+            # mejor de lo real hasta que se cierra la posición.
+            TAKER_FEE = 0.00055
             if pos and pos.size > 0 and mark > 0:
                 if pos.side == "Buy":
-                    upnl = (mark - pos.entry_price) * pos.size
+                    gross_upnl = (mark - pos.entry_price) * pos.size
                 else:
-                    upnl = (pos.entry_price - mark) * pos.size
+                    gross_upnl = (pos.entry_price - mark) * pos.size
+                notional_entry = pos.size * pos.entry_price
+                notional_now   = pos.size * mark
+                entry_fee   = notional_entry * TAKER_FEE
+                exit_fee    = notional_now   * TAKER_FEE
+                elapsed_h   = (time.time() - (trade.opened_at or time.time())) / 3600
+                # Usar funding rate real del ticker si está disponible
+                funding_rate_8h = abs(ms.ticker.funding_rate / 100) if (
+                    ms and ms.ticker.funding_rate != 0
+                ) else 0.00010
+                funding_acc = notional_entry * funding_rate_8h * max(0, elapsed_h / 8)
+                upnl = gross_upnl - entry_fee - exit_fee - funding_acc
             else:
                 upnl = pos.unrealized_pnl if pos else 0.0
 
