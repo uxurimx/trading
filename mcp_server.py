@@ -94,6 +94,12 @@ def _run_background() -> None:
 
 
 async def _async_main() -> None:
+    # Detectar modo de posición antes de arrancar streams
+    try:
+        await _exec.detect_position_mode()
+    except Exception as e:
+        log.warning("detect_position_mode falló: %s", e)
+
     await asyncio.gather(
         _market.start(),
         _account.start(),
