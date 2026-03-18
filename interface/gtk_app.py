@@ -42,6 +42,7 @@ from core.risk import RiskFortress, RiskStatus, OK_STATUS
 from core.status_writer import StatusWriter
 from core.technicals import TradeContextAnalyzer, TechSignal, NEUTRAL_TECH
 from core.executor import BybitExecutor
+from core.paper_wallet import PaperWallet, PaperExecutor
 from core.strategy import StrategyEngine
 from core.controller import TradeController
 from core.order_model import AutoMode
@@ -1327,23 +1328,25 @@ class MainWindow(Adw.ApplicationWindow):
 
     def __init__(
         self,
-        app:        Adw.Application,
-        stream:     MarketStream,
-        acct:       AccountStream,
-        klines:     KlineStream,
-        controller: "TradeController",
-        strategy:   "StrategyEngine",
-        executor:   "BybitExecutor",
-        bridge:     "AsyncBridge",
+        app:          Adw.Application,
+        stream:       MarketStream,
+        acct:         AccountStream,
+        klines:       KlineStream,
+        controller:   "TradeController",
+        strategy:     "StrategyEngine",
+        executor:     "PaperExecutor",
+        bridge:       "AsyncBridge",
+        paper_wallet: "PaperWallet",
     ) -> None:
         super().__init__(application=app)
-        self.stream      = stream
-        self.acct        = acct
-        self.klines      = klines
-        self.controller  = controller
-        self._strategy   = strategy
-        self._executor   = executor
-        self._bridge     = bridge
+        self.stream        = stream
+        self.acct          = acct
+        self.klines        = klines
+        self.controller    = controller
+        self._strategy     = strategy
+        self._executor     = executor
+        self._bridge       = bridge
+        self._paper_wallet = paper_wallet
         self._sym    = settings.default_symbol
         self._sym_btns: dict[str, Gtk.ToggleButton] = {}
 
@@ -1468,7 +1471,8 @@ class MainWindow(Adw.ApplicationWindow):
         )
 
         # ── Pestaña 4: Configuración ────────────────────────────────────
-        self._settings_view = SettingsView()
+        self._settings_view = SettingsView(paper_wallet=self._paper_wallet,
+                                           on_paper_toggle=self._on_paper_toggle)
         self._stack.add_titled_with_icon(
             self._settings_view, "settings", "⚙ Config", "preferences-system-symbolic"
         )
@@ -1546,6 +1550,13 @@ class MainWindow(Adw.ApplicationWindow):
         if state:
             state.reset_session()
 
+    def _on_paper_toggle(self, active: bool) -> None:
+        """Activa/desactiva paper trading. Limpia posiciones activas del controller."""
+        settings.paper_trading = active
+        # Limpiar trades activos del controller para evitar mezcla live/paper
+        self.controller._active.clear()
+        self.controller._proposal = None
+
     # ── Loop de refresco ───────────────────────────────────────────────────────
 
     def _refresh(self) -> bool:
@@ -1576,8 +1587,16 @@ class MainWindow(Adw.ApplicationWindow):
         regime = self._regime_clf.classify(state, trend)
         opp    = self._opp_scorer.score(sig, regime, trend, lmap)
 
+        # ── Paper trading: actualizar wallet y chequear SL/TP ─────────────
+        if settings.paper_trading:
+            self._paper_wallet.update_mark_prices(self.stream.states)
+            self._paper_wallet.tick(self.stream.states)
+
+        # ── Fuente de cuenta: real o paper ────────────────────────────────
+        account = self._paper_wallet.state if settings.paper_trading else self.acct.state
+
         # ── Riesgo de cuenta ───────────────────────────────────────────────
-        risk = self._risk_fortress.check(self.acct.state)
+        risk = self._risk_fortress.check(account)
 
         # ── Técnicos: solicitar klines para TODOS los símbolos cada ~20 s ────
         self._kline_req_ctr += 1
@@ -1586,7 +1605,7 @@ class MainWindow(Adw.ApplicationWindow):
             for _s in settings.symbol_list:
                 self.klines.request(_s)
 
-        positions = self.acct.state.open_positions()
+        positions = account.open_positions()
         if positions:
             k15 = self.klines.store.get(self._sym, "15")
             k1h = self.klines.store.get(self._sym, "60")
@@ -1595,7 +1614,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         # ── Actualizar widgets del tab de mercado ───────────────────────────
         self._trend_bar.update(trend)
-        self._pos_bar.update(self.acct.state, risk)
+        self._pos_bar.update(account, risk)
         self._ob_panel.update(state)
         self._intel_panel.update(state, sig, lmap, opp, self._tech_signal)
         self._tape_panel.update(state)
@@ -1611,7 +1630,7 @@ class MainWindow(Adw.ApplicationWindow):
         # ── Tick del controller ─────────────────────────────────────────────
         self.controller.tick(
             states  = self.stream.states,
-            account = self.acct.state,
+            account = account,
             techs   = self._multi_tech,
             opps    = self._multi_opp,
             risk    = risk,
@@ -1625,7 +1644,7 @@ class MainWindow(Adw.ApplicationWindow):
         sim_tech  = self._multi_tech.get(sim_sym) or self._tech_signal
         sim_entry = sim_state.ticker.last_price if sim_state else 0.0
         sim_atr   = sim_tech.atr_15m if (sim_tech and sim_tech.has_data) else 0.0
-        equity    = self.acct.state.balance.total_equity
+        equity    = account.balance.total_equity
 
         sim_dict: Optional[dict] = None
         if sim_entry > 0 and sim_atr > 0 and equity > 0:
@@ -1641,15 +1660,17 @@ class MainWindow(Adw.ApplicationWindow):
             )
 
         # ── Actualizar paneles ──────────────────────────────────────────────
-        self._order_panel.update(self.acct.state, risk, sim_dict)
-        self._cmd_center.update(self.acct.state, risk, sim_dict,
+        self._order_panel.update(account, risk, sim_dict)
+        self._cmd_center.update(account, risk, sim_dict,
                                 market_states=self.stream.states)
-        self._extractor_view.update(self.acct.state)
+        self._extractor_view.update(account, market_states=self.stream.states)
         self._journal_view.refresh()
+        if settings.paper_trading:
+            self._settings_view.refresh_paper_stats()
 
         # ── Escribir JSON para la extensión GNOME Shell (cada ~2 s) ────────
         self._status_writer.tick(
-            self._sym, state, sig, opp, risk, trend, self.acct.state
+            self._sym, state, sig, opp, risk, trend, account
         )
 
     async def _compute_multi_signals(self) -> None:
@@ -1695,11 +1716,14 @@ class QTSApplication(Adw.Application):
         self._stream   = MarketStream()
         self._acct     = AccountStream()
         self._klines   = KlineStream()
-        self._bridge   = AsyncBridge()
-        self._executor = BybitExecutor()
-        self._strategy = StrategyEngine()
+        self._bridge        = AsyncBridge()
+        self._executor      = BybitExecutor()
+        self._paper_wallet  = PaperWallet(settings.paper_balance)
+        self._paper_exec    = PaperExecutor(self._paper_wallet, self._executor)
+        self._strategy      = StrategyEngine()
+        # El controller siempre usa PaperExecutor que adapta según settings.paper_trading
         self._controller = TradeController(
-            executor      = self._executor,
+            executor      = self._paper_exec,
             strategy      = self._strategy,
             risk_fortress = RiskFortress(),
             bridge        = self._bridge,
@@ -1724,6 +1748,9 @@ class QTSApplication(Adw.Application):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
+        # Inyectar market_states en el PaperExecutor (referencia compartida)
+        self._paper_exec.market_states = self._stream.states
+
         # Arrancar async bridge + streams (mercado + cuenta + klines en paralelo)
         self._bridge.start()
         self._bridge.submit(self._stream.start())
@@ -1731,19 +1758,20 @@ class QTSApplication(Adw.Application):
         self._bridge.submit(self._klines.start())
         # Pre-cargar info de instrumentos para validaciones de orden
         self._bridge.submit(
-            self._executor.load_all_instruments(settings.symbol_list)
+            self._paper_exec.load_all_instruments(settings.symbol_list)
         )
 
     def do_activate(self) -> None:
         win = MainWindow(
-            app        = self,
-            stream     = self._stream,
-            acct       = self._acct,
-            klines     = self._klines,
-            controller = self._controller,
-            strategy   = self._strategy,
-            executor   = self._executor,
-            bridge     = self._bridge,
+            app          = self,
+            stream       = self._stream,
+            acct         = self._acct,
+            klines       = self._klines,
+            controller   = self._controller,
+            strategy     = self._strategy,
+            executor     = self._paper_exec,
+            bridge       = self._bridge,
+            paper_wallet = self._paper_wallet,
         )
         win.present()
 

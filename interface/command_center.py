@@ -1577,8 +1577,13 @@ class CommandCenter(Gtk.Box):
             return
         dpnl_col  = HEX["buy"] if account.daily_pnl >= 0 else HEX["sell"]
         dpnl_sign = "+" if account.daily_pnl >= 0 else ""
+        paper_pfx = (
+            '<span foreground="#f8e45c" weight="bold" size="small">📋 PAPER  </span>'
+            if _settings.paper_trading else ""
+        )
         self._balance_lbl.set_markup(
-            f'<span color="{HEX["sub"]}" size="small">Equity </span>'
+            paper_pfx
+            + f'<span color="{HEX["sub"]}" size="small">Equity </span>'
             f'<span color="{HEX["text"]}" weight="bold" size="small">${bal.total_equity:.2f}</span>'
             f'  <span color="{HEX["sub"]}" size="small">Disp </span>'
             f'<span color="{HEX["teal"]}" size="small">${bal.available_balance:.2f}</span>'
@@ -1619,27 +1624,15 @@ class CommandCenter(Gtk.Box):
                    pos.mark_price if pos and pos.mark_price > 0 else (
                    pos.entry_price if pos else 0.0))
 
-            # PnL NETO en tiempo real: precio bruto menos comisiones y funding acumulado.
-            # Bybit debita entry_fee inmediatamente y funding cada 8h del balance,
-            # pero unrealisedPnl solo refleja el movimiento de precio → siempre parece
-            # mejor de lo real hasta que se cierra la posición.
-            TAKER_FEE = 0.00055
+            # PnL en tiempo real: igual que Bybit (mark-to-market bruto).
+            # El fee de entrada ya fue debitado del balance al abrir la orden —
+            # restarlo aquí lo cuenta doble y hace que el PnL aparezca ~$2 más negativo.
+            # Bybit muestra: unrealisedPnl = (mark - entry) × qty  (sin fees)
             if pos and pos.size > 0 and mark > 0:
                 if pos.side == "Buy":
-                    gross_upnl = (mark - pos.entry_price) * pos.size
+                    upnl = (mark - pos.entry_price) * pos.size
                 else:
-                    gross_upnl = (pos.entry_price - mark) * pos.size
-                notional_entry = pos.size * pos.entry_price
-                notional_now   = pos.size * mark
-                entry_fee   = notional_entry * TAKER_FEE
-                exit_fee    = notional_now   * TAKER_FEE
-                elapsed_h   = (time.time() - (trade.opened_at or time.time())) / 3600
-                # Usar funding rate real del ticker si está disponible
-                funding_rate_8h = abs(ms.ticker.funding_rate / 100) if (
-                    ms and ms.ticker.funding_rate != 0
-                ) else 0.00010
-                funding_acc = notional_entry * funding_rate_8h * max(0, elapsed_h / 8)
-                upnl = gross_upnl - entry_fee - exit_fee - funding_acc
+                    upnl = (pos.entry_price - mark) * pos.size
             else:
                 upnl = pos.unrealized_pnl if pos else 0.0
 
@@ -1648,7 +1641,8 @@ class CommandCenter(Gtk.Box):
             self._trade_cards[sym].show_trade(trade, mark, upnl, klines=k1h, market_state=ms)
 
         # Actualizar encabezado
-        self._trades_title.set_text(f"ACTIVOS ({n})")
+        paper_tag = ' <span foreground="#f8e45c" weight="bold">[PAPER]</span>' if _settings.paper_trading else ""
+        self._trades_title.set_markup(f"ACTIVOS ({n}){paper_tag}")
         self._no_trades_lbl.set_visible(n == 0)
 
         if n > 0:

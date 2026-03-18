@@ -472,6 +472,8 @@ class TradeController:
         Importa posiciones abiertas en Bybit que no están rastreadas localmente.
         Se llama en cada tick — solo actúa cuando encuentra algo nuevo.
         """
+        if settings.paper_trading:
+            return   # Paper wallet ya gestiona sus propias posiciones
         if not account.connected:
             return
         added = False

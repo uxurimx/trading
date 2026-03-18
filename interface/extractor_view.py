@@ -126,7 +126,7 @@ class PositionMiniCard(Gtk.Box):
         if self._symbol and self._on_close_cb:
             self._on_close_cb(self._symbol)
 
-    def update(self, pos) -> None:
+    def update(self, pos, mark_override: float = 0.0) -> None:
         self._symbol = pos.symbol
         sym      = pos.symbol.replace("USDT", "")
         is_long  = pos.is_long
@@ -138,17 +138,33 @@ class PositionMiniCard(Gtk.Box):
             f'  <span color="{HEX["warn"]}" size="small">{pos.leverage}x</span>'
         )
 
-        upnl    = pos.unrealized_pnl
+        # Usar precio de mercado en tiempo real (ticker WebSocket) si está disponible.
+        # pos.mark_price y pos.unrealized_pnl vienen del topic "position" de Bybit
+        # que solo se actualiza en eventos (fill, cambio de SL…), no en cada tick.
+        entry = pos.entry_price
+        mark  = (mark_override if mark_override > 0
+                 else pos.mark_price if pos.mark_price > 0 else entry)
+
+        # Recalcular PnL en tiempo real (igual que Bybit: sin fees, solo precio)
+        if pos.size > 0 and entry > 0 and mark > 0:
+            upnl = ((mark - entry) * pos.size if is_long
+                    else (entry - mark) * pos.size)
+        else:
+            upnl = pos.unrealized_pnl
+
         sign    = "+" if upnl >= 0 else ""
         pnl_col = HEX["buy"] if upnl >= 0 else HEX["sell"]
+
+        # ROI como % del margen (igual que Bybit)
+        roi_pct = (upnl / pos.margin * 100) if pos.margin > 0 else 0.0
+        roi_sign = "+" if roi_pct >= 0 else ""
         self._pnl_lbl.set_markup(
             f'<span color="{pnl_col}" weight="bold" size="large">{sign}${upnl:.2f}</span>'
+            f'  <span color="{pnl_col}" size="small">({roi_sign}{roi_pct:.1f}%)</span>'
         )
 
         # Progress toward TP
-        entry = pos.entry_price
-        mark  = pos.mark_price if pos.mark_price > 0 else entry
-        tp    = pos.take_profit
+        tp = pos.take_profit
         if tp > 0 and entry > 0:
             tp_dist = abs(tp - entry)
             prog = ((mark - entry) / tp_dist if is_long else (entry - mark) / tp_dist) if tp_dist > 0 else 0.0
@@ -157,7 +173,7 @@ class PositionMiniCard(Gtk.Box):
             frac = 0.0
         pct_col = HEX["buy"] if frac >= 0.4 else HEX["warn"] if frac >= 0.1 else HEX["sell"]
         self._prog_lbl.set_markup(
-            f'<span color="{pct_col}" weight="bold">{frac*100:.0f}%</span>'
+            f'<span color="{pct_col}" weight="bold">TP {frac*100:.0f}%</span>'
         )
 
         sl      = pos.stop_loss
@@ -497,11 +513,12 @@ class ExtractorView(Gtk.Box):
 
     # ── Actualización desde gtk_app ──────────────────────────────────────────
 
-    def update(self, acct_state: AccountState) -> None:
+    def update(self, acct_state: AccountState, market_states: dict = None) -> None:
         """Llamado ~10fps desde _do_refresh en gtk_app."""
         self._acct_state = acct_state
         positions = acct_state.open_positions()
         current_syms = {p.symbol for p in positions}
+        ms_map = market_states or {}
 
         # Ocultar/mostrar "sin posiciones"
         self._no_pos_lbl.set_visible(len(positions) == 0)
@@ -513,13 +530,26 @@ class ExtractorView(Gtk.Box):
                 self._cards_box.remove(card)
 
         # Añadir o actualizar tarjetas
+        total_pnl = 0.0
         for pos in positions:
             if pos.symbol not in self._cards:
                 card = PositionMiniCard(on_close_cb=self._on_close_position)
                 self._cards[pos.symbol] = card
                 self._cards_box.append(card)
-            self._cards[pos.symbol].update(pos)
 
-        # Stats
-        total_pnl = sum(p.unrealized_pnl for p in positions)
+            # Precio en tiempo real del ticker (más actualizado que pos.mark_price)
+            ms = ms_map.get(pos.symbol)
+            live_mark = ms.ticker.last_price if (ms and ms.ticker.last_price > 0) else 0.0
+            self._cards[pos.symbol].update(pos, mark_override=live_mark)
+
+            # PnL calculado con precio real para el total
+            entry = pos.entry_price
+            mark  = live_mark if live_mark > 0 else (pos.mark_price if pos.mark_price > 0 else entry)
+            if pos.size > 0 and entry > 0 and mark > 0:
+                pnl = ((mark - entry) * pos.size if pos.is_long
+                       else (entry - mark) * pos.size)
+            else:
+                pnl = pos.unrealized_pnl
+            total_pnl += pnl
+
         self._refresh_stats(total_pnl, len(positions))

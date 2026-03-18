@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     min_scan_score:   int   = 55     # score mínimo para generar propuesta
     scan_interval_s:  int   = 30     # segundos entre scans automáticos
 
+    # Paper trading
+    paper_trading:  bool  = False
+    paper_balance:  float = 10_000.0
+
     @property
     def symbol_list(self) -> List[str]:
         """Lista de símbolos parseada desde el CSV."""

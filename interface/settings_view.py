@@ -6,6 +6,8 @@ Todos los cambios toman efecto de inmediato (sin reiniciar).
 """
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, Pango
@@ -76,8 +78,14 @@ def _sep() -> Gtk.Separator:
 
 class SettingsView(Gtk.ScrolledWindow):
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        paper_wallet=None,
+        on_paper_toggle: Optional[Callable[[bool], None]] = None,
+    ) -> None:
         super().__init__()
+        self._paper_wallet    = paper_wallet
+        self._on_paper_toggle = on_paper_toggle
         self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.set_propagate_natural_height(False)
         self.set_vexpand(True)
@@ -94,6 +102,62 @@ class SettingsView(Gtk.ScrolledWindow):
         self.set_child(box)
 
     def _build(self, box: Gtk.Box) -> None:
+
+        # ── Paper Trading ────────────────────────────────────────────────────
+        box.append(_section("PAPER TRADING"))
+
+        # Toggle principal
+        pt_sw = Gtk.Switch()
+        pt_sw.set_active(settings.paper_trading)
+        pt_sw.set_valign(Gtk.Align.CENTER)
+        pt_sw.connect("notify::active", self._on_pt_toggle)
+
+        pt_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        pt_row.set_margin_start(8); pt_row.set_margin_end(8)
+        pt_row.set_margin_top(4);   pt_row.set_margin_bottom(4)
+        pt_lbl = Gtk.Label(label="Modo Paper Trading")
+        pt_lbl.set_xalign(0)
+        pt_lbl.set_size_request(220, -1)
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_weight_new(Pango.Weight.SEMIBOLD))
+        pt_lbl.set_attributes(attrs)
+        self._pt_hint = Gtk.Label()
+        self._pt_hint.set_xalign(0)
+        self._pt_hint.set_margin_start(8)
+        self._update_pt_hint(settings.paper_trading)
+        pt_row.append(pt_lbl)
+        pt_row.append(pt_sw)
+        pt_row.append(self._pt_hint)
+        box.append(pt_row)
+
+        # Balance inicial
+        self._pt_balance_sp = _spin(100.0, 1_000_000.0, settings.paper_balance, 500.0, 0, w=110)
+        self._pt_balance_sp.connect(
+            "value-changed",
+            lambda sp: setattr(settings, "paper_balance", sp.get_value()),
+        )
+        box.append(_row("Balance inicial (USDT)", self._pt_balance_sp,
+                        "Se aplica al resetear el wallet"))
+
+        # Fila de estadísticas + botón reset
+        stats_reset_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        stats_reset_row.set_margin_start(8); stats_reset_row.set_margin_end(8)
+        stats_reset_row.set_margin_top(2);   stats_reset_row.set_margin_bottom(4)
+
+        self._pt_stats_lbl = Gtk.Label()
+        self._pt_stats_lbl.set_xalign(0)
+        self._pt_stats_lbl.set_hexpand(True)
+        self._update_pt_stats()
+
+        reset_btn = Gtk.Button(label="↺ Reiniciar wallet")
+        reset_btn.add_css_class("destructive-action")
+        reset_btn.connect("clicked", self._on_pt_reset)
+
+        stats_reset_row.append(self._pt_stats_lbl)
+        stats_reset_row.append(reset_btn)
+        box.append(stats_reset_row)
+
+        box.append(_sep())
 
         # ── Protección de riesgo ─────────────────────────────────────────────
         box.append(_section("PROTECCIÓN DE RIESGO"))
@@ -229,3 +293,55 @@ class SettingsView(Gtk.ScrolledWindow):
             self._cb_hint.set_markup(
                 '<span foreground="#f8e45c" size="small">⚠ Desactivado — sin protección automática de pérdida diaria</span>'
             )
+
+    # ── Paper Trading handlers ────────────────────────────────────────────────
+
+    def _on_pt_toggle(self, sw: Gtk.Switch, _param) -> None:
+        active = sw.get_active()
+        self._update_pt_hint(active)
+        if self._on_paper_toggle:
+            self._on_paper_toggle(active)
+
+    def _on_pt_reset(self, _btn) -> None:
+        if self._paper_wallet:
+            new_bal = settings.paper_balance
+            self._paper_wallet.reset(new_bal)
+            self._update_pt_stats()
+
+    def _update_pt_hint(self, active: bool) -> None:
+        if active:
+            self._pt_hint.set_markup(
+                '<span foreground="#f8e45c" weight="bold" size="small">'
+                '⚠ PAPER TRADING ACTIVO — no se ejecutan órdenes reales'
+                '</span>'
+            )
+        else:
+            self._pt_hint.set_markup(
+                '<span foreground="#9a9996" size="small">'
+                'Desactivado — modo live'
+                '</span>'
+            )
+
+    def _update_pt_stats(self) -> None:
+        if not self._paper_wallet:
+            self._pt_stats_lbl.set_text("")
+            return
+        pw = self._paper_wallet
+        pnl = pw.total_pnl
+        sign = "+" if pnl >= 0 else ""
+        col  = "#57e389" if pnl >= 0 else "#ff7b63"
+        self._pt_stats_lbl.set_markup(
+            f'<span foreground="#9a9996" size="small">Balance: </span>'
+            f'<span foreground="#ebebeb" size="small">'
+            f'${pw.state.balance.total_equity:,.2f}</span>'
+            f'  <span foreground="#9a9996" size="small">PnL total: </span>'
+            f'<span foreground="{col}" size="small">{sign}${pnl:.2f}</span>'
+            f'  <span foreground="#9a9996" size="small">Trades: </span>'
+            f'<span foreground="#ebebeb" size="small">{pw._total}</span>'
+            f'  <span foreground="#9a9996" size="small">Win%: </span>'
+            f'<span foreground="#93ddc2" size="small">{pw.win_rate:.0f}%</span>'
+        )
+
+    def refresh_paper_stats(self) -> None:
+        """Llamar periódicamente desde el tick para mantener las stats actualizadas."""
+        self._update_pt_stats()
