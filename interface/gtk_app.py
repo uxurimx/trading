@@ -49,6 +49,7 @@ from interface.order_panel import OrderPanel
 from interface.command_center import CommandCenter
 from interface.journal_view import JournalView
 from interface.settings_view import SettingsView
+from interface.extractor_view import ExtractorView
 from streams.account import AccountStream, AccountState, Position, AccountBalance
 from streams.klines import KlineStream
 from streams.market import CandleCVD, MarketState, MarketStream
@@ -1471,6 +1472,12 @@ class MainWindow(Adw.ApplicationWindow):
             self._settings_view, "settings", "⚙ Config", "preferences-system-symbolic"
         )
 
+        # ── Pestaña 5: Extractor (sesión Claude) ────────────────────────
+        self._extractor_view = ExtractorView(self._executor, self._bridge)
+        self._stack.add_titled_with_icon(
+            self._extractor_view, "extractor", "🤖 Extractor", "applications-science-symbolic"
+        )
+
         # ── Timer de refresco (100ms = 10fps) ─────────────────
         GLib.timeout_add(100, self._refresh)
 
@@ -1629,6 +1636,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._order_panel.update(self.acct.state, risk, sim_dict)
         self._cmd_center.update(self.acct.state, risk, sim_dict,
                                 market_states=self.stream.states)
+        self._extractor_view.update(self.acct.state)
         self._journal_view.refresh()
 
         # ── Escribir JSON para la extensión GNOME Shell (cada ~2 s) ────────

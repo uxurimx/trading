@@ -50,6 +50,19 @@ from streams.klines    import KlineStream
 log = logging.getLogger("qts.mcp")
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
+# ─── Log de sesión ────────────────────────────────────────────────────────────
+_SESSION_LOG = "/tmp/qts_claude.log"
+
+
+def _log_action(msg: str) -> None:
+    """Escribe una acción en el log visible en la pestaña Extractor."""
+    try:
+        ts = time.strftime("%H:%M:%S")
+        with open(_SESSION_LOG, "a") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
+
 # ─── Estado global compartido ─────────────────────────────────────────────────
 
 _market  = MarketStream()
@@ -263,6 +276,15 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["symbol", "sl_price", "tp_price"],
             },
         ),
+        types.Tool(
+            name="get_session_config",
+            description=(
+                "Lee la configuración de la sesión actual: meta en USD y pérdida máxima. "
+                "Configurado por el usuario en la pestaña Extractor. "
+                "Usar al inicio de cada sesión para saber los límites."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
@@ -283,6 +305,8 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             result = await _tool_close_position(arguments["symbol"])
         elif name == "modify_sl_tp":
             result = await _tool_modify_sl_tp(arguments)
+        elif name == "get_session_config":
+            result = _tool_get_session_config()
         else:
             result = {"error": f"Tool desconocida: {name}"}
     except Exception as e:
@@ -541,6 +565,24 @@ def _tool_get_symbol_data(symbol: str) -> dict:
     }
 
 
+def _tool_get_session_config() -> dict:
+    """Lee la configuración de sesión desde /tmp/qts_session.json."""
+    from pathlib import Path
+    cfg_path = Path("/tmp/qts_session.json")
+    if not cfg_path.exists():
+        return {"goal": 1.0, "max_loss": 0.30, "status": "no_session",
+                "note": "Sin sesión activa. Usa la pestaña Extractor para configurar."}
+    try:
+        cfg = json.loads(cfg_path.read_text())
+        return {
+            "goal":     cfg.get("goal",     1.0),
+            "max_loss": cfg.get("max_loss", 0.30),
+            "status":   "ok",
+        }
+    except Exception as e:
+        return {"goal": 1.0, "max_loss": 0.30, "status": f"error: {e}"}
+
+
 async def _tool_place_order(args: dict) -> dict:
     """Ejecuta una orden de mercado con SL/TP."""
     symbol   = args["symbol"].upper()
@@ -599,7 +641,7 @@ async def _tool_place_order(args: dict) -> dict:
         fee_rt  = entry * 0.00055 * 2
         notional = qty * entry
 
-        return {
+        res = {
             "success":   True,
             "order_id":  result.order_id,
             "symbol":    symbol,
@@ -615,7 +657,14 @@ async def _tool_place_order(args: dict) -> dict:
             "fees_est":  round(notional * 0.0011, 4),
             "net_goal":  round(qty * tp_dist - notional * 0.0011, 4),
         }
+        _log_action(
+            f"ORDEN: {side.upper()} {symbol} qty={qty} "
+            f"entry={round(entry,6)} SL={round(sl_price,6)} TP={round(tp_price,6)} "
+            f"RR={res['rr']} net_goal=${res['net_goal']:.4f}"
+        )
+        return res
     except Exception as e:
+        _log_action(f"ERROR place_order {symbol}: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -632,6 +681,9 @@ async def _tool_close_position(symbol: str) -> dict:
     try:
         result = await _exec.close_position(sym, pos.size, pos.side)
         if result.success:
+            _log_action(
+                f"CERRAR: {sym} qty={pos.size} upnl=${pos.unrealized_pnl:.4f}"
+            )
             return {
                 "success":    True,
                 "symbol":     sym,
@@ -640,8 +692,10 @@ async def _tool_close_position(symbol: str) -> dict:
                 "upnl_at_close": round(pos.unrealized_pnl, 4),
                 "msg":        "Posición cerrada a mercado",
             }
+        _log_action(f"ERROR cerrar {sym}: {result.error_msg}")
         return {"success": False, "error": result.error_msg}
     except Exception as e:
+        _log_action(f"ERROR cerrar {sym}: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -663,6 +717,9 @@ async def _tool_modify_sl_tp(args: dict) -> dict:
 
     try:
         ok = await _exec.set_sl_tp(sym, sl=sl, tp=tp, side=pos.side)
+        sl_s = f"SL={sl}" if sl > 0 else ""
+        tp_s = f"TP={tp}" if tp > 0 else ""
+        _log_action(f"MODIFY: {sym} {sl_s} {tp_s}".strip())
         return {
             "success": ok,
             "symbol":  sym,
@@ -670,6 +727,7 @@ async def _tool_modify_sl_tp(args: dict) -> dict:
             "new_tp":  tp if tp > 0 else "sin cambio",
         }
     except Exception as e:
+        _log_action(f"ERROR modify_sl_tp {sym}: {e}")
         return {"success": False, "error": str(e)}
 
 
