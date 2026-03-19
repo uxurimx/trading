@@ -1653,21 +1653,27 @@ class CommandCenter(Gtk.Box):
                    pos.mark_price if pos and pos.mark_price > 0 else (
                    pos.entry_price if pos else 0.0))
 
-            # PnL en tiempo real: igual que Bybit (mark-to-market bruto).
-            # El fee de entrada ya fue debitado del balance al abrir la orden —
-            # restarlo aquí lo cuenta doble y hace que el PnL aparezca ~$2 más negativo.
-            # Bybit muestra: unrealisedPnl = (mark - entry) × qty  (sin fees)
+            # PnL en tiempo real: mark-to-market bruto (sin fees de entrada, ya debitados).
+            # Bybit: unrealisedPnl = (mark - entry) × qty
+            req = trade.request
             if pos and pos.size > 0 and mark > 0:
+                entry_p = pos.entry_price if pos.entry_price > 0 else (trade.entry_price or 0.0)
                 if pos.side == "Buy":
-                    upnl = (mark - pos.entry_price) * pos.size
+                    upnl = (mark - entry_p) * pos.size
                 else:
-                    upnl = (pos.entry_price - mark) * pos.size
+                    upnl = (entry_p - mark) * pos.size
+            elif req and trade.entry_price > 0 and req.qty > 0 and mark > 0:
+                # Fallback: posición todavía no en account stream (latencia WS)
+                if req.side == "Buy":
+                    upnl = (mark - trade.entry_price) * req.qty
+                else:
+                    upnl = (trade.entry_price - mark) * req.qty
             else:
                 upnl = pos.unrealized_pnl if pos else 0.0
 
             total_upnl += upnl
-            k1h = self._klines_store.get(sym, "60") if self._klines_store else []
-            self._trade_cards[sym].show_trade(trade, mark, upnl, klines=k1h, market_state=ms)
+            kl = self._klines_store.get(sym, _settings.slow_kline) if self._klines_store else []
+            self._trade_cards[sym].show_trade(trade, mark, upnl, klines=kl, market_state=ms)
 
         # Actualizar encabezado
         paper_tag = ' <span foreground="#f8e45c" weight="bold">[PAPER]</span>' if _settings.paper_trading else ""

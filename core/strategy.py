@@ -38,11 +38,11 @@ log = logging.getLogger("qts.strategy")
 
 # ─── Parámetros ───────────────────────────────────────────────────────────────
 
-MIN_SCORE       = 55      # opp.score mínimo para proponer
-MIN_RR          = 2.0     # R:R mínimo requerido
+MIN_SCORE       = 70      # opp.score mínimo para proponer (era 55 — subido por análisis de 273 trades)
+MIN_RR          = 1.3     # R:R mínimo requerido (era 2.0 — bajado para TP más alcanzable)
 DEFAULT_LEVERAGE = 5      # apalancamiento por defecto (configurable)
 ATR_SL_MULT     = 1.5     # SL = entry ± ATR × 1.5
-ATR_TP_MULT     = 3.0     # TP = entry ± ATR × 3.0 → R:R ≈ 2.0
+ATR_TP_MULT     = 2.0     # TP = entry ± ATR × 2.0 → R:R ≈ 1.3 (era 3.0 — solo 5.5% TP hits)
 MAX_RISK_PCT    = 1.5     # % del equity máximo por trade
 MAX_MARGIN_PCT  = 35.0    # % del equity disponible que puede ir a margen
 PROPOSAL_TTL    = 60      # segundos antes de que una propuesta expire
@@ -56,7 +56,7 @@ PROPOSAL_TTL    = 60      # segundos antes de que una propuesta expire
 #          SL: 1.0×ATR en lugar de 2.2×ATR  |  TP: 2.2×ATR en lugar de 5.0×ATR
 FAST_GOAL_RATIO  = 0.008   # goal/entry < 0.8% → activar fast mode
 FAST_MODE_SL_MULT = 1.0    # SL justo → más expuesto al ruido, pero trade más rápido
-FAST_MODE_TP_MULT = 2.2    # TP mínimo viable con RR=2.2
+FAST_MODE_TP_MULT = 1.5    # TP mínimo viable con RR=1.5 (era 2.2 — demasiado lejos)
 
 # ── Velocity boost para objetivos pequeños ────────────────────────────────────
 # Cuando goal_usd < VELOCITY_GOAL_MAX, se añaden hasta +10 pts de score
@@ -93,13 +93,13 @@ def _adaptive_sl_tp_mult(entry: float, atr: float) -> Tuple[float, float]:
     atr_pct = atr / entry
 
     if atr_pct > 0.030:              # >3%: mercado muy volátil
-        sl_m, tp_m = 1.2, 2.8
+        sl_m, tp_m = 1.2, 2.0       # era (1.2, 2.8) — TP reducido
     elif atr_pct > 0.015:            # 1.5-3%: normal-alto
-        sl_m, tp_m = 1.5, 3.0
+        sl_m, tp_m = 1.5, 2.5       # era (1.5, 3.0)
     elif atr_pct > 0.007:            # 0.7-1.5%: normal-bajo
-        sl_m, tp_m = 1.8, 4.0
+        sl_m, tp_m = 1.8, 3.0       # era (1.8, 4.0)
     else:                            # <0.7%: muy quieto (scalping zone)
-        sl_m, tp_m = 2.2, 5.0
+        sl_m, tp_m = 2.2, 3.5       # era (2.2, 5.0)
 
     # Garantizar RR >= MIN_RR
     if sl_m > 0 and tp_m / sl_m < MIN_RR:
@@ -302,6 +302,9 @@ class StrategyEngine:
         if opp.score < settings.min_scan_score:
             return None
 
+        # Validar R:R mínimo usando configuración dinámica
+        _MIN_RR = settings.min_rr if hasattr(settings, "min_rr") else MIN_RR
+
         if not opp.is_actionable:
             return None
 
@@ -336,7 +339,7 @@ class StrategyEngine:
             return None
 
         rr = _compute_rr(side, entry, sl, tp)
-        if rr < MIN_RR:
+        if rr < _MIN_RR:
             return None
 
         # ── Tamaño de posición ─────────────────────────────────────────────

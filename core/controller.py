@@ -44,7 +44,7 @@ log = logging.getLogger("qts.controller")
 
 PROPOSAL_TTL       = 60
 TRAIL_MIN_MOVE_PCT = 0.003
-PROFIT_LOCK_RATIO  = 0.40   # SL se mueve a entry + 40% del sl_dist
+PROFIT_LOCK_RATIO  = 0.60   # SL se mueve a entry + 60% del sl_dist (era 0.40)
 MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 # scan_interval_s, breakeven_pct, profit_lock_pct, trailing_pct, be_hold_time_s vienen de settings
 
@@ -116,6 +116,7 @@ class TradeController:
         self._latest_opps:   dict              = {}  # última foto de OpportunitySignal por símbolo
         self._position_seen: Set[str]          = set()  # símbolos vistos al menos 1 vez en WS
         self._tp_removed:    Set[str]          = set()  # trades con TP eliminado (trail extendido)
+        self._partial_lock_done: Set[str]      = set()  # trades con partial lock ya aplicado
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -344,7 +345,7 @@ class TradeController:
                     f"{s.replace('USDT','')}: {sc}" for s, sc in top
                 )
                 best = top[0][1]
-                self._scan_log = f"✗ Sin setup (min 55)  —  {score_str}"
+                self._scan_log = f"✗ Sin setup (min {settings.min_scan_score})  —  {score_str}"
             else:
                 self._scan_log = "✗ Sin datos de mercado aún"
             log.info("Scan: sin setup válido — scores: %s", scores)
@@ -370,8 +371,8 @@ class TradeController:
             return False, f"margen requerido ${req.margin:.2f} > disponible ${avail:.2f}"
         if req.qty <= 0:
             return False, "qty = 0"
-        if req.rr_ratio < 1.5:
-            return False, f"R:R {req.rr_ratio:.1f} demasiado bajo"
+        if req.rr_ratio < settings.min_rr:
+            return False, f"R:R {req.rr_ratio:.1f} demasiado bajo (mín {settings.min_rr:.1f})"
         # Límite de exposición direccional: evitar sobre-concentración
         same_dir = sum(
             1 for t in self._active.values()
@@ -441,7 +442,9 @@ class TradeController:
                 trade.opened_at        = int(time.time())
                 trade.signal_timeframe = settings.speed_cfg["tf_label"]
                 self._open_ts[req.symbol] = time.monotonic()  # gracia para WS latency
-                trade.entry_price = req.entry_price
+                trade.entry_price = (result.filled_price
+                                     if result.filled_price > 0
+                                     else req.entry_price)
                 trade.pnl_at_open = 0.0   # se establece en primer tick con account data
                 self._trail_high[req.symbol] = req.entry_price
                 self._trail_low[req.symbol]  = req.entry_price
@@ -616,6 +619,7 @@ class TradeController:
             self._open_ts.pop(sym, None)
             self._position_seen.discard(sym)
             self._tp_removed.discard(sym)
+            self._partial_lock_done.discard(sym)
         if closed:
             self._notify()
 
@@ -643,15 +647,26 @@ class TradeController:
         if not req:
             return
 
-        pos = account.positions.get(sym)
-        if not pos or pos.size <= 0:
-            return
-
+        pos  = account.positions.get(sym)
         ms   = states.get(sym) if states else None
-        mark = (ms.ticker.last_price if ms and ms.ticker.last_price > 0
-                else pos.mark_price if pos.mark_price > 0
-                else pos.entry_price)
-        entry   = trade.entry_price or pos.entry_price
+        mark = 0.0
+        if ms and ms.ticker.last_price > 0:
+            mark = ms.ticker.last_price
+        elif pos and pos.mark_price > 0:
+            mark = pos.mark_price
+        elif pos and pos.entry_price > 0:
+            mark = pos.entry_price
+        else:
+            return   # sin precio de mercado, no podemos gestionar
+
+        # Permite gestión aunque la posición no esté en el account stream todavía
+        # (latencia WS o primera aparición). Solo bloqueamos si no hay precio de mercado.
+        if not pos or pos.size <= 0:
+            if not ms or ms.ticker.last_price <= 0:
+                return
+            # Continúa con datos del trade y market state
+
+        entry = trade.entry_price or (pos.entry_price if pos else 0.0)
         sl      = trade.current_sl
         tp      = trade.current_tp
         is_long = req.side == "Buy"
@@ -685,12 +700,48 @@ class TradeController:
                 log.debug("BE threshold perdido: %s (%.0f%%)", sym, progress * 100)
             self._be_since.pop(sym, None)
 
-        be_held = (now - self._be_since.get(sym, now)) >= settings.be_hold_time_s
+        be_held = (now - self._be_since.get(sym, now)) >= settings.effective_be_hold_s
+        elapsed = int(time.time()) - trade.opened_at if trade.opened_at > 0 else 9999
 
-        # ── Smart Profit Guard (30%+ con señales de debilitamiento) ─────────
-        # Evalúa CVD, OI, momentum y orderbook. Si hay confluencia de debilidad,
-        # mueve el SL a ganancias parciales sin ahogar el trade (respeta 0.65×ATR).
-        # Actúa antes que el breakeven estándar y para estados OPEN y BREAKEVEN.
+        # ── Weak Exit: salida si la tesis se debilita antes de producir ganancia ─
+        # Solo activo en los primeros N segundos del trade y mientras no hay beneficio.
+        # Evita quedarse atrapado en setups que nunca funcionaron.
+        if (
+            settings.weak_exit_enabled
+            and trade.state == TradeState.OPEN
+            and elapsed < settings.weak_exit_window_s
+            and progress <= 0.0
+        ):
+            weak_now = self._weakness_score(sym, trade, mark, ms)
+            if weak_now >= settings.weak_exit_min_score:
+                log.info(
+                    "WeakExit: %s  weakness=%d  elapsed=%ds — tesis inválida, cerrando",
+                    sym, weak_now, elapsed,
+                )
+                trade.signal_health = weak_now
+                self.close_symbol(sym)
+                return
+
+        # ── Time Stop: cerrar si no hay progreso suficiente en N segundos ────────
+        # Corta trades "muertos" que consumen tiempo y capital sin moverse.
+        if (
+            settings.time_stop_enabled
+            and trade.state == TradeState.OPEN
+            and elapsed >= settings.time_stop_window_s
+            and progress < settings.time_stop_min_pct / 100
+        ):
+            log.info(
+                "TimeStop: %s  progress=%.0f%%  elapsed=%ds — sin movimiento, cerrando",
+                sym, progress * 100, elapsed,
+            )
+            self.close_symbol(sym)
+            return
+
+        # ── Smart Profit Guard (30%+ con señales de debilitamiento) ─────────────
+        # IMPORTANTE: bloque independiente (no `elif`) para que el chain principal
+        # de BE/locks/trailing siempre pueda ejecutarse independientemente.
+        # Cuando SmartGuard actúa, establece _last_sl_upd, y el chain principal
+        # tiene un cooldown de 2s para evitar doble-modificación en el mismo tick.
         if (
             progress >= SMART_GUARD_MIN_PROGRESS
             and trade.state not in (TradeState.TRAILING,)
@@ -698,13 +749,12 @@ class TradeController:
         ):
             weak = self._weakness_score(sym, trade, mark, ms)
             if weak >= SMART_GUARD_WEAKNESS_REQ:
-                # SL objetivo: bloquear el 45% de las ganancias actuales
                 locked_frac = progress * SMART_GUARD_LOCK_FRAC
-                atr = sl_dist / 1.5   # estimación de ATR desde la distancia SL original
+                atr = sl_dist / 1.5
                 if is_long:
                     desired_sl  = entry + locked_frac * tp_dist
                     min_room_sl = mark  - atr * SMART_GUARD_ATR_ROOM
-                    new_sl = min(desired_sl, min_room_sl)   # nunca más apretado que 0.65×ATR
+                    new_sl = min(desired_sl, min_room_sl)
                 else:
                     desired_sl  = entry - locked_frac * tp_dist
                     min_room_sl = mark  + atr * SMART_GUARD_ATR_ROOM
@@ -730,14 +780,18 @@ class TradeController:
                     self._last_sl_upd[sym] = now
                     self._notify()
 
-        # ── Breakeven (40% por >= 30s) ────────────────────────────────────────
-        elif (
-            trade.state == TradeState.OPEN
+        # ── Chain principal: BE → Partial Lock → Profit Lock → Trail ────────────
+        # Cooldown de 2s para no solaparse con SmartGuard en el mismo tick.
+        _can_modify = (now - self._last_sl_upd.get(sym, 0)) >= 2.0
+
+        # ── Breakeven (40% por ≥ be_hold_s) ─────────────────────────────────────
+        if (
+            _can_modify
+            and trade.state == TradeState.OPEN
             and progress >= settings.breakeven_pct / 100
             and be_held
             and sl != entry
         ):
-            # Mover a entry + fees RT (0.11%) + margen seguridad (0.05%) = 0.16%
             buffer = entry * _BE_FEE_PCT
             new_sl = (entry + buffer) if is_long else (entry - buffer)
             log.info("Breakeven: %s SL → %.5g (mantenido %.0fs)", sym, new_sl, now - self._be_since[sym])
@@ -748,9 +802,36 @@ class TradeController:
             notifier.breakeven_activated(sym, new_sl)
             self._notify()
 
-        # ── Profit lock (60%) — asegura ganancia parcial ──────────────────────
+        # ── Partial Lock (50%) — escalón real de ganancia antes del profit lock ──
+        # Mueve el SL a entry + frac×sl_dist para garantizar un PnL positivo real.
+        # Se activa desde estado BREAKEVEN y solo una vez por trade.
         elif (
-            trade.state == TradeState.BREAKEVEN
+            _can_modify
+            and settings.partial_lock_enabled
+            and trade.state == TradeState.BREAKEVEN
+            and progress >= settings.partial_lock_at_pct / 100
+            and sym not in self._partial_lock_done
+            and (now - self._last_sl_upd.get(sym, 0)) >= 5.0
+        ):
+            lock_sl = (
+                (entry + sl_dist * settings.partial_lock_frac) if is_long
+                else (entry - sl_dist * settings.partial_lock_frac)
+            )
+            if (is_long and lock_sl > trade.current_sl) or (not is_long and lock_sl < trade.current_sl):
+                log.info(
+                    "PartialLock: %s SL → %.5g (+%.0f%% del riesgo asegurado)",
+                    sym, lock_sl, settings.partial_lock_frac * 100,
+                )
+                trade.current_sl = lock_sl
+                self._partial_lock_done.add(sym)
+                self._bridge.submit(self._modify_sl_safe(sym, lock_sl, req.side, "partial-lock"))
+                self._last_sl_upd[sym] = now
+                self._notify()
+
+        # ── Profit lock (60%) — asegura ganancia mayor ───────────────────────────
+        elif (
+            _can_modify
+            and trade.state == TradeState.BREAKEVEN
             and progress >= settings.profit_lock_pct / 100
             and (now - self._last_sl_upd.get(sym, 0)) >= 5.0
         ):
@@ -1077,6 +1158,7 @@ class TradeController:
             self._open_ts.pop(symbol, None)
             self._position_seen.discard(symbol)
             self._tp_removed.discard(symbol)
+            self._partial_lock_done.discard(symbol)
             del self._active[symbol]
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)

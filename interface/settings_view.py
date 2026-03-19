@@ -227,6 +227,74 @@ class SettingsView(Gtk.ScrolledWindow):
 
         box.append(_sep())
 
+        # ── Salidas de protección ─────────────────────────────────────────────
+        box.append(_section("SALIDAS DE PROTECCIÓN"))
+
+        # Weak Exit
+        we_sw = Gtk.Switch()
+        we_sw.set_active(settings.weak_exit_enabled)
+        we_sw.set_valign(Gtk.Align.CENTER)
+        we_sw.connect("notify::active",
+                      lambda sw, _: setattr(settings, "weak_exit_enabled", sw.get_active()))
+        box.append(_row("Weak Exit", we_sw,
+                        "Cierra si el setup se debilita antes de generar ganancia"))
+
+        self._we_win_sp = _spin(30, 600, settings.weak_exit_window_s, 10, 0)
+        self._we_win_sp.connect("value-changed",
+                                lambda sp: setattr(settings, "weak_exit_window_s", int(sp.get_value())))
+        box.append(_row("  Ventana weak exit (s)", self._we_win_sp,
+                        "Solo activo en los primeros N segundos del trade"))
+
+        self._we_sc_sp = _spin(2, 6, settings.weak_exit_min_score, 1, 0)
+        self._we_sc_sp.connect("value-changed",
+                               lambda sp: setattr(settings, "weak_exit_min_score", int(sp.get_value())))
+        box.append(_row("  Score mínimo debilidad", self._we_sc_sp,
+                        "0-6 puntos — más bajo = más sensible"))
+
+        # Time Stop
+        ts_sw = Gtk.Switch()
+        ts_sw.set_active(settings.time_stop_enabled)
+        ts_sw.set_valign(Gtk.Align.CENTER)
+        ts_sw.connect("notify::active",
+                      lambda sw, _: setattr(settings, "time_stop_enabled", sw.get_active()))
+        box.append(_row("Time Stop", ts_sw,
+                        "Cierra si no hay progreso suficiente en N segundos"))
+
+        self._ts_win_sp = _spin(30, 1800, settings.time_stop_window_s, 30, 0)
+        self._ts_win_sp.connect("value-changed",
+                                lambda sp: setattr(settings, "time_stop_window_s", int(sp.get_value())))
+        box.append(_row("  Ventana time stop (s)", self._ts_win_sp,
+                        "Scalp: 90s  ·  Fast: 300s  ·  Standard: 600s"))
+
+        self._ts_pct_sp = _spin(5, 50, settings.time_stop_min_pct, 5, 0)
+        self._ts_pct_sp.connect("value-changed",
+                                lambda sp: setattr(settings, "time_stop_min_pct", sp.get_value()))
+        box.append(_row("  Progreso mínimo (%)", self._ts_pct_sp,
+                        "% del recorrido al TP requerido antes de cerrar"))
+
+        # Partial Lock
+        pl_sw = Gtk.Switch()
+        pl_sw.set_active(settings.partial_lock_enabled)
+        pl_sw.set_valign(Gtk.Align.CENTER)
+        pl_sw.connect("notify::active",
+                      lambda sw, _: setattr(settings, "partial_lock_enabled", sw.get_active()))
+        box.append(_row("Partial Lock", pl_sw,
+                        "Escalón entre BE y profit lock — asegura ganancia real"))
+
+        self._pl_at_sp = _spin(30, 80, settings.partial_lock_at_pct, 5, 0)
+        self._pl_at_sp.connect("value-changed",
+                               lambda sp: setattr(settings, "partial_lock_at_pct", sp.get_value()))
+        box.append(_row("  Activar en (%)", self._pl_at_sp,
+                        "% de progreso al TP para mover SL a ganancia real"))
+
+        self._pl_fr_sp = _spin(10, 90, int(settings.partial_lock_frac * 100), 5, 0)
+        self._pl_fr_sp.connect("value-changed",
+                               lambda sp: setattr(settings, "partial_lock_frac", sp.get_value() / 100))
+        box.append(_row("  Fracción del riesgo (%)", self._pl_fr_sp,
+                        "SL = entry ± sl_dist × frac  (40% = recuperas 40% de lo arriesgado)"))
+
+        box.append(_sep())
+
         # ── Estrategia / Scan ────────────────────────────────────────────────
         box.append(_section("ESTRATEGIA"))
 

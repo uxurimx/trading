@@ -18,6 +18,7 @@ SPEED_CONFIGS: Dict[str, Dict[str, Any]] = {
         "tf_label": "1m",
         "label": "SCALP",
         "desc": "Trades 1–5 min · ATR 1m",
+        "be_hold_s": 5,    # 5 s para confirmar breakeven
     },
     "fast": {
         "fast": "5",   "fast_limit": 80,
@@ -25,6 +26,7 @@ SPEED_CONFIGS: Dict[str, Dict[str, Any]] = {
         "tf_label": "5m",
         "label": "FAST",
         "desc": "Trades 5–20 min · ATR 5m",
+        "be_hold_s": 10,   # 10 s
     },
     "standard": {
         "fast": "15",  "fast_limit": 80,
@@ -32,6 +34,7 @@ SPEED_CONFIGS: Dict[str, Dict[str, Any]] = {
         "tf_label": "15m",
         "label": "STANDARD",
         "desc": "Trades 20–120 min · ATR 15m",
+        "be_hold_s": 30,   # 30 s (valor original)
     },
 }
 
@@ -83,9 +86,26 @@ class Settings(BaseSettings):
     be_hold_time_s:   int   = 30     # segundos que el precio debe mantenerse en BE
 
     # Estrategia
-    min_scan_score:   int   = 55     # score mínimo para generar propuesta
+    min_scan_score:   int   = 70     # score mínimo para generar propuesta
+    min_rr:           float = 1.3    # R:R mínimo aceptado en pre-flight
     scan_interval_s:  int   = 30     # segundos entre scans automáticos
     speed_level:      str   = "standard"  # "scalp" | "fast" | "standard"
+
+    # ── Salidas de protección (Fase 1) ──────────────────────────────────────
+    # Weak Exit: cierra inmediatamente si el setup se debilita antes de producir ganancia
+    weak_exit_enabled:   bool  = True
+    weak_exit_window_s:  int   = 120   # solo activo en los primeros N segundos del trade
+    weak_exit_min_score: int   = 4     # puntuación de debilidad (0-6) para activar salida
+
+    # Time Stop: cierra si no hay progreso suficiente en N segundos
+    time_stop_enabled:   bool  = True
+    time_stop_window_s:  int   = 180   # ventana de tiempo (3 min scalp, ajustar según modo)
+    time_stop_min_pct:   float = 15.0  # % mínimo de avance hacia TP requerido
+
+    # Partial Lock: escalón intermedio que asegura ganancia real antes del profit lock
+    partial_lock_enabled: bool  = True
+    partial_lock_at_pct:  float = 50.0  # % de progreso al TP para activar
+    partial_lock_frac:    float = 0.40  # SL = entry ± sl_dist × frac (default: bloquea 40% del riesgo)
 
     @property
     def speed_cfg(self) -> Dict[str, Any]:
@@ -98,6 +118,11 @@ class Settings(BaseSettings):
     @property
     def slow_kline(self) -> str:
         return self.speed_cfg["slow"]
+
+    @property
+    def effective_be_hold_s(self) -> int:
+        """Segundos mínimos en umbral de BE antes de moverlo. Adapta por speed level."""
+        return self.speed_cfg.get("be_hold_s", self.be_hold_time_s)
 
     # Paper trading
     paper_trading:  bool  = False
