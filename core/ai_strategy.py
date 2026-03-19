@@ -30,55 +30,61 @@ log = logging.getLogger("qts.ai_strategy")
 
 TAKER_FEE_RATE   = 0.00055   # 0.055% por lado (0.11% round-trip)
 AI_MIN_INTERVAL  = 60        # segundos mínimos entre llamadas a OpenAI
-AI_TOP_SYMBOLS   = 12        # cuántos símbolos enviar al agente (top por score)
-AI_MIN_SCORE     = 60        # score mínimo para incluir un símbolo en el análisis
+AI_TOP_SYMBOLS   = 15        # cuántos símbolos enviar al agente (top por score)
+AI_MIN_SCORE     = 50        # score mínimo para incluir un símbolo en el análisis
+AI_MIN_ATR_PCT   = 0.40      # excluir coins con ATR < 0.4% (fees comerían todo el profit)
 
 
 # ─── Prompt del sistema (CORREGIDO) ──────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
 Eres un trader experto en futuros perpetuos de criptomonedas (Bybit).
+Tu trabajo es SELECCIONAR EL MEJOR TRADE del lote de candidatos, no buscar excusas para rechazar.
 
-REGLA FUNDAMENTAL — dirección según tendencia:
-  • Tendencia ALCISTA  (trend_score ≥ 60, ALCISTA) → buscar setup LONG  (Buy)
-  • Tendencia BAJISTA  (trend_score ≥ 60, BAJISTA) → buscar setup SHORT (Sell)
-  • Tendencia NEUTRAL o trend_score < 60 → ambas direcciones permitidas
-  ⚠ Un mercado EN TENDENCIA es la MEJOR condición para operar — NO es motivo para rechazar.
-  ⚠ Solo rechaza un símbolo si la señal del sistema (direction) va CONTRA la tendencia fuerte.
+═══ DIRECCIÓN según tendencia ═══
+  • trend ALCISTA (trend_score ≥ 60) → dir=LONG  (Buy)
+  • trend BAJISTA (trend_score ≥ 60) → dir=SHORT (Sell)
+  • trend NEUTRAL o trend_score < 60 → ambas direcciones válidas
+  ▶ Tendencia fuerte = OPORTUNIDAD, NO razón para rechazar.
+  ✗ Solo rechaza si la dirección del sistema va CONTRA la tendencia.
 
-CRITERIOS DE ENTRADA (todos deben cumplirse):
-  1. Score del sistema ≥ 60 (oportunidad detectada por los detectores técnicos)
-  2. CVD y EMA alineados con la dirección de entrada
-  3. SL = 1.0×ATR a 1.5×ATR desde el entry (el ATR está en los datos)
-  4. TP en el próximo nivel de soporte/resistencia que dé R:R neto ≥ 2:1
-     — Fórmula R:R neto: (TP_dist − 0.0011×entry) / (SL_dist + 0.0011×entry)
-  5. Si no existe nivel S/R claro, usar TP = entry ± 2.5×ATR (long/short)
+═══ CVD — definición cuantitativa ═══
+  CVD=X/5bull significa que X de las últimas 5 velas tuvieron delta positivo.
+  • LONG alineado:  CVD ≥ 3/5 bull  (mayoría alcista)
+  • SHORT alineado: CVD ≤ 2/5 bull  (mayoría bajista = ≥ 3/5 bear)
+  • CVD=3/5 bull con dir=LONG → ALINEADO ✓
+  • CVD=2/5 bull con dir=SHORT → ALINEADO ✓  (= 3/5 bear)
+  ▶ No requieras unanimidad — basta con la mayoría.
 
-PROCESO (obligatorio):
-  1. Lee los datos de los candidatos
-  2. Para el top 3 por score, evalúa: dirección, CVD, EMA, y calcula SL/TP
-  3. Elige el mejor o indica NO_TRADE solo si NINGUNO cumple los 5 criterios
-  4. Proporciona los precios EXACTOS basados en los datos reales
+═══ SL / TP — cálculo ═══
+  Fees round-trip = 0.11% × entry (ya provistos como rt_fees en cada candidato).
+  R:R neto = (TP_dist − rt_fees) / (SL_dist + rt_fees) ≥ 2.0
 
-RESPUESTA: solo JSON válido, sin texto, sin markdown.
+  Orden de preferencia para SL/TP:
+    1. Usa el nivel S (soporte) o R (resistencia) más cercano del candidato.
+    2. Si no hay S/R útil: SL = 1.5×ATR, TP = 4.0×ATR desde entry.
+       (Con ATR ≥ 0.4% esto garantiza R:R ≥ 2.0 después de fees.)
+
+  ▶ Siempre verifica la fórmula R:R antes de responder.
+  ▶ Si el nivel S/R más cercano no da R:R ≥ 2.0, usa 4×ATR como TP.
+
+═══ PROCESO obligatorio ═══
+  1. Ordena los candidatos por score (mayor primero).
+  2. Para cada uno (empezando por el top):
+     a. Confirma dirección vs tendencia.
+     b. Verifica CVD con la regla de mayoría.
+     c. Calcula SL y TP (usa S/R o ATR×multiplicador).
+     d. Calcula R:R neto. Si ≥ 2.0 → TRADE. Detén el análisis.
+  3. Solo retorna NO_TRADE si TODOS los candidatos tienen R:R neto < 2.0
+     O si la dirección va contra la tendencia fuerte.
+
+═══ RESPUESTA: solo JSON válido, sin texto, sin markdown ═══
 
 Si hay trade:
-{
-  "action": "TRADE",
-  "symbol": "BTCUSDT",
-  "side": "Buy",
-  "entry": 103500.0,
-  "sl": 102900.0,
-  "tp": 104700.0,
-  "confidence": 78,
-  "reasoning": "BTC score=82, tendencia ALCISTA 71%, CVD 4/5 alcistas, EMA↑. Entry en precio actual 103500, SL=1.0×ATR(600)=102900, TP en resistencia 104700 → R:R neto = (1200-114)/(600+114) = 1086/714 = 1.52... ajustando TP a 105800 para R:R=2.1"
-}
+{"action":"TRADE","symbol":"SOLUSDT","side":"Buy","entry":145.50,"sl":143.80,"tp":150.90,"confidence":79,"reasoning":"SOL score=73, ALCISTA 68%, CVD=4/5 bull (alineado LONG), EMA↑. SL=1.5×ATR(1.13)=143.80, TP en resistencia 150.90. rt_fees=0.16. R:R=(5.40-0.16)/(1.70+0.16)=5.24/1.86=2.82"}
 
-Si ningún candidato cumple TODOS los criterios:
-{
-  "action": "NO_TRADE",
-  "reasoning": "Motivo específico por cada candidato evaluado."
-}
+Si ninguno califica:
+{"action":"NO_TRADE","reasoning":"Candidato A: dir LONG vs tendencia BAJISTA fuerte. Candidato B: CVD=1/5 bull en LONG (no alineado). Candidato C: R:R neto=1.8 (insuficiente incluso con TP en resistencia R=X)."}
 """
 
 
@@ -97,16 +103,31 @@ def _build_market_snapshot(
     # Filtrar y rankear
     candidates = []
     for sym in symbols:
-        opp = opps.get(sym)
-        if opp and opp.score >= AI_MIN_SCORE:
-            candidates.append((opp.score, sym))
+        opp  = opps.get(sym)
+        tech = techs.get(sym)
+        ms   = states.get(sym)
+        if not opp or opp.score < AI_MIN_SCORE:
+            continue
+        if not tech or not ms:
+            continue
+        price = ms.ticker.last_price
+        if price <= 0:
+            continue
+        atr_pct = tech.atr_15m / price * 100
+        if atr_pct < AI_MIN_ATR_PCT:
+            continue  # ATR demasiado pequeño — fees comerían todo el profit
+        candidates.append((opp.score, sym))
     candidates.sort(reverse=True)
     top = candidates[:AI_TOP_SYMBOLS]
 
     if not top:
-        return "=== SIN CANDIDATOS CON SCORE SUFICIENTE ===\n(todos < " + str(AI_MIN_SCORE) + ")"
+        return (
+            f"=== SIN CANDIDATOS VÁLIDOS ===\n"
+            f"(score ≥ {AI_MIN_SCORE} Y ATR ≥ {AI_MIN_ATR_PCT}%)\n"
+            "Mercado en baja volatilidad — esperar condiciones mejores."
+        )
 
-    lines = [f"=== TOP {len(top)} CANDIDATOS (score ≥ {AI_MIN_SCORE}) ==="]
+    lines = [f"=== TOP {len(top)} CANDIDATOS (score ≥ {AI_MIN_SCORE}, ATR ≥ {AI_MIN_ATR_PCT}%) ==="]
 
     for _score, sym in top:
         ms   = states.get(sym)
@@ -116,14 +137,15 @@ def _build_market_snapshot(
             continue
 
         price = ms.ticker.last_price
-        if price <= 0:
-            continue
+        atr   = tech.atr_15m
+        atr_pct = atr / price * 100
 
-        # CVD
+        # CVD — expresado como X/5 bull (mayoría define dirección)
         cvd_candles = list(getattr(ms, "cvd_candles", []))[-5:]
         if cvd_candles:
             bull = sum(1 for c in cvd_candles if c.delta > 0)
-            cvd_str = f"CVD={bull}/5bull"
+            bear = 5 - bull
+            cvd_str = f"CVD={bull}/5bull({bear}/5bear)"
         else:
             cvd_str = "CVD=N/D"
 
@@ -137,32 +159,32 @@ def _build_market_snapshot(
                 oi_pct = (v1 - v0) / v0 * 100
                 oi_str = f" OI={oi_pct:+.1f}%"
 
-        # Niveles
-        sup_str = f" S={tech.support:.6g}"   if tech.support    > 0 else ""
-        res_str = f" R={tech.resistance:.6g}" if tech.resistance > 0 else ""
+        # Niveles S/R
+        sup_str = f"S={tech.support:.6g}"   if tech.support    > 0 else ""
+        res_str = f"R={tech.resistance:.6g}" if tech.resistance > 0 else ""
+        sr_str  = "  ".join(filter(None, [sup_str, res_str])) or "S/R=N/D"
         ema_str = "EMA↑" if tech.ema15m_bull else "EMA↓"
-        atr_pct = tech.atr_15m / price * 100 if price > 0 else 0
 
-        # Suggested SL/TP for reference
-        atr = tech.atr_15m
-        if opp.direction == "LONG":
-            sl_ref = price - 1.2 * atr
-            tp_ref = price + 2.5 * atr
-        else:
-            sl_ref = price + 1.2 * atr
-            tp_ref = price - 2.5 * atr
+        # Referencia SL/TP con multiplicadores que garantizan R:R ≥ 2.0
+        # SL=1.5×ATR, TP=4.0×ATR → rr_ref ≥ 2.0 cuando ATR% ≥ 0.4%
         rt_fees = price * TAKER_FEE_RATE * 2
-        sl_d = abs(price - sl_ref)
-        tp_d = abs(tp_ref - price)
-        rr_ref = (tp_d - rt_fees) / (sl_d + rt_fees) if (sl_d + rt_fees) > 0 else 0
+        sl_dist_ref = 1.5 * atr
+        tp_dist_ref = 4.0 * atr
+        rr_ref = (tp_dist_ref - rt_fees) / (sl_dist_ref + rt_fees) if (sl_dist_ref + rt_fees) > 0 else 0
+        if opp.direction == "LONG":
+            sl_ref = price - sl_dist_ref
+            tp_ref = price + tp_dist_ref
+        else:
+            sl_ref = price + sl_dist_ref
+            tp_ref = price - tp_dist_ref
 
         lines.append(
             f"\n[{sym.replace('USDT',''):>8}] score={opp.score} dir={opp.direction}"
-            f"\n  price={price:.6g}  ATR={atr:.5g}({atr_pct:.2f}%)"
-            f"\n  régimen={opp.regime.label}  trend={opp.trend_direction}({opp.trend_score}%)"
-            f"\n  {cvd_str}{oi_str}  {ema_str}  abs={opp.abs_pts}pts"
-            f"\n  {sup_str.strip()}{res_str.strip()}"
-            f"\n  → Ref: SL≈{sl_ref:.6g} TP≈{tp_ref:.6g} (R:R ref={rr_ref:.2f})"
+            f"\n  price={price:.6g}  ATR={atr:.5g}({atr_pct:.2f}%)  rt_fees={rt_fees:.5g}"
+            f"\n  trend={opp.trend_direction}({opp.trend_score}%)  régimen={opp.regime.label}"
+            f"\n  {cvd_str}{oi_str}  {ema_str}  {sr_str}"
+            f"\n  RefSL≈{sl_ref:.6g} RefTP≈{tp_ref:.6g} → R:R_ref={rr_ref:.2f}"
+            f"  {'✓ VIABLE' if rr_ref >= 2.0 else '⚠ usar S/R para mejorar TP'}"
         )
 
     return "\n".join(lines)
@@ -245,11 +267,12 @@ class AIStrategyAgent:
             f"{market_snapshot}\n\n"
             "=== INSTRUCCIONES ===\n"
             f"Goal por trade: ${goal_usd:.2f} USD  |  Leverage: {leverage}x\n"
-            "Fees taker: 0.055%/lado → 0.11% round-trip (ya incluido en la fórmula R:R neto).\n\n"
-            "Evalúa los candidatos de mayor a menor score.\n"
-            "Para cada uno: verifica dirección vs tendencia, CVD, EMA y calcula SL/TP exactos.\n"
-            "Entrega el mejor trade CON precios precisos, o NO_TRADE si ninguno califica.\n"
-            "IMPORTANTE: un score ≥ 70 con CVD y EMA alineados ES suficiente para entrar.\n"
+            "Fees ya incluidas en rt_fees de cada candidato (0.11% round-trip).\n\n"
+            "Evalúa candidatos de mayor a menor score.\n"
+            "CVD LONG alineado: ≥ 3/5 bull.  CVD SHORT alineado: ≤ 2/5 bull (= ≥ 3/5 bear).\n"
+            "Para SL/TP: usa niveles S/R si están disponibles; si no, usa RefSL y RefTP del candidato.\n"
+            "Si RefTP no da R:R ≥ 2.0, busca el nivel S/R más lejano que sí lo dé.\n"
+            "Un score ≥ 60 con dirección coherente y CVD mayoritariamente alineado ES suficiente.\n"
             "Responde SOLO con el JSON."
         )
 
