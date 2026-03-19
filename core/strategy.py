@@ -39,7 +39,7 @@ log = logging.getLogger("qts.strategy")
 # ─── Parámetros ───────────────────────────────────────────────────────────────
 
 MIN_SCORE       = 70      # opp.score mínimo para proponer (era 55 — subido por análisis de 273 trades)
-MIN_RR          = 1.3     # R:R mínimo requerido (era 2.0 — bajado para TP más alcanzable)
+MIN_RR          = 2.0     # R:R mínimo requerido NETO de fees — siempre ≥ 2:1 incluyendo comisiones
 DEFAULT_LEVERAGE = 5      # apalancamiento por defecto (configurable)
 ATR_SL_MULT     = 1.5     # SL = entry ± ATR × 1.5
 ATR_TP_MULT     = 2.0     # TP = entry ± ATR × 2.0 → R:R ≈ 1.3 (era 3.0 — solo 5.5% TP hits)
@@ -93,15 +93,15 @@ def _adaptive_sl_tp_mult(entry: float, atr: float) -> Tuple[float, float]:
     atr_pct = atr / entry
 
     if atr_pct > 0.030:              # >3%: mercado muy volátil
-        sl_m, tp_m = 1.2, 2.0       # era (1.2, 2.8) — TP reducido
+        sl_m, tp_m = 1.0, 2.5       # SL ajustado, R:R bruto 2.5:1
     elif atr_pct > 0.015:            # 1.5-3%: normal-alto
-        sl_m, tp_m = 1.5, 2.5       # era (1.5, 3.0)
+        sl_m, tp_m = 1.2, 3.0       # R:R bruto 2.5:1
     elif atr_pct > 0.007:            # 0.7-1.5%: normal-bajo
-        sl_m, tp_m = 1.8, 3.0       # era (1.8, 4.0)
+        sl_m, tp_m = 1.5, 3.5       # R:R bruto 2.33:1
     else:                            # <0.7%: muy quieto (scalping zone)
-        sl_m, tp_m = 2.2, 3.5       # era (2.2, 5.0)
+        sl_m, tp_m = 1.8, 4.0       # R:R bruto 2.22:1
 
-    # Garantizar RR >= MIN_RR
+    # Garantizar R:R bruto >= MIN_RR (el check de R:R neto ocurre en _compute_rr)
     if sl_m > 0 and tp_m / sl_m < MIN_RR:
         tp_m = sl_m * MIN_RR
     return sl_m, tp_m
@@ -167,11 +167,12 @@ def _atr_levels(
 
         tp_atr = entry + atr * tp_mult
         # Si hay resistencia y está más cerca que el TP por ATR → usar resistencia
+        # Requerir R:R bruto >= MIN_RR + 0.3 para compensar fees y mantener neto ≥ 2.0
         if resistance > 0 and resistance > entry and resistance < tp_atr:
             tp_from_res = resistance * 0.999
             sl_dist = entry - sl
             tp_dist_res = tp_from_res - entry
-            if sl_dist > 0 and tp_dist_res / sl_dist >= MIN_RR:
+            if sl_dist > 0 and tp_dist_res / sl_dist >= MIN_RR + 0.3:
                 tp = tp_from_res
             else:
                 tp = tp_atr
@@ -190,7 +191,7 @@ def _atr_levels(
             tp_from_sup = support * 1.001
             sl_dist = sl - entry
             tp_dist_sup = entry - tp_from_sup
-            if sl_dist > 0 and tp_dist_sup / sl_dist >= MIN_RR:
+            if sl_dist > 0 and tp_dist_sup / sl_dist >= MIN_RR + 0.3:
                 tp = tp_from_sup
             else:
                 tp = tp_atr
@@ -201,6 +202,7 @@ def _atr_levels(
 
 
 def _compute_rr(side: str, entry: float, sl: float, tp: float) -> float:
+    """R:R neto incluyendo round-trip taker fees — lo que el trader realmente gana/pierde."""
     if side == "Buy":
         sl_d = entry - sl
         tp_d = tp - entry
@@ -209,7 +211,13 @@ def _compute_rr(side: str, entry: float, sl: float, tp: float) -> float:
         tp_d = entry - tp
     if sl_d <= 0 or tp_d <= 0:
         return 0.0
-    return tp_d / sl_d
+    # Descontar fees del RT (0.11% del notional): ganancia real vs pérdida real
+    rt_fees  = entry * TAKER_FEE_RATE * 2
+    net_tp   = tp_d - rt_fees
+    net_sl   = sl_d + rt_fees
+    if net_tp <= 0 or net_sl <= 0:
+        return 0.0
+    return net_tp / net_sl
 
 
 def _size_for_goal(
@@ -301,7 +309,7 @@ def _size_for_goal(
 _STRATEGY_PARAMS: dict = {
     "absorcion": (None, None),   # usa _adaptive_sl_tp_mult (dinámico por ATR%)
     "tendencia": (1.0,  2.5),    # SL justo, TP amplio para montar el trend
-    "momentum":  (1.2,  1.8),    # rápido: SL/TP cortos, trade se resuelve pronto
+    "momentum":  (0.8,  2.0),    # rápido: SL mínimo, TP doble → R:R bruto 2.5:1
 }
 
 
@@ -447,6 +455,20 @@ class StrategyEngine:
 
         if sl <= 0 or tp <= 0:
             return None
+
+        # ── Smart TP: apuntar solo al tramo más probable del movimiento ──────────
+        # Con señal débil apuntamos más cerca — si la señal no justifica el rango
+        # completo, el trade se rechaza por R:R insuficiente (mejor no entrar).
+        # Fast mode ya tiene TP conservador; no se escala adicionalmente.
+        if not fast_mode:
+            tp_d = abs(tp - entry)
+            if opp.score >= 82:
+                tp_conf = 1.00   # señal fuerte → objetivo completo
+            elif opp.score >= 76:
+                tp_conf = 0.92   # señal buena → 92% del rango
+            else:
+                tp_conf = 0.85   # señal moderada → solo el tramo seguro
+            tp = (entry + tp_d * tp_conf) if side == "Buy" else (entry - tp_d * tp_conf)
 
         rr = _compute_rr(side, entry, sl, tp)
         if rr < _MIN_RR:

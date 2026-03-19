@@ -923,14 +923,14 @@ class TradeController:
             and sym not in self._partial_lock_done
             and (now - self._last_sl_upd.get(sym, 0)) >= 5.0
         ):
-            lock_sl = (
-                (entry + sl_dist * settings.partial_lock_frac) if is_long
-                else (entry - sl_dist * settings.partial_lock_frac)
-            )
+            # Anclamos el SL al precio ACTUAL menos ½ ATR para proteger las
+            # ganancias ya acumuladas al 50% del recorrido — no solo "encima de entry".
+            _atr_pl = sl_dist / 1.5
+            lock_sl = (mark - _atr_pl * 0.5) if is_long else (mark + _atr_pl * 0.5)
             if (is_long and lock_sl > trade.current_sl) or (not is_long and lock_sl < trade.current_sl):
                 log.info(
-                    "PartialLock: %s SL → %.5g (+%.0f%% del riesgo asegurado)",
-                    sym, lock_sl, settings.partial_lock_frac * 100,
+                    "PartialLock: %s SL → %.5g (mark=%.5g − 0.5×ATR, ganancia bloqueada)",
+                    sym, lock_sl, mark,
                 )
                 trade.current_sl = lock_sl
                 self._partial_lock_done.add(sym)
@@ -1003,7 +1003,7 @@ class TradeController:
             atr = sl_dist / 1.5
             if is_long:
                 self._trail_high[sym] = max(self._trail_high.get(sym, mark), mark)
-                new_sl = self._trail_high[sym] - atr * 1.5
+                new_sl = self._trail_high[sym] - atr * 1.0
                 if new_sl > trade.current_sl * (1 + TRAIL_MIN_MOVE_PCT):
                     log.info("Trailing LONG: %s SL %s → %s", sym, trade.current_sl, new_sl)
                     first_trail = trade.state != TradeState.TRAILING
@@ -1016,7 +1016,7 @@ class TradeController:
                     self._notify()
             else:
                 self._trail_low[sym] = min(self._trail_low.get(sym, mark), mark)
-                new_sl = self._trail_low[sym] + atr * 1.5
+                new_sl = self._trail_low[sym] + atr * 1.0
                 if new_sl < trade.current_sl * (1 - TRAIL_MIN_MOVE_PCT):
                     log.info("Trailing SHORT: %s SL %s → %s", sym, trade.current_sl, new_sl)
                     first_trail = trade.state != TradeState.TRAILING
