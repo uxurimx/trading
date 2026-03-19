@@ -125,6 +125,8 @@ class TradeController:
         self._recent_results: List[str]       = []   # "win"/"loss" (últimos 10)
         # AI Strategy Agent — estado del scan asíncrono
         self._ai_scanning:   bool             = False  # hay una llamada a OpenAI en curso
+        # SL más protector jamás enviado por trade — NUNCA retrocede
+        self._best_sl: Dict[str, float]       = {}
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -727,7 +729,13 @@ class TradeController:
                                  sym, req.qty, pos.size)
                         req.qty = pos.size
                     if pos.stop_loss > 0 and abs(pos.stop_loss - trade.current_sl) > 1e-7:
-                        trade.current_sl = pos.stop_loss
+                        best = self._best_sl.get(sym)
+                        is_long_sync = (req.side == "Buy")
+                        # Solo sincronizar si el exchange tiene un SL MEJOR que el nuestro,
+                        # o si todavía no hemos registrado ningún best_sl (apertura normal).
+                        # Evita que datos WS tardíos sobreescriban un profit-lock ya enviado.
+                        if best is None or (is_long_sync and pos.stop_loss >= best) or (not is_long_sync and pos.stop_loss <= best):
+                            trade.current_sl = pos.stop_loss
                     if pos.take_profit > 0 and abs(pos.take_profit - trade.current_tp) > 1e-7:
                         trade.current_tp = pos.take_profit
 
@@ -745,6 +753,7 @@ class TradeController:
             self._tp_removed.discard(sym)
             self._partial_lock_done.discard(sym)
             self._pct80_analyzed.discard(sym)
+            self._best_sl.pop(sym, None)
         if closed:
             self._notify()
 
@@ -895,18 +904,21 @@ class TradeController:
                     min_room_sl = mark  + atr * SMART_GUARD_ATR_ROOM
                     new_sl = max(desired_sl, min_room_sl)
 
-                improves = ((is_long and new_sl > trade.current_sl) or
-                            (not is_long and new_sl < trade.current_sl))
+                # Comparar contra el SL más protector registrado (nunca retroceder)
+                floor_sl = self._best_sl.get(sym, trade.current_sl)
+                improves = ((is_long     and new_sl > floor_sl) or
+                            (not is_long and new_sl < floor_sl))
                 if improves:
                     room_atr = abs(mark - new_sl) / atr if atr > 0 else 0
                     log.info(
                         "SmartGuard: %s prog=%.0f%% weak=%d  SL %.5g→%.5g "
                         "(lock=%.0f%% ganancias, room=%.1f×ATR)",
                         sym, progress * 100, weak,
-                        trade.current_sl, new_sl,
+                        floor_sl, new_sl,
                         locked_frac * 100, room_atr,
                     )
-                    trade.current_sl = new_sl
+                    trade.current_sl       = new_sl
+                    self._best_sl[sym]     = new_sl
                     if (is_long and new_sl > entry) or (not is_long and new_sl < entry):
                         trade.state = TradeState.BREAKEVEN
                     self._bridge.submit(
@@ -983,6 +995,7 @@ class TradeController:
             log.info("Breakeven: %s SL → %.5g (mantenido %.0fs)", sym, new_sl, now - self._be_since[sym])
             trade.state      = TradeState.BREAKEVEN
             trade.current_sl = new_sl
+            self._best_sl[sym] = new_sl
             self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "breakeven"))
             self._last_sl_upd[sym] = now
             notifier.breakeven_activated(sym, new_sl)
@@ -1008,7 +1021,8 @@ class TradeController:
                     "PartialLock: %s SL → %.5g (mark=%.5g − 0.5×ATR, ganancia bloqueada)",
                     sym, lock_sl, mark,
                 )
-                trade.current_sl = lock_sl
+                trade.current_sl   = lock_sl
+                self._best_sl[sym] = lock_sl
                 self._partial_lock_done.add(sym)
                 self._bridge.submit(self._modify_sl_safe(sym, lock_sl, req.side, "partial-lock"))
                 self._last_sl_upd[sym] = now
@@ -1024,7 +1038,8 @@ class TradeController:
             lock_sl = (entry + sl_dist * PROFIT_LOCK_RATIO) if is_long else (entry - sl_dist * PROFIT_LOCK_RATIO)
             if (is_long and lock_sl > trade.current_sl) or (not is_long and lock_sl < trade.current_sl):
                 log.info("Profit lock: %s SL → %.5g (+%.0f%% del riesgo asegurado)", sym, lock_sl, PROFIT_LOCK_RATIO * 100)
-                trade.current_sl = lock_sl
+                trade.current_sl   = lock_sl
+                self._best_sl[sym] = lock_sl
                 self._bridge.submit(self._modify_sl_safe(sym, lock_sl, req.side, "profit-lock"))
                 self._last_sl_upd[sym] = now
                 self._notify()
@@ -1059,8 +1074,9 @@ class TradeController:
                     new_sl = mark + atr * 1.0
                 if ((is_long  and new_sl > trade.current_sl) or
                     (not is_long and new_sl < trade.current_sl)):
-                    trade.state      = TradeState.TRAILING
-                    trade.current_sl = new_sl
+                    trade.state        = TradeState.TRAILING
+                    trade.current_sl   = new_sl
+                    self._best_sl[sym] = new_sl
                     self._bridge.submit(
                         self._clear_tp_and_trail(sym, new_sl, req.side)
                     )
@@ -1083,8 +1099,9 @@ class TradeController:
                 if new_sl > trade.current_sl * (1 + TRAIL_MIN_MOVE_PCT):
                     log.info("Trailing LONG: %s SL %s → %s", sym, trade.current_sl, new_sl)
                     first_trail = trade.state != TradeState.TRAILING
-                    trade.state      = TradeState.TRAILING
-                    trade.current_sl = new_sl
+                    trade.state        = TradeState.TRAILING
+                    trade.current_sl   = new_sl
+                    self._best_sl[sym] = new_sl
                     self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "trailing"))
                     self._last_sl_upd[sym] = now
                     if first_trail:
@@ -1096,8 +1113,9 @@ class TradeController:
                 if new_sl < trade.current_sl * (1 - TRAIL_MIN_MOVE_PCT):
                     log.info("Trailing SHORT: %s SL %s → %s", sym, trade.current_sl, new_sl)
                     first_trail = trade.state != TradeState.TRAILING
-                    trade.state      = TradeState.TRAILING
-                    trade.current_sl = new_sl
+                    trade.state        = TradeState.TRAILING
+                    trade.current_sl   = new_sl
+                    self._best_sl[sym] = new_sl
                     self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "trailing"))
                     self._last_sl_upd[sym] = now
                     if first_trail:
