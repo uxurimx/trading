@@ -60,6 +60,42 @@ class BybitExecutor:
         self._instruments: Dict[str, InstrumentInfo] = {}
         self._hedge_mode: bool = False   # se detecta en load_all_instruments
 
+    # ── Carga dinámica de símbolos (sincrónica, solo en startup) ──────────────
+
+    @staticmethod
+    def fetch_top_usdt_symbols_sync(limit: int = 100, testnet: bool = False) -> list:
+        """
+        Obtiene los top-N pares USDT perpetuos de Bybit ordenados por volumen 24h.
+        Usa urllib (stdlib) — sin dependencias externas.
+        Solo llamar en startup (bloquea el hilo).
+        Retorna [] si falla la conexión.
+        """
+        import json
+        import urllib.request
+        base = "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com"
+        url  = f"{base}/v5/market/tickers?category=linear"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "QTS/1.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read())
+            if data.get("retCode") != 0:
+                log.warning("fetch_top_usdt_symbols: retCode=%s", data.get("retCode"))
+                return []
+            items = data.get("result", {}).get("list", [])
+            usdt = [
+                (item["symbol"], float(item.get("turnover24h") or 0))
+                for item in items
+                if item.get("symbol", "").endswith("USDT")
+                and float(item.get("turnover24h") or 0) > 0
+            ]
+            usdt.sort(key=lambda x: x[1], reverse=True)
+            syms = [sym for sym, _ in usdt[:limit]]
+            log.info("fetch_top_usdt_symbols: %d pares cargados (top %d por volumen)", len(syms), limit)
+            return syms
+        except Exception as exc:
+            log.warning("fetch_top_usdt_symbols falló: %s — usando lista manual", exc)
+            return []
+
     # ── Autenticación ─────────────────────────────────────────────────────────
 
     def _signed_headers(self, body_str: str) -> dict:

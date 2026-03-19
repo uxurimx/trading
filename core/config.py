@@ -51,19 +51,19 @@ class Settings(BaseSettings):
     bybit_api_secret: str = ""
     bybit_testnet: bool = False
 
-    # Mercado — str para evitar que pydantic-settings intente parsear como JSON
-    symbols: str = (
-        "XRPUSDT,SOLUSDT,BTCUSDT,ETHUSDT,XLMUSDT,"
-        "DOGEUSDT,ADAUSDT,LTCUSDT,AVAXUSDT,LINKUSDT,"
-        "DOTUSDT,NEARUSDT,ATOMUSDT,FTMUSDT,INJUSDT,"
-        "BNBUSDT,TRXUSDT,SUIUSDT,APTUSDT,ARBUSDT,"
-        "OPUSDT,MATICUSDT,UNIUSDT,SEIUSDT,TIAUSDT,"
-        "WLDUSDT,FETUSDT,RENDERUSDT,STXUSDT,RUNEUSDT,"
-        "AAVEUSDT,CRVUSDT,GMXUSDT,JUPUSDT,PYTHUSDT,"
-        "WIFUSDT,BONKUSDT,PEPEUSDT,FLOKIUSDT,LDOUSDT,"
-        "EIGENUSDT,ENAUSDT,REZUSDT,SAGAUSDT,ALTUSDT"
-    )
-    default_symbol: str = "XRPUSDT"
+    # Mercado — carga dinámica desde Bybit o fallback CSV manual
+    # Si auto_load_symbols=True, se reemplaza al iniciar con los top-N por volumen.
+    symbols: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"   # fallback mínimo
+    default_symbol: str = "BTCUSDT"
+
+    # Carga dinámica de símbolos desde Bybit
+    auto_load_symbols: bool = True    # descarga top-N por volumen 24h al iniciar
+    max_symbols:       int  = 100     # cuántos pares monitorear (top por volumen)
+
+    # Blacklist — pares excluidos del scan (manual + auto)
+    symbol_blacklist:       str  = ""    # CSV de pares excluidos, ej: XRPUSDT,BONKUSDT
+    auto_blacklist_enabled: bool = True  # excluir par tras N pérdidas seguidas
+    auto_blacklist_losses:  int  = 3     # número de pérdidas consecutivas para excluir
 
     # WebSocket
     ws_reconnect_delay: float = 5.0
@@ -92,15 +92,20 @@ class Settings(BaseSettings):
     speed_level:      str   = "standard"  # "scalp" | "fast" | "standard"
 
     # ── Salidas de protección (Fase 1) ──────────────────────────────────────
-    # Weak Exit: cierra inmediatamente si el setup se debilita antes de producir ganancia
-    weak_exit_enabled:   bool  = True
-    weak_exit_window_s:  int   = 120   # solo activo en los primeros N segundos del trade
-    weak_exit_min_score: int   = 4     # puntuación de debilidad (0-6) para activar salida
+    # Weak Exit: cierra si el setup se debilita antes de producir ganancia
+    weak_exit_enabled:       bool  = True
+    weak_exit_window_s:      int   = 120   # solo activo en los primeros N segundos del trade
+    weak_exit_min_score:     int   = 4     # puntuación de debilidad (0-6) para activar salida
+    weak_exit_min_elapsed_s: int   = 30    # segundos mínimos antes de poder disparar (evita t=0)
+    weak_exit_min_sl_pct:    float = 8.0   # precio debe haber avanzado X% hacia SL antes de disparar
 
     # Time Stop: cierra si no hay progreso suficiente en N segundos
-    time_stop_enabled:   bool  = True
-    time_stop_window_s:  int   = 180   # ventana de tiempo (3 min scalp, ajustar según modo)
-    time_stop_min_pct:   float = 15.0  # % mínimo de avance hacia TP requerido
+    time_stop_enabled:  bool  = True
+    time_stop_window_s: int   = 300    # ventana de tiempo (5 min; 180s era demasiado corto)
+    time_stop_min_pct:  float = 15.0   # % mínimo de avance hacia TP requerido
+
+    # Cooldown por símbolo+dirección tras weak_exit o time_stop
+    symbol_cooldown_s: int = 300   # segundos sin re-entrar mismo símbolo/dirección
 
     # Partial Lock: escalón intermedio que asegura ganancia real antes del profit lock
     partial_lock_enabled: bool  = True
@@ -124,14 +129,26 @@ class Settings(BaseSettings):
         """Segundos mínimos en umbral de BE antes de moverlo. Adapta por speed level."""
         return self.speed_cfg.get("be_hold_s", self.be_hold_time_s)
 
+    # Filtro horario (UTC) — no operar fuera de este rango
+    trading_hours_enabled: bool = False   # desactivado por defecto
+    trading_hours_start:   int  = 7       # hora UTC de inicio (7 = 07:00 UTC)
+    trading_hours_end:     int  = 23      # hora UTC de fin   (23 = 23:00 UTC)
+
     # Paper trading
     paper_trading:  bool  = False
     paper_balance:  float = 10_000.0
 
     @property
     def symbol_list(self) -> List[str]:
-        """Lista de símbolos parseada desde el CSV."""
-        return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+        """Lista de símbolos parseada desde el CSV (excluye blacklist)."""
+        bl = self.blacklist_set
+        return [s.strip().upper() for s in self.symbols.split(",")
+                if s.strip() and s.strip().upper() not in bl]
+
+    @property
+    def blacklist_set(self) -> set:
+        """Conjunto de símbolos en la blacklist (para lookup O(1))."""
+        return {s.strip().upper() for s in self.symbol_blacklist.split(",") if s.strip()}
 
 
 settings = Settings()

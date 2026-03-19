@@ -117,6 +117,11 @@ class TradeController:
         self._position_seen: Set[str]          = set()  # símbolos vistos al menos 1 vez en WS
         self._tp_removed:    Set[str]          = set()  # trades con TP eliminado (trail extendido)
         self._partial_lock_done: Set[str]      = set()  # trades con partial lock ya aplicado
+        self._consec_losses: Dict[str, int]    = {}     # pérdidas consecutivas por símbolo
+        # sym → (side, monotonic_expire): cooldown tras weak_exit/time_stop
+        self._exit_cooldown: Dict[str, tuple] = {}
+        # historial reciente de resultados para detector de mercado choppy
+        self._recent_results: List[str]       = []   # "win"/"loss" (últimos 10)
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -170,16 +175,21 @@ class TradeController:
         self._last_scan = time.monotonic()
         self._notify()
 
-    def close_symbol(self, symbol: str) -> None:
+    def close_symbol(self, symbol: str, reason: str = "manual") -> None:
         """Cierra un trade específico a mercado."""
         trade = self._active.get(symbol)
         if trade and trade.is_active and trade.request:
-            self._bridge.submit(self._do_close(symbol, trade.request))
+            if reason in ("weak_exit", "time_stop") and settings.symbol_cooldown_s > 0:
+                expire = time.monotonic() + settings.symbol_cooldown_s
+                self._exit_cooldown[symbol] = (trade.request.side, expire)
+                log.info("Cooldown %s: no re-entrar %s por %ds",
+                         reason, symbol, settings.symbol_cooldown_s)
+            self._bridge.submit(self._do_close(symbol, trade.request, reason))
 
     def close_now(self) -> None:
         """Cierra todos los trades activos (emergencia)."""
         for sym in list(self._active.keys()):
-            self.close_symbol(sym)
+            self.close_symbol(sym, "emergencia")
 
     def force_scan(self) -> None:
         self._last_scan = 0.0
@@ -286,9 +296,12 @@ class TradeController:
         opps:    Dict[str, "OpportunitySignal"],
         risk:    "RiskStatus",
     ) -> None:
-        # Solo escanear símbolos sin posición activa ni ejecución pendiente
+        # Solo escanear símbolos sin posición activa, ejecución pendiente ni blacklist
+        blacklist = settings.blacklist_set
         available = [s for s in self._symbols
-                     if s not in self._active and s not in self._pending_exec]
+                     if s not in self._active
+                     and s not in self._pending_exec
+                     and s not in blacklist]
 
         # Recopilar scores para feedback
         scores: dict[str, int] = {}
@@ -361,6 +374,31 @@ class TradeController:
     ) -> tuple[bool, str]:
         if risk.is_breaker:
             return False, "circuit breaker activo"
+
+        # Filtro horario UTC
+        if settings.trading_hours_enabled:
+            import datetime
+            h = datetime.datetime.utcnow().hour
+            s, e = settings.trading_hours_start, settings.trading_hours_end
+            in_hours = (s <= h < e) if s < e else (h >= s or h < e)  # soporta wrap 22-06
+            if not in_hours:
+                return False, f"fuera de horario ({h:02d}:00 UTC — trading {s:02d}h-{e:02d}h)"
+
+        # Filtro de blacklist
+        if req.symbol in settings.blacklist_set:
+            return False, f"{req.symbol} está en la blacklist"
+
+        # Cooldown por símbolo+dirección tras weak_exit / time_stop
+        if req.symbol in self._exit_cooldown:
+            prev_side, expire_at = self._exit_cooldown[req.symbol]
+            now_m = time.monotonic()
+            if now_m < expire_at:
+                if req.side == prev_side:
+                    remaining = int(expire_at - now_m)
+                    return False, f"{req.symbol} en cooldown {prev_side} ({remaining}s)"
+            else:
+                del self._exit_cooldown[req.symbol]
+
         if req.symbol in self._active:
             return False, f"ya hay posición activa en {req.symbol}"
         if req.symbol in account.positions:
@@ -373,6 +411,14 @@ class TradeController:
             return False, "qty = 0"
         if req.rr_ratio < settings.min_rr:
             return False, f"R:R {req.rr_ratio:.1f} demasiado bajo (mín {settings.min_rr:.1f})"
+        # Modo conservador: si el mercado está choppy, requerir score más alto
+        if self.is_choppy_market:
+            min_score_choppy = max(settings.min_score + 10, 80)
+            if req.opp_score < min_score_choppy:
+                return False, (
+                    f"mercado choppy — score {req.opp_score} < {min_score_choppy} "
+                    f"(6 de los últimos 8 trades perdedores)"
+                )
         # Límite de exposición direccional: evitar sobre-concentración
         same_dir = sum(
             1 for t in self._active.values()
@@ -560,7 +606,7 @@ class TradeController:
             ):
                 log.info("Duración máxima alcanzada: %s (%dm) — cerrando", sym, self.max_duration_min)
                 notifier.order_failed(sym, f"Tiempo máximo {self.max_duration_min}m")
-                self.close_symbol(sym)
+                self.close_symbol(sym, "max_duration")
                 continue
 
             pos = account.positions.get(sym)
@@ -587,6 +633,7 @@ class TradeController:
                 self._log.append(trade)
                 save_trade(trade)
                 notifier.trade_closed(sym, trade.pnl_usd, trade.close_reason)
+                self._track_symbol_perf(sym, trade.pnl_usd)
                 closed.append(sym)
             else:
                 self._position_seen.add(sym)          # confirmado vía WS al menos una vez
@@ -705,22 +752,32 @@ class TradeController:
 
         # ── Weak Exit: salida si la tesis se debilita antes de producir ganancia ─
         # Solo activo en los primeros N segundos del trade y mientras no hay beneficio.
-        # Evita quedarse atrapado en setups que nunca funcionaron.
+        # Requiere tiempo mínimo (evita t=0) y que el precio haya avanzado al menos
+        # X% hacia el SL (confirmando que el setup realmente falló, no es ruido).
         if (
             settings.weak_exit_enabled
             and trade.state == TradeState.OPEN
+            and elapsed >= settings.weak_exit_min_elapsed_s  # tiempo mínimo
             and elapsed < settings.weak_exit_window_s
             and progress <= 0.0
         ):
-            weak_now = self._weakness_score(sym, trade, mark, ms)
-            if weak_now >= settings.weak_exit_min_score:
-                log.info(
-                    "WeakExit: %s  weakness=%d  elapsed=%ds — tesis inválida, cerrando",
-                    sym, weak_now, elapsed,
-                )
-                trade.signal_health = weak_now
-                self.close_symbol(sym)
-                return
+            # Verificar que el precio ya se movió hacia el SL (no sólo ruido de spread)
+            sl_dist = abs(entry - req.sl_price) if req and req.sl_price > 0 else 0
+            if sl_dist > 0:
+                sl_move = (entry - mark) if req.side == "Buy" else (mark - entry)
+                sl_pct = (sl_move / sl_dist) * 100
+            else:
+                sl_pct = 0.0
+            if sl_pct >= settings.weak_exit_min_sl_pct:
+                weak_now = self._weakness_score(sym, trade, mark, ms)
+                if weak_now >= settings.weak_exit_min_score:
+                    log.info(
+                        "WeakExit: %s  weakness=%d  elapsed=%ds  sl_pct=%.0f%% — cerrando",
+                        sym, weak_now, elapsed, sl_pct,
+                    )
+                    trade.signal_health = weak_now
+                    self.close_symbol(sym, "weak_exit")
+                    return
 
         # ── Time Stop: cerrar si no hay progreso suficiente en N segundos ────────
         # Corta trades "muertos" que consumen tiempo y capital sin moverse.
@@ -734,7 +791,7 @@ class TradeController:
                 "TimeStop: %s  progress=%.0f%%  elapsed=%ds — sin movimiento, cerrando",
                 sym, progress * 100, elapsed,
             )
-            self.close_symbol(sym)
+            self.close_symbol(sym, "time_stop")
             return
 
         # ── Smart Profit Guard (30%+ con señales de debilitamiento) ─────────────
@@ -1129,16 +1186,16 @@ class TradeController:
         )
         return round(net_pnl, 4), reason
 
-    async def _do_close(self, symbol: str, req: OrderRequest) -> None:
+    async def _do_close(self, symbol: str, req: OrderRequest, reason: str = "manual") -> None:
         result = await self._executor.close_position(symbol, req.qty, req.side)
-        GLib.idle_add(self._on_close_result, symbol, result)
+        GLib.idle_add(self._on_close_result, symbol, result, reason)
 
-    def _on_close_result(self, symbol: str, result: OrderResult) -> bool:
+    def _on_close_result(self, symbol: str, result: OrderResult, reason: str = "manual") -> bool:
         trade = self._active.get(symbol)
         if trade:
             trade.state        = TradeState.CLOSED
             trade.closed_at    = int(time.time())
-            trade.close_reason = "manual" if result.success else result.error_msg
+            trade.close_reason = reason if result.success else result.error_msg
             # PnL manual: último unrealized PnL conocido menos fee de salida
             req  = trade.request
             last = self._last_upnl.get(symbol, 0.0)
@@ -1152,6 +1209,7 @@ class TradeController:
             self._log.append(trade)
             save_trade(trade)
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
+            self._track_symbol_perf(symbol, trade.pnl_usd)
             self._pnl_captured.discard(symbol)
             self._last_upnl.pop(symbol, None)
             self._be_since.pop(symbol, None)
@@ -1165,6 +1223,57 @@ class TradeController:
             self._last_sl_upd.pop(symbol, None)
         self._notify()
         return False
+
+    # ── Auto-blacklist ────────────────────────────────────────────────────────
+
+    def _track_symbol_perf(self, sym: str, pnl_usd: float) -> None:
+        """Actualiza conteo de pérdidas consecutivas, auto-blacklist y detector choppy."""
+        # ── Historial reciente para detector de mercado choppy ────────────────
+        self._recent_results.append("loss" if pnl_usd < 0 else "win")
+        if len(self._recent_results) > 10:
+            self._recent_results.pop(0)
+
+        if pnl_usd < 0:
+            self._consec_losses[sym] = self._consec_losses.get(sym, 0) + 1
+            n = self._consec_losses[sym]
+            if settings.auto_blacklist_enabled and n >= settings.auto_blacklist_losses:
+                bl = settings.blacklist_set
+                if sym not in bl:
+                    bl.add(sym)
+                    settings.symbol_blacklist = ",".join(sorted(bl))
+                    log.warning(
+                        "AutoBlacklist: %s añadido — %d pérdidas consecutivas",
+                        sym, n,
+                    )
+        else:
+            # Ganancia o BE → resetear contador y quitar del auto-blacklist si estaba
+            prev = self._consec_losses.pop(sym, 0)
+            if prev >= settings.auto_blacklist_losses:
+                bl = settings.blacklist_set
+                bl.discard(sym)
+                settings.symbol_blacklist = ",".join(sorted(bl))
+                log.info("AutoBlacklist: %s eliminado (ganancia tras %d pérdidas)", sym, prev)
+
+    @property
+    def is_choppy_market(self) -> bool:
+        """True si los últimos 8 trades tienen 6+ pérdidas → mercado desfavorable."""
+        if len(self._recent_results) < 8:
+            return False
+        recent8 = self._recent_results[-8:]
+        losses = sum(1 for r in recent8 if r == "loss")
+        return losses >= 6
+
+    def blacklist_stats(self) -> dict:
+        """Devuelve estado del auto-blacklist para mostrar en la UI."""
+        return {sym: n for sym, n in self._consec_losses.items() if n > 0}
+
+    def remove_from_blacklist(self, sym: str) -> None:
+        """Elimina un símbolo de la blacklist (manual o auto)."""
+        bl = settings.blacklist_set
+        bl.discard(sym.upper())
+        settings.symbol_blacklist = ",".join(sorted(bl))
+        self._consec_losses.pop(sym.upper(), None)
+        log.info("Blacklist: %s eliminado manualmente", sym)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

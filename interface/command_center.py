@@ -1102,13 +1102,16 @@ class CommandCenter(Gtk.Box):
         ll, self._loss_spin  = _make_spin("↓$", 0.05, 500, 0.5, 0.25, 2, 60)
         lel, self._lev_spin  = _make_spin("x",  1,   75,  5,    1,    0, 42)
         dl, self._dur_spin   = _make_spin("⏱",  0,  480,  0,   15,    0, 50)
-        ml, self._multi_spin = _make_spin("×",  1,   10,  1,    1,    0, 38)
+        ml, self._multi_spin = _make_spin("#T", 1,   50,  1,    1,    0, 42)
 
         self._goal_spin.set_tooltip_text("Meta de ganancia en USD por trade")
         self._loss_spin.set_tooltip_text("Pérdida máxima aceptada por trade")
         self._lev_spin.set_tooltip_text("Apalancamiento")
         self._dur_spin.set_tooltip_text("Duración máxima del trade (0 = sin límite)")
-        self._multi_spin.set_tooltip_text("Número de trades en paralelo para el objetivo")
+        self._multi_spin.set_tooltip_text(
+            "Máx trades simultáneos — empieza en 1 y sube gradualmente. "
+            "El sistema siempre elige el mejor setup disponible."
+        )
 
         self._goal_spin.connect("value-changed",  self._on_goal_changed)
         self._loss_spin.connect("value-changed",  self._on_loss_changed)

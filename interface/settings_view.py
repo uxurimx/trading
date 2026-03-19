@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Pango
+from gi.repository import GLib, Gtk, Pango
 
 from core.config import settings, SPEED_CONFIGS
 
@@ -348,6 +348,96 @@ class SettingsView(Gtk.ScrolledWindow):
 
         box.append(_sep())
 
+        # ── Símbolos y Filtros ────────────────────────────────────────────────
+        box.append(_section("SÍMBOLOS Y FILTROS"))
+
+        # Carga automática
+        al_sw = Gtk.Switch()
+        al_sw.set_active(settings.auto_load_symbols)
+        al_sw.set_valign(Gtk.Align.CENTER)
+        al_sw.connect("notify::active",
+                      lambda sw, _: setattr(settings, "auto_load_symbols", sw.get_active()))
+        box.append(_row("Carga dinámica de símbolos", al_sw,
+                        "Descarga top-N pares por volumen desde Bybit al iniciar"))
+
+        self._max_sym_sp = _spin(10, 500, settings.max_symbols, 10, 0)
+        self._max_sym_sp.connect("value-changed",
+                                 lambda sp: setattr(settings, "max_symbols", int(sp.get_value())))
+
+        sym_count_lbl = Gtk.Label()
+        sym_count_lbl.set_xalign(0)
+        sym_count_lbl.set_markup(
+            f'<span foreground="#9a9996" size="small">'
+            f'Activos ahora: {len(settings.symbol_list)}</span>'
+        )
+        sym_row = _row("  Máx símbolos a monitorear", self._max_sym_sp)
+        sym_row.append(sym_count_lbl)
+        box.append(sym_row)
+
+        # Filtro horario
+        th_sw = Gtk.Switch()
+        th_sw.set_active(settings.trading_hours_enabled)
+        th_sw.set_valign(Gtk.Align.CENTER)
+        th_sw.connect("notify::active",
+                      lambda sw, _: setattr(settings, "trading_hours_enabled", sw.get_active()))
+        box.append(_row("Filtro horario (UTC)", th_sw,
+                        "Solo abre trades dentro del rango horario"))
+
+        self._th_start_sp = _spin(0, 23, settings.trading_hours_start, 1, 0)
+        self._th_start_sp.connect("value-changed",
+                                  lambda sp: setattr(settings, "trading_hours_start", int(sp.get_value())))
+        box.append(_row("  Inicio (hora UTC)", self._th_start_sp, "0-23"))
+
+        self._th_end_sp = _spin(0, 23, settings.trading_hours_end, 1, 0)
+        self._th_end_sp.connect("value-changed",
+                                lambda sp: setattr(settings, "trading_hours_end", int(sp.get_value())))
+        box.append(_row("  Fin (hora UTC)", self._th_end_sp, "0-23"))
+
+        # Auto-blacklist
+        ab_sw = Gtk.Switch()
+        ab_sw.set_active(settings.auto_blacklist_enabled)
+        ab_sw.set_valign(Gtk.Align.CENTER)
+        ab_sw.connect("notify::active",
+                      lambda sw, _: setattr(settings, "auto_blacklist_enabled", sw.get_active()))
+        box.append(_row("Auto-blacklist", ab_sw,
+                        "Excluye pares con N pérdidas seguidas"))
+
+        self._ab_sp = _spin(1, 10, settings.auto_blacklist_losses, 1, 0)
+        self._ab_sp.connect("value-changed",
+                            lambda sp: setattr(settings, "auto_blacklist_losses", int(sp.get_value())))
+        box.append(_row("  Pérdidas para excluir", self._ab_sp,
+                        "Se reactiva automáticamente cuando gana"))
+
+        # Blacklist manual
+        box.append(_row("Blacklist manual", Gtk.Label(label=""), "Pares excluidos del scan"))
+
+        self._bl_lbl = Gtk.Label()
+        self._bl_lbl.set_xalign(0)
+        self._bl_lbl.set_wrap(True)
+        self._bl_lbl.set_margin_start(8)
+        self._bl_lbl.set_margin_bottom(4)
+        self._update_bl_label()
+        box.append(self._bl_lbl)
+
+        bl_ctrl = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        bl_ctrl.set_margin_start(8)
+        bl_ctrl.set_margin_bottom(6)
+        self._bl_entry = Gtk.Entry()
+        self._bl_entry.set_placeholder_text("SIMBOLOUSDT")
+        self._bl_entry.set_max_length(20)
+        self._bl_entry.set_hexpand(True)
+        bl_add_btn = Gtk.Button(label="Añadir")
+        bl_add_btn.connect("clicked", self._on_bl_add)
+        bl_rm_btn = Gtk.Button(label="Limpiar todo")
+        bl_rm_btn.add_css_class("destructive-action")
+        bl_rm_btn.connect("clicked", self._on_bl_clear)
+        bl_ctrl.append(self._bl_entry)
+        bl_ctrl.append(bl_add_btn)
+        bl_ctrl.append(bl_rm_btn)
+        box.append(bl_ctrl)
+
+        box.append(_sep())
+
         # ── Conexión (solo lectura) ──────────────────────────────────────────
         box.append(_section("CONEXIÓN"))
 
@@ -470,3 +560,35 @@ class SettingsView(Gtk.ScrolledWindow):
     def refresh_paper_stats(self) -> None:
         """Llamar periódicamente desde el tick para mantener las stats actualizadas."""
         self._update_pt_stats()
+
+    # ── Blacklist handlers ────────────────────────────────────────────────────
+
+    def _update_bl_label(self) -> None:
+        bl = settings.blacklist_set
+        if not bl:
+            self._bl_lbl.set_markup(
+                '<span foreground="#9a9996" size="small">Sin pares excluidos</span>'
+            )
+        else:
+            items = ", ".join(sorted(bl))
+            self._bl_lbl.set_markup(
+                f'<span foreground="#ff7b63" size="small">'
+                f'{GLib.markup_escape_text(items)}</span>'
+            )
+
+    def _on_bl_add(self, _btn) -> None:
+        sym = self._bl_entry.get_text().strip().upper()
+        if sym:
+            bl = settings.blacklist_set
+            bl.add(sym)
+            settings.symbol_blacklist = ",".join(sorted(bl))
+            self._bl_entry.set_text("")
+            self._update_bl_label()
+
+    def _on_bl_clear(self, _btn) -> None:
+        settings.symbol_blacklist = ""
+        self._update_bl_label()
+
+    def refresh_blacklist(self) -> None:
+        """Llamar periódicamente para reflejar cambios del auto-blacklist."""
+        self._update_bl_label()

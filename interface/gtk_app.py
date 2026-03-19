@@ -1713,6 +1713,21 @@ class QTSApplication(Adw.Application):
 
     def __init__(self) -> None:
         super().__init__(application_id="com.qts.trading")
+
+        # ── Carga dinámica de símbolos desde Bybit ────────────────────────────
+        # Se hace ANTES de crear MarketStream para que use la lista actualizada.
+        # Ejecuta de forma síncrona (bloqueante brevemente) solo en startup.
+        if settings.auto_load_symbols:
+            fetched = BybitExecutor.fetch_top_usdt_symbols_sync(
+                limit   = settings.max_symbols,
+                testnet = settings.bybit_testnet,
+            )
+            if fetched:
+                bl = settings.blacklist_set
+                filtered = [s for s in fetched if s not in bl]
+                settings.symbols = ",".join(filtered)
+        # Si falla o está desactivado, usa settings.symbols (fallback manual)
+
         self._stream   = MarketStream()
         self._acct     = AccountStream()
         self._klines   = KlineStream()
