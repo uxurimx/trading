@@ -83,6 +83,10 @@ class OpportunitySignal:
     trend_pts:  int = 0   # contribución tendencia (0-15)
     liq_pts:    int = 0   # contribución liquidez  (0-10)
 
+    # Tendencia macro (para filtros de estrategia)
+    trend_direction: str = "NEUTRAL"   # "ALCISTA" | "BAJISTA" | "NEUTRAL"
+    trend_score:     int = 0            # 0-100, intensidad de la tendencia
+
     @property
     def label(self) -> str:
         if self.direction == "NEUTRAL" or self.score < 20:
@@ -306,6 +310,8 @@ class OpportunityScorer:
             regime_pts=max(0, regime_pts),
             trend_pts=max(0, trend_pts),
             liq_pts=liq_pts,
+            trend_direction=trend.direction,
+            trend_score=trend.score,
         )
 
     def _technical_only_score(
@@ -381,4 +387,6 @@ class OpportunityScorer:
             regime_pts=max(0, regime_pts),
             trend_pts=max(0, trend_pts),
             liq_pts=liq_pts,
+            trend_direction=trend.direction,
+            trend_score=trend.score,
         )

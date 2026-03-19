@@ -117,6 +117,7 @@ class TradeController:
         self._position_seen: Set[str]          = set()  # símbolos vistos al menos 1 vez en WS
         self._tp_removed:    Set[str]          = set()  # trades con TP eliminado (trail extendido)
         self._partial_lock_done: Set[str]      = set()  # trades con partial lock ya aplicado
+        self._pct80_analyzed:    Set[str]      = set()  # trades con análisis de 80% ya ejecutado
         self._consec_losses: Dict[str, int]    = {}     # pérdidas consecutivas por símbolo
         # sym → (side, monotonic_expire): cooldown tras weak_exit/time_stop
         self._exit_cooldown: Dict[str, tuple] = {}
@@ -667,6 +668,7 @@ class TradeController:
             self._position_seen.discard(sym)
             self._tp_removed.discard(sym)
             self._partial_lock_done.discard(sym)
+            self._pct80_analyzed.discard(sym)
         if closed:
             self._notify()
 
@@ -836,6 +838,57 @@ class TradeController:
                     )
                     self._last_sl_upd[sym] = now
                     self._notify()
+
+        # ── Análisis inteligente al 80% — NO es impulso, analiza señales ────────
+        # Bloque INDEPENDIENTE: se ejecuta una sola vez por trade cuando el precio
+        # alcanza el 80% del recorrido hacia el TP.
+        # · Señales fuertes (cont ≥ 3): eliminar TP y activar trailing ajustado.
+        # · Señales débiles  (cont ≤ 1): cerrar ahora para asegurar ganancias.
+        # · Señales medias   (cont  = 2): no hacer nada, dejar que el trailing siga.
+        if (
+            progress >= 0.80
+            and trade.state == TradeState.TRAILING
+            and trade.current_tp > 0
+            and sym not in self._pct80_analyzed
+            and sym not in self._tp_removed
+        ):
+            self._pct80_analyzed.add(sym)
+            cont80 = self._continuation_score(sym, trade, mark, ms)
+            if cont80 >= 3:
+                log.info(
+                    "Smart80: %s prog=%.0f%% cont=%d — señales fuertes, extendiendo TP",
+                    sym, progress * 100, cont80,
+                )
+                trade.current_tp = 0
+                self._tp_removed.add(sym)
+                atr80 = sl_dist / 1.5
+                if is_long:
+                    self._trail_high[sym] = mark
+                    new_sl80 = mark - atr80 * 0.8   # trail más ajustado que estándar
+                else:
+                    self._trail_low[sym] = mark
+                    new_sl80 = mark + atr80 * 0.8
+                if ((is_long  and new_sl80 > trade.current_sl) or
+                    (not is_long and new_sl80 < trade.current_sl)):
+                    trade.current_sl = new_sl80
+                    self._bridge.submit(self._clear_tp_and_trail(sym, new_sl80, req.side))
+                    self._last_sl_upd[sym] = now
+                else:
+                    self._bridge.submit(self._clear_tp(sym, req.side))
+                notifier.trailing_activated(sym, trade.current_sl)
+                self._notify()
+            elif cont80 <= 1:
+                log.info(
+                    "Smart80: %s prog=%.0f%% cont=%d — señales débiles, asegurando ganancias",
+                    sym, progress * 100, cont80,
+                )
+                self.close_symbol(sym, "smart_close_80")
+                return
+            else:
+                log.debug(
+                    "Smart80: %s prog=%.0f%% cont=%d — señales medias, trail continúa",
+                    sym, progress * 100, cont80,
+                )
 
         # ── Chain principal: BE → Partial Lock → Profit Lock → Trail ────────────
         # Cooldown de 2s para no solaparse con SmartGuard en el mismo tick.
@@ -1217,6 +1270,7 @@ class TradeController:
             self._position_seen.discard(symbol)
             self._tp_removed.discard(symbol)
             self._partial_lock_done.discard(symbol)
+            self._pct80_analyzed.discard(symbol)
             del self._active[symbol]
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)

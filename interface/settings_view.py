@@ -302,7 +302,7 @@ class SettingsView(Gtk.ScrolledWindow):
         speed_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self._speed_btns: dict[str, Gtk.ToggleButton] = {}
         first_btn = None
-        for key in ("scalp", "fast", "standard"):
+        for key in ("nano", "scalp", "fast", "standard"):
             cfg  = SPEED_CONFIGS[key]
             btn  = Gtk.ToggleButton(label=f"{cfg['label']}\n{cfg['desc']}")
             btn.set_hexpand(True)
@@ -484,7 +484,7 @@ class SettingsView(Gtk.ScrolledWindow):
 
     def _update_speed_hint(self) -> None:
         cfg = SPEED_CONFIGS.get(settings.speed_level, SPEED_CONFIGS["standard"])
-        colors = {"scalp": "#ff7b00", "fast": "#f8e45c", "standard": "#57e389"}
+        colors = {"nano": "#ff3c3c", "scalp": "#ff7b00", "fast": "#f8e45c", "standard": "#57e389"}
         color  = colors.get(settings.speed_level, "#9a9996")
         self._speed_hint.set_markup(
             f'<span foreground="{color}" size="small" weight="bold">{cfg["label"]}</span>'

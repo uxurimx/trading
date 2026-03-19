@@ -145,7 +145,14 @@ def _atr_levels(
     if atr <= 0:
         return 0.0, 0.0
 
-    if fast_mode:
+    # Speed-level override tiene prioridad (p.e. modo NANO usa SL/TP ultra-ajustados)
+    _speed = settings.speed_cfg
+    if "atr_sl_mult" in _speed and "atr_tp_mult" in _speed:
+        sl_mult, tp_mult = _speed["atr_sl_mult"], _speed["atr_tp_mult"]
+        # Garantizar RR mínimo
+        if sl_mult > 0 and tp_mult / sl_mult < MIN_RR:
+            tp_mult = sl_mult * MIN_RR
+    elif fast_mode:
         sl_mult, tp_mult = FAST_MODE_SL_MULT, FAST_MODE_TP_MULT
     else:
         sl_mult, tp_mult = _adaptive_sl_tp_mult(entry, atr)
@@ -274,12 +281,99 @@ def _size_for_goal(
     return qty, risk_usd, margin, ""
 
 
+# ─── Estrategias disponibles ──────────────────────────────────────────────────
+#
+# ABSORCION  — mercado en rango/acumulación, la liquidez institucional detiene el precio.
+#              Dirección: contra la presión dominante (sell-absorption → BUY).
+#              Mejor en: RANGING, ACCUMULATION.
+#
+# TENDENCIA  — mercado con tendencia clara. Entramos en dirección del trend,
+#              nunca contra él. SL ajustado (más cerca), TP ampliado (más lejos).
+#              Mejor en: TRENDING_UP (sólo LONG), TRENDING_DOWN (sólo SHORT).
+#
+# MOMENTUM   — impulso muy fuerte y direccional. Señal de absorción muy alta +
+#              OI creciente + precio moviéndose. Quick-scalp, SL/TP más ajustados.
+#              Mejor en: VOLATILE con abs_pts muy alto (≥35).
+#
+# El sistema selecciona la estrategia automáticamente; si ninguna aplica, pasa.
+
+# Multiplicadores SL/TP por estrategia  (sl_mult, tp_mult)
+_STRATEGY_PARAMS: dict = {
+    "absorcion": (None, None),   # usa _adaptive_sl_tp_mult (dinámico por ATR%)
+    "tendencia": (1.0,  2.5),    # SL justo, TP amplio para montar el trend
+    "momentum":  (1.2,  1.8),    # rápido: SL/TP cortos, trade se resuelve pronto
+}
+
+
+def _select_strategy(opp: "OpportunitySignal", tech: "TechSignal") -> Tuple[str, str, List[str]]:
+    """
+    Determina qué estrategia usar y si la entrada está permitida.
+
+    Retorna (strategy_tag, block_reason, extra_reasons).
+    block_reason == "" significa que la entrada está permitida.
+    """
+    regime  = opp.regime.regime
+    side    = "Buy" if opp.direction == "LONG" else "Sell"
+    t_dir   = opp.trend_direction    # "ALCISTA" | "BAJISTA" | "NEUTRAL"
+    t_score = opp.trend_score        # 0-100
+
+    # ── Bloqueo de tendencia — REGLA FUNDAMENTAL ──────────────────────────────
+    # Si hay una tendencia macro FUERTE (≥60%), nunca entramos contra ella.
+    # Esto evita el error de comprar en tendencia bajista y vender en alcista.
+    if t_score >= 60:
+        if t_dir == "BAJISTA" and side == "Buy":
+            return "", f"tendencia BAJISTA {t_score}% — no LONG", []
+        if t_dir == "ALCISTA" and side == "Sell":
+            return "", f"tendencia ALCISTA {t_score}% — no SHORT", []
+
+    # También bloquear cuando el régimen es trending y la dirección es contraria
+    if regime == "TRENDING_DOWN" and side == "Buy":
+        return "", "régimen TRENDING_DOWN — no LONG", []
+    if regime == "TRENDING_UP"   and side == "Sell":
+        return "", "régimen TRENDING_UP — no SHORT", []
+
+    # ── Selección de estrategia ───────────────────────────────────────────────
+
+    # TENDENCIA: mercado con trend claro, operar EN dirección del trend
+    if regime in ("TRENDING_UP", "TRENDING_DOWN") or t_score >= 55:
+        reasons = [f"tendencia {t_dir} ({t_score}%) — entrada con el trend"]
+        if tech.ema15m_bull and side == "Buy":
+            reasons.append("EMAs 15m alcistas confirmadas")
+        elif not tech.ema15m_bull and side == "Sell":
+            reasons.append("EMAs 15m bajistas confirmadas")
+        return "tendencia", "", reasons
+
+    # MOMENTUM: señal muy fuerte de absorción + mercado volátil
+    if regime == "VOLATILE" and opp.abs_pts >= 35:
+        reasons = [f"impulso fuerte absorción ({opp.abs_pts}pts) en mercado volátil"]
+        return "momentum", "", reasons
+
+    # ABSORCION: mercado en rango/acumulación (caso por defecto)
+    reasons: List[str] = []
+    if regime == "RANGING":
+        reasons.append("régimen RANGO — absorción en soporte/resistencia")
+    elif regime == "ACCUMULATION":
+        reasons.append("acumulación institucional detectada")
+    if tech.at_ema200:
+        reasons.append("precio en EMA200 1h — nivel clave")
+    if tech.ema15m_bull and side == "Buy":
+        reasons.append("EMAs 15m alcistas alineadas")
+    elif not tech.ema15m_bull and side == "Sell":
+        reasons.append("EMAs 15m bajistas alineadas")
+    return "absorcion", "", reasons
+
+
 # ─── Strategy Engine ─────────────────────────────────────────────────────────
 
 class StrategyEngine:
     """
-    Evalúa señales y genera propuestas de órdenes.
-    Solo propone — nunca ejecuta. El TradeController decide si ejecutar.
+    Evalúa señales y genera propuestas usando la estrategia más adecuada al
+    régimen de mercado actual. Solo propone — nunca ejecuta.
+
+    Estrategias:
+      absorcion  — default, mercado lateral/acumulación
+      tendencia  — trend-following cuando hay dirección clara
+      momentum   — impulso fuerte, trade rápido en mercado volátil
     """
 
     def propose(
@@ -292,17 +386,16 @@ class StrategyEngine:
         goal_usd:     float,
         executor:     "BybitExecutor",
         leverage:     int   = DEFAULT_LEVERAGE,
-        max_loss_usd: float = 0.0,   # 0 = usar % del equity por defecto
+        max_loss_usd: float = 0.0,
     ) -> Optional[OrderRequest]:
         """
-        Genera un OrderRequest para el símbolo dado.
-        Retorna None si no hay setup válido.
+        Genera un OrderRequest para el símbolo dado usando la estrategia correcta.
+        Retorna None si no hay setup válido o si la estrategia bloquea la entrada.
         """
         # ── Filtros mínimos ────────────────────────────────────────────────
         if opp.score < settings.min_scan_score:
             return None
 
-        # Validar R:R mínimo usando configuración dinámica
         _MIN_RR = settings.min_rr if hasattr(settings, "min_rr") else MIN_RR
 
         if not opp.is_actionable:
@@ -322,19 +415,36 @@ class StrategyEngine:
 
         side = "Buy" if opp.direction == "LONG" else "Sell"
 
-        # ── Modo rápido: goal pequeño relativo al precio del activo ───────
-        # Activa multiplicadores SL/TP ajustados para resolver el trade más
-        # rápido sin sacrificar el R:R mínimo.
-        fast_mode = (goal_usd / entry < FAST_GOAL_RATIO) if entry > 0 else False
-        if fast_mode:
-            log.debug("propose(%s) fast_mode: goal=%.2f entry=%.4g ratio=%.4f",
-                      symbol, goal_usd, entry, goal_usd / entry)
+        # ── Selección de estrategia + gate de tendencia ────────────────────
+        strategy_tag, block_reason, strategy_reasons = _select_strategy(opp, tech)
+        if block_reason:
+            log.debug("propose(%s) bloqueado: %s", symbol, block_reason)
+            return None
 
-        # ── Niveles SL / TP ────────────────────────────────────────────────
-        sl, tp = _atr_levels(
-            side, entry, tech.atr_15m, tech.support, tech.resistance,
-            fast_mode=fast_mode,
-        )
+        # ── Multiplicadores SL/TP según estrategia ─────────────────────────
+        fast_mode = (goal_usd / entry < FAST_GOAL_RATIO) if entry > 0 else False
+        sl_mult_override, tp_mult_override = _STRATEGY_PARAMS[strategy_tag]
+
+        if sl_mult_override is not None:
+            # Estrategia con parámetros fijos (tendencia / momentum)
+            atr = tech.atr_15m
+            if side == "Buy":
+                sl = entry - atr * sl_mult_override
+                tp = entry + atr * tp_mult_override
+                if tech.support > 0 and tech.support < entry and tech.support > sl:
+                    sl = tech.support * 0.998
+            else:
+                sl = entry + atr * sl_mult_override
+                tp = entry - atr * tp_mult_override
+                if tech.resistance > 0 and tech.resistance > entry and tech.resistance < sl:
+                    sl = tech.resistance * 1.002
+        else:
+            # Absorción: SL/TP adaptativos por volatilidad
+            sl, tp = _atr_levels(
+                side, entry, tech.atr_15m, tech.support, tech.resistance,
+                fast_mode=fast_mode,
+            )
+
         if sl <= 0 or tp <= 0:
             return None
 
@@ -352,41 +462,32 @@ class StrategyEngine:
 
         notional = qty * entry
 
-        # ── Razones para la UI ─────────────────────────────────────────────
-        reasons: List[str] = []
-        if opp.regime.regime == "RANGING":
-            reasons.append("régimen RANGO — ideal para absorción")
-        elif opp.regime.regime == "ACCUMULATION":
-            reasons.append("acumulación detectada")
-        if tech.at_ema200:
-            reasons.append("precio en EMA200 1h — soporte clave")
-        if tech.ema15m_bull and side == "Buy":
-            reasons.append("EMAs 15m alcistas alineadas")
-        elif not tech.ema15m_bull and side == "Sell":
-            reasons.append("EMAs 15m bajistas alineadas")
+        # ── Razones para la UI (estrategia + señales) ─────────────────────
+        reasons = strategy_reasons[:]
         reasons.extend(opp.reasons[:2])
 
         log.info(
-            "Proposal: %s %s x%s @ %s  SL=%s TP=%s R:R=%.1f score=%d",
-            side, symbol, qty, entry, sl, tp, rr, opp.score,
+            "Proposal [%s]: %s %s x%s @ %s  SL=%s TP=%s R:R=%.1f score=%d",
+            strategy_tag, side, symbol, qty, entry, sl, tp, rr, opp.score,
         )
 
         return OrderRequest(
-            symbol      = symbol,
-            side        = side,
-            qty         = qty,
-            order_type  = "Market",
-            entry_price = entry,
-            sl_price    = sl,
-            tp_price    = tp,
-            goal_usd    = goal_usd,
-            risk_usd    = risk_usd,
-            rr_ratio    = round(rr, 2),
-            opp_score   = opp.score,
-            notional    = round(notional, 2),
-            margin      = round(margin, 2),
-            leverage    = leverage,
-            reasons     = reasons[:3],
+            symbol       = symbol,
+            side         = side,
+            qty          = qty,
+            order_type   = "Market",
+            entry_price  = entry,
+            sl_price     = sl,
+            tp_price     = tp,
+            goal_usd     = goal_usd,
+            risk_usd     = risk_usd,
+            rr_ratio     = round(rr, 2),
+            opp_score    = opp.score,
+            notional     = round(notional, 2),
+            margin       = round(margin, 2),
+            leverage     = leverage,
+            reasons      = reasons[:3],
+            strategy_tag = strategy_tag,
         )
 
     def scan_all(

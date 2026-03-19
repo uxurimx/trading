@@ -211,7 +211,7 @@ class _TradeCard(Gtk.Box):
         closed = t["closed_at"]
 
         # Hora de cierre
-        hora = (datetime.datetime.fromtimestamp(closed / 1000).strftime("%H:%M")
+        hora = (datetime.datetime.fromtimestamp(closed).strftime("%H:%M")
                 if closed > 0 else "──")
 
         pnl_col  = HEX["buy"] if pnl >= 0 else HEX["sell"]
@@ -243,10 +243,17 @@ class _TradeCard(Gtk.Box):
         total_fee = fee_entry + fee_exit
         gross_pnl = pnl + total_fee
 
-        open_str  = (datetime.datetime.fromtimestamp(opened / 1000)
+        open_str  = (datetime.datetime.fromtimestamp(opened)
                      .strftime("%Y-%m-%d %H:%M:%S") if opened > 0 else "──")
-        close_str = (datetime.datetime.fromtimestamp(closed / 1000)
+        close_str = (datetime.datetime.fromtimestamp(closed)
                      .strftime("%Y-%m-%d %H:%M:%S") if closed > 0 else "──")
+
+        strategy = t.get("strategy_tag", "absorcion")
+        strat_color = {
+            "tendencia": HEX["buy"],
+            "momentum":  HEX["warn"],
+            "absorcion": HEX["teal"],
+        }.get(strategy, HEX["sub"])
 
         self._det_position.set_markup(
             f'<span color="{HEX["sub"]}">Qty: </span>'
@@ -257,6 +264,8 @@ class _TradeCard(Gtk.Box):
             f'<span color="{HEX["sell"]}">${risk:.2f}</span>'
             f'  <span color="{HEX["sub"]}">Modo: </span>'
             f'<span color="{HEX["blue"]}">{auto}</span>'
+            f'  <span color="{HEX["sub"]}">Estrategia: </span>'
+            f'<span color="{strat_color}" weight="bold">{strategy.upper()}</span>'
         )
         self._det_pnl.set_markup(
             f'<span color="{HEX["sub"]}">Bruto≈: </span>'
@@ -280,10 +289,51 @@ class _TradeCard(Gtk.Box):
 
 # ─── JournalView ──────────────────────────────────────────────────────────────
 
+def _period_cutoff(period: str) -> float:
+    """Retorna timestamp Unix (segundos) de inicio del período solicitado."""
+    now = time.time()
+    if period == "hora":
+        return now - 3600
+    if period == "hoy":
+        t = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return t.timestamp()
+    if period == "semana":
+        return now - 7 * 86400
+    return 0.0  # "todo" — sin filtro
+
+
+def _stats_from_trades(trades: list) -> dict:
+    """Calcula estadísticas agregadas a partir de una lista de trades ya filtrados."""
+    closed = [t for t in trades if t.get("state") == "CLOSED"]
+    total  = len(closed)
+    wins   = sum(1 for t in closed if t["pnl_usd"] > 0)
+    losses = sum(1 for t in closed if t["pnl_usd"] < 0)
+    pnls   = [t["pnl_usd"] for t in closed]
+    total_pnl = sum(pnls)
+    best  = max(pnls) if pnls else 0.0
+    worst = min(pnls) if pnls else 0.0
+    avg_rr  = sum(t["rr_ratio"]  for t in closed) / total if total else 0.0
+    avg_sc  = sum(t["opp_score"] for t in closed) / total if total else 0.0
+    by_sym  = {}
+    for t in closed:
+        by_sym[t["symbol"]] = by_sym.get(t["symbol"], 0.0) + t["pnl_usd"]
+    best_sym = max(by_sym, key=by_sym.get).replace("USDT", "") if by_sym else "──"
+    return {
+        "total": total, "wins": wins, "losses": losses,
+        "win_rate": round(wins / total * 100, 1) if total else 0.0,
+        "total_pnl": round(total_pnl, 2),
+        "best_trade": round(best, 2), "worst_trade": round(worst, 2),
+        "avg_rr": round(avg_rr, 2), "avg_score": round(avg_sc, 1),
+        "best_symbol": best_sym,
+    }
+
+
 class JournalView(Gtk.Box):
     """
     Pestaña de Journal: equity curve + estadísticas + tabla de trades.
     """
+
+    _PERIODS = [("todo", "Todo"), ("hoy", "Hoy"), ("semana", "Semana"), ("hora", "1h")]
 
     def __init__(self) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -291,15 +341,44 @@ class JournalView(Gtk.Box):
         self.set_vexpand(True)
         self._last_refresh: float = 0.0
         self._trade_cards:  list  = []
+        self._all_trades:   list  = []
+        self._period:       str   = "todo"
         self._build()
 
     def _build(self) -> None:
         P = 8
 
+        # ── Filtros de período ────────────────────────────────────────────────
+        flt_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        flt_box.set_margin_start(P); flt_box.set_margin_end(P)
+        flt_box.set_margin_top(4);   flt_box.set_margin_bottom(2)
+
+        flt_lbl = Gtk.Label(label="Período:")
+        flt_lbl.add_css_class("qts-mono-sm")
+        flt_lbl.set_margin_end(4)
+        flt_box.append(flt_lbl)
+
+        self._period_btns: dict = {}
+        first_btn = None
+        for key, label in self._PERIODS:
+            btn = Gtk.ToggleButton(label=label)
+            btn.add_css_class("qts-mono-sm")
+            if first_btn is None:
+                first_btn = btn
+            else:
+                btn.set_group(first_btn)
+            if key == self._period:
+                btn.set_active(True)
+            btn.connect("toggled", self._on_period_toggled, key)
+            flt_box.append(btn)
+            self._period_btns[key] = btn
+
+        self.append(flt_box)
+
         # ── Header con stats resumidas ────────────────────────────────────────
         hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         hdr.set_margin_start(P); hdr.set_margin_end(P)
-        hdr.set_margin_top(6);   hdr.set_margin_bottom(2)
+        hdr.set_margin_top(2);   hdr.set_margin_bottom(2)
 
         self._stat1 = _ml()
         self._stat1.set_hexpand(True)
@@ -342,6 +421,31 @@ class JournalView(Gtk.Box):
         scroll.set_child(self._rows_box)
         self.append(scroll)
 
+    def _on_period_toggled(self, btn: Gtk.ToggleButton, key: str) -> None:
+        if btn.get_active():
+            self._period = key
+            self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        cutoff = _period_cutoff(self._period)
+        if cutoff > 0:
+            filtered = [t for t in self._all_trades if t.get("closed_at", 0) >= cutoff]
+        else:
+            filtered = self._all_trades
+
+        stats = _stats_from_trades(filtered)
+        self._update_stats(stats)
+
+        # Equity curve filtrada
+        cum = 0.0
+        curve = []
+        for t in sorted(filtered, key=lambda x: x.get("closed_at", 0)):
+            if t.get("state") == "CLOSED" and t.get("closed_at", 0) > 0:
+                cum += t.get("pnl_usd", 0.0)
+                curve.append((t["closed_at"], cum))
+        self._chart.update(curve)
+        self._update_trades(filtered)
+
     # ── Actualización ─────────────────────────────────────────────────────────
 
     def refresh(self) -> None:
@@ -350,15 +454,10 @@ class JournalView(Gtk.Box):
             return
         self._last_refresh = now
 
-        stats  = get_journal_stats()
-        trades = get_all_trades(150)
-        curve  = get_cumulative_pnl()
+        self._all_trades = get_all_trades(300)
+        self._apply_filter()
 
-        self._update_stats(stats, len(trades))
-        self._chart.update(curve)
-        self._update_trades(trades)
-
-    def _update_stats(self, s: dict, n_loaded: int) -> None:
+    def _update_stats(self, s: dict) -> None:
         total  = s.get("total", 0)
         wins   = s.get("wins", 0)
         losses = s.get("losses", 0)
@@ -370,11 +469,13 @@ class JournalView(Gtk.Box):
         avg_sc = s.get("avg_score", 0.0)
         bsym   = s.get("best_symbol", "──")
 
+        period_label = {"todo": "Todo", "hoy": "Hoy", "semana": "Semana", "hora": "1h"}.get(self._period, "")
         pnl_col = HEX["buy"] if tpnl >= 0 else HEX["sell"]
         wr_col  = HEX["buy"] if wr >= 50 else HEX["sell"]
 
         self._stat1.set_markup(
-            f'<span color="{HEX["sub"]}">Trades: </span>'
+            f'<span color="{HEX["blue"]}" weight="bold">[{period_label}]</span>'
+            f'  <span color="{HEX["sub"]}">Trades: </span>'
             f'<span color="{HEX["text"]}" weight="bold">{total}</span>'
             f'  <span color="{HEX["buy"]}">{wins}W</span>'
             f' <span color="{HEX["sell"]}">{losses}L</span>'

@@ -76,12 +76,18 @@ def initialize_db() -> None:
             opp_score    INTEGER  DEFAULT 0,
             pnl_usd      DOUBLE   DEFAULT 0,
             close_reason VARCHAR  DEFAULT '',
+            strategy_tag VARCHAR  DEFAULT 'absorcion',
             opened_at    BIGINT   DEFAULT 0,
             closed_at    BIGINT   DEFAULT 0,
             duration_s   INTEGER  DEFAULT 0,
             created_at   TIMESTAMP DEFAULT now()
         )
     """)
+    # Migración: agregar columna si no existe (bases de datos previas)
+    try:
+        con.execute("ALTER TABLE trade_journal ADD COLUMN strategy_tag VARCHAR DEFAULT 'absorcion'")
+    except Exception:
+        pass  # ya existe
 
     con.close()
 
@@ -97,9 +103,9 @@ def save_trade(trade: "TradeRecord") -> None:
             INSERT OR REPLACE INTO trade_journal
                 (id, symbol, side, auto_mode, state,
                  entry_price, sl_price, tp_price, qty, risk_usd,
-                 rr_ratio, opp_score, pnl_usd, close_reason,
+                 rr_ratio, opp_score, pnl_usd, close_reason, strategy_tag,
                  opened_at, closed_at, duration_s)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             trade.id,
             trade.symbol,
@@ -115,6 +121,7 @@ def save_trade(trade: "TradeRecord") -> None:
             req.opp_score,
             trade.pnl_usd,
             trade.close_reason or trade.state.value,
+            req.strategy_tag,
             trade.opened_at,
             trade.closed_at or int(time.time()),
             trade.duration_s,
@@ -210,7 +217,7 @@ def get_all_trades(limit: int = 200) -> list:
         rows = con.execute("""
             SELECT id, symbol, side, auto_mode, state,
                    entry_price, sl_price, tp_price, qty, risk_usd,
-                   rr_ratio, opp_score, pnl_usd, close_reason,
+                   rr_ratio, opp_score, pnl_usd, close_reason, strategy_tag,
                    opened_at, closed_at, duration_s
             FROM trade_journal
             ORDER BY closed_at DESC LIMIT ?
@@ -232,9 +239,10 @@ def get_all_trades(limit: int = 200) -> list:
                 "opp_score":    int(r[11] or 0),
                 "pnl_usd":      float(r[12] or 0),
                 "close_reason": r[13] or "",
-                "opened_at":    int(r[14] or 0),
-                "closed_at":    int(r[15] or 0),
-                "duration_s":   int(r[16] or 0),
+                "strategy_tag": r[14] or "absorcion",
+                "opened_at":    int(r[15] or 0),
+                "closed_at":    int(r[16] or 0),
+                "duration_s":   int(r[17] or 0),
             }
             for r in rows
         ]

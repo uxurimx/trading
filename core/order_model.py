@@ -56,6 +56,9 @@ class OrderRequest:
     # Razones para mostrar en UI
     reasons:      List[str] = field(default_factory=list)
 
+    # Estrategia que generó esta propuesta
+    strategy_tag: str = "absorcion"   # "absorcion" | "tendencia" | "momentum"
+
     @property
     def direction(self) -> str:
         return "LONG" if self.side == "Buy" else "SHORT"

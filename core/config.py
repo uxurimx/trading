@@ -12,6 +12,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #   tf_label  = etiqueta mostrada en UI
 
 SPEED_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "nano": {
+        "fast": "1",   "fast_limit": 100,
+        "slow": "3",   "slow_limit": 100,
+        "tf_label": "1m",
+        "label": "NANO",
+        "desc": "Trades <90s · SL/TP ultrajustado",
+        "be_hold_s": 2,       # 2 s para confirmar breakeven
+        "atr_sl_mult": 0.6,   # SL ultra-corto (menos recorrido en contra)
+        "atr_tp_mult": 1.0,   # TP mínimo — R:R ~1.6 mínimo garantizado
+    },
     "scalp": {
         "fast": "1",   "fast_limit": 100,
         "slow": "5",   "slow_limit": 100,
@@ -89,7 +99,7 @@ class Settings(BaseSettings):
     min_scan_score:   int   = 70     # score mínimo para generar propuesta
     min_rr:           float = 1.3    # R:R mínimo aceptado en pre-flight
     scan_interval_s:  int   = 30     # segundos entre scans automáticos
-    speed_level:      str   = "standard"  # "scalp" | "fast" | "standard"
+    speed_level:      str   = "standard"  # "nano" | "scalp" | "fast" | "standard"
 
     # ── Salidas de protección (Fase 1) ──────────────────────────────────────
     # Weak Exit: cierra si el setup se debilita antes de producir ganancia
@@ -110,7 +120,7 @@ class Settings(BaseSettings):
     # Partial Lock: escalón intermedio que asegura ganancia real antes del profit lock
     partial_lock_enabled: bool  = True
     partial_lock_at_pct:  float = 50.0  # % de progreso al TP para activar
-    partial_lock_frac:    float = 0.40  # SL = entry ± sl_dist × frac (default: bloquea 40% del riesgo)
+    partial_lock_frac:    float = 0.55  # SL = entry ± sl_dist × frac (bloquea 55% del riesgo)
 
     @property
     def speed_cfg(self) -> Dict[str, Any]:

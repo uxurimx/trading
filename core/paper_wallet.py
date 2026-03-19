@@ -203,7 +203,7 @@ class PaperWallet:
 
         b = self.state.balance
         b.unrealized_pnl    = upnl
-        b.total_equity      = self._cash + self._margin + upnl
+        b.total_equity      = self._cash + upnl
         b.available_balance = max(0.0, self._cash - self._margin)
 
     # ── Reset ─────────────────────────────────────────────────────────────────
@@ -229,7 +229,7 @@ class PaperWallet:
 
     @property
     def total_pnl(self) -> float:
-        return self._cash + self._margin - self.starting_balance
+        return self._cash - self.starting_balance
 
     @property
     def n_positions(self) -> int:
@@ -238,9 +238,11 @@ class PaperWallet:
     # ── Sincronizar estado sintético ──────────────────────────────────────────
 
     def _sync_state(self) -> None:
+        # self._cash ya contiene todo el capital (libre + reservado en margen).
+        # El margen NO se deduce de _cash al abrir; solo se devuelve al cerrar.
         b = self.state.balance
-        b.wallet_balance    = self._cash + self._margin
-        b.total_equity      = self._cash + self._margin
+        b.wallet_balance    = self._cash              # capital total (fees ya descontadas)
+        b.total_equity      = self._cash              # se actualiza con upnl en update_mark_prices
         b.available_balance = max(0.0, self._cash - self._margin)
         b.used_margin       = self._margin
         b.unrealized_pnl    = 0.0
