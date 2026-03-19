@@ -77,17 +77,22 @@ def initialize_db() -> None:
             pnl_usd      DOUBLE   DEFAULT 0,
             close_reason VARCHAR  DEFAULT '',
             strategy_tag VARCHAR  DEFAULT 'absorcion',
+            ai_reasoning TEXT     DEFAULT '',
             opened_at    BIGINT   DEFAULT 0,
             closed_at    BIGINT   DEFAULT 0,
             duration_s   INTEGER  DEFAULT 0,
             created_at   TIMESTAMP DEFAULT now()
         )
     """)
-    # Migración: agregar columna si no existe (bases de datos previas)
-    try:
-        con.execute("ALTER TABLE trade_journal ADD COLUMN strategy_tag VARCHAR DEFAULT 'absorcion'")
-    except Exception:
-        pass  # ya existe
+    # Migraciones: agregar columnas si no existen (bases de datos previas)
+    for migration in [
+        "ALTER TABLE trade_journal ADD COLUMN strategy_tag VARCHAR DEFAULT 'absorcion'",
+        "ALTER TABLE trade_journal ADD COLUMN ai_reasoning TEXT DEFAULT ''",
+    ]:
+        try:
+            con.execute(migration)
+        except Exception:
+            pass  # columna ya existe
 
     con.close()
 
@@ -103,9 +108,9 @@ def save_trade(trade: "TradeRecord") -> None:
             INSERT OR REPLACE INTO trade_journal
                 (id, symbol, side, auto_mode, state,
                  entry_price, sl_price, tp_price, qty, risk_usd,
-                 rr_ratio, opp_score, pnl_usd, close_reason, strategy_tag,
+                 rr_ratio, opp_score, pnl_usd, close_reason, strategy_tag, ai_reasoning,
                  opened_at, closed_at, duration_s)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             trade.id,
             trade.symbol,
@@ -122,6 +127,7 @@ def save_trade(trade: "TradeRecord") -> None:
             trade.pnl_usd,
             trade.close_reason or trade.state.value,
             req.strategy_tag,
+            trade.ai_reasoning or req.ai_reasoning,
             trade.opened_at,
             trade.closed_at or int(time.time()),
             trade.duration_s,

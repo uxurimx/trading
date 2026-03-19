@@ -123,6 +123,8 @@ class TradeController:
         self._exit_cooldown: Dict[str, tuple] = {}
         # historial reciente de resultados para detector de mercado choppy
         self._recent_results: List[str]       = []   # "win"/"loss" (últimos 10)
+        # AI Strategy Agent — estado del scan asíncrono
+        self._ai_scanning:   bool             = False  # hay una llamada a OpenAI en curso
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -322,6 +324,28 @@ class TradeController:
             return
 
         goal_per_trade = self.goal_usd / max(1, self.multi_trades)
+
+        # ── Modo AI: delegar al agente de OpenAI ──────────────────────────
+        if settings.ai_strategy_mode:
+            if self._ai_scanning:
+                self._scan_log = "🤖 Agente IA analizando… (esperando respuesta)"
+                self._notify()
+                return
+            from core.ai_strategy import ai_agent
+            wait = ai_agent.seconds_until_ready()
+            if wait > 0:
+                self._scan_log = f"🤖 AI: próximo análisis en {wait}s"
+                self._notify()
+                return
+            self._ai_scanning = True
+            self._scan_log    = f"🤖 Agente IA consultando {settings.openai_model}…"
+            self._notify()
+            self._bridge.submit(
+                self._run_ai_scan(available, states, account, techs, opps)
+            )
+            return
+
+        # ── Modo sistema: StrategyEngine estándar ─────────────────────────
         result = self._strategy.scan_all(
             symbols      = available,
             states       = states,
@@ -364,6 +388,56 @@ class TradeController:
                 self._scan_log = "✗ Sin datos de mercado aún"
             log.info("Scan: sin setup válido — scores: %s", scores)
             self._notify()
+
+    # ── AI Strategy scan (asíncrono) ──────────────────────────────────────────
+
+    async def _run_ai_scan(
+        self,
+        available: list,
+        states:    Dict[str, "MarketState"],
+        account:   "AccountState",
+        techs:     Dict[str, "TechSignal"],
+        opps:      Dict[str, "OpportunitySignal"],
+    ) -> None:
+        """Corre en el AsyncBridge thread — llama al agente IA y devuelve resultado al GTK thread."""
+        from core.ai_strategy import ai_agent
+        goal_per_trade = self.goal_usd / max(1, self.multi_trades)
+        try:
+            result = await ai_agent.generate_proposal(
+                symbols       = available,
+                states        = states,
+                opps          = opps,
+                techs         = techs,
+                account       = account,
+                active_trades = list(self._active.values()),
+                goal_usd      = goal_per_trade,
+                executor      = self._executor,
+                leverage      = self.leverage,
+            )
+        except Exception as e:
+            log.error("_run_ai_scan: excepción inesperada: %s", e)
+            result = None
+        GLib.idle_add(self._on_ai_result, result)
+
+    def _on_ai_result(self, result) -> bool:
+        """Callback en GTK thread — recibe la propuesta del agente IA."""
+        self._ai_scanning = False
+        if result:
+            sym, proposal = result
+            self._proposal    = proposal
+            self._proposal_ts = time.monotonic()
+            self._scan_log = (
+                f"🤖 AI Setup: {sym.replace('USDT', '')}  "
+                f"R:R {proposal.rr_ratio:.1f}  conf={proposal.opp_score}%"
+            )
+            log.info("AI propuesta lista: %s", proposal.summary())
+            if self.mode == AutoMode.SUGGEST:
+                notifier.proposal_ready(sym, proposal.side, proposal.opp_score, self.goal_usd)
+        else:
+            self._scan_log = "🤖 AI: sin setup válido en este momento"
+            log.info("AI Strategy: sin propuesta")
+        self._notify()
+        return False   # no repetir idle_add
 
     # ── Pre-flight ────────────────────────────────────────────────────────────
 
@@ -488,6 +562,8 @@ class TradeController:
                 trade.result           = result
                 trade.opened_at        = int(time.time())
                 trade.signal_timeframe = settings.speed_cfg["tf_label"]
+                # Propagar razonamiento del agente IA al trade record
+                trade.ai_reasoning     = req.ai_reasoning
                 self._open_ts[req.symbol] = time.monotonic()  # gracia para WS latency
                 trade.entry_price = (result.filled_price
                                      if result.filled_price > 0

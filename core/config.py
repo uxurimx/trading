@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     bybit_api_secret: str = ""
     bybit_testnet: bool = False
 
+    # ── AI Strategy Agent ──────────────────────────────────────────────────────
+    # Cuando ai_strategy_mode=True, el agente de OpenAI genera las estrategias
+    # en tiempo real analizando todos los datos del mercado.
+    ai_strategy_mode:   bool = False
+    openai_api_key:     str  = ""
+    openai_model:       str  = "gpt-4o"   # "gpt-4o" | "gpt-4o-mini" | "o3-mini"
+
     # Mercado — carga dinámica desde Bybit o fallback CSV manual
     # Si auto_load_symbols=True, se reemplaza al iniciar con los top-N por volumen.
     symbols: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"   # fallback mínimo

@@ -102,12 +102,53 @@ class _TradeRow(Gtk.Box):
         prog_row.append(self._prog)
         prog_row.append(self._close_btn)
 
-        for w in [self._header, self._levels, self._pnl, prog_row]:
+        # ── Razonamiento del Agente IA ────────────────────────────────────
+        self._ai_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self._ai_box.set_margin_top(4)
+        self._ai_box.set_visible(False)
+
+        ai_header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._ai_toggle_btn = Gtk.Button()
+        self._ai_toggle_btn.set_has_frame(False)
+        self._ai_toggle_btn.connect("clicked", self._on_ai_toggle)
+        self._ai_badge = Gtk.Label()
+        self._ai_badge.set_use_markup(True)
+        self._ai_badge.set_xalign(0)
+        self._ai_badge.set_markup(
+            f'<span color="{HEX["blue"]}" size="small" weight="bold">🤖 Ver análisis IA ▾</span>'
+        )
+        self._ai_toggle_btn.set_child(self._ai_badge)
+        ai_header_row.append(self._ai_toggle_btn)
+        self._ai_box.append(ai_header_row)
+
+        self._ai_reasoning_lbl = Gtk.Label()
+        self._ai_reasoning_lbl.set_xalign(0)
+        self._ai_reasoning_lbl.set_wrap(True)
+        self._ai_reasoning_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._ai_reasoning_lbl.set_max_width_chars(38)
+        self._ai_reasoning_lbl.set_visible(False)   # colapsado por defecto
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_scale_new(0.82))
+        attrs.insert(Pango.attr_foreground_new(0xcccc, 0xcccc, 0xcccc))
+        self._ai_reasoning_lbl.set_attributes(attrs)
+        self._ai_box.append(self._ai_reasoning_lbl)
+        self._ai_expanded = False
+
+        for w in [self._header, self._levels, self._pnl, prog_row, self._ai_box]:
             self.append(w)
 
     def _on_close(self, _btn) -> None:
         if self._symbol:
             self._controller.close_symbol(self._symbol)
+
+    def _on_ai_toggle(self, _btn) -> None:
+        self._ai_expanded = not self._ai_expanded
+        self._ai_reasoning_lbl.set_visible(self._ai_expanded)
+        arrow = "▴" if self._ai_expanded else "▾"
+        self._ai_badge.set_markup(
+            f'<span color="{HEX["blue"]}" size="small" weight="bold">'
+            f'🤖 Análisis IA {arrow}</span>'
+        )
 
     def show_trade(
         self,
@@ -164,6 +205,14 @@ class _TradeRow(Gtk.Box):
         else:
             self._prog.set_fraction(0.0)
             self._prog.set_text(f"entry {_fp(entry)}")
+
+        # Razonamiento del Agente IA
+        ai_text = trade.ai_reasoning or req.ai_reasoning
+        if ai_text:
+            self._ai_box.set_visible(True)
+            self._ai_reasoning_lbl.set_text(ai_text)
+        else:
+            self._ai_box.set_visible(False)
 
     def clear(self) -> None:
         self.set_visible(False)

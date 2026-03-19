@@ -438,6 +438,93 @@ class SettingsView(Gtk.ScrolledWindow):
 
         box.append(_sep())
 
+        # ── Agente IA (OpenAI) ───────────────────────────────────────────────
+        box.append(_section("AGENTE IA · ESTRATEGIA EN TIEMPO REAL"))
+
+        # Toggle principal
+        ai_sw = Gtk.Switch()
+        ai_sw.set_active(settings.ai_strategy_mode)
+        ai_sw.set_valign(Gtk.Align.CENTER)
+        ai_sw.connect("notify::active", self._on_ai_mode_toggle)
+        self._ai_hint = Gtk.Label()
+        self._ai_hint.set_xalign(0)
+        self._ai_hint.set_margin_start(8)
+        self._update_ai_hint(settings.ai_strategy_mode)
+
+        ai_mode_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ai_mode_row.set_margin_start(8); ai_mode_row.set_margin_end(8)
+        ai_mode_row.set_margin_top(4);   ai_mode_row.set_margin_bottom(4)
+        ai_lbl = Gtk.Label(label="Estrategia por Agente IA")
+        ai_lbl.set_xalign(0)
+        ai_lbl.set_size_request(220, -1)
+        attrs2 = Pango.AttrList()
+        attrs2.insert(Pango.attr_weight_new(Pango.Weight.SEMIBOLD))
+        ai_lbl.set_attributes(attrs2)
+        ai_mode_row.append(ai_lbl)
+        ai_mode_row.append(ai_sw)
+        ai_mode_row.append(self._ai_hint)
+        box.append(ai_mode_row)
+
+        # API Key de OpenAI
+        ai_key_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ai_key_row.set_margin_start(8); ai_key_row.set_margin_end(8)
+        ai_key_row.set_margin_top(2);   ai_key_row.set_margin_bottom(2)
+        ai_key_lbl = Gtk.Label(label="OpenAI API Key")
+        ai_key_lbl.set_xalign(0)
+        ai_key_lbl.set_size_request(220, -1)
+        ai_key_row.append(ai_key_lbl)
+
+        self._ai_key_entry = Gtk.Entry()
+        self._ai_key_entry.set_visibility(False)          # ocultar como password
+        self._ai_key_entry.set_placeholder_text("sk-…")
+        self._ai_key_entry.set_hexpand(True)
+        if settings.openai_api_key:
+            self._ai_key_entry.set_text(settings.openai_api_key)
+        self._ai_key_entry.connect("changed", self._on_ai_key_changed)
+        ai_key_row.append(self._ai_key_entry)
+
+        # Botón mostrar/ocultar
+        self._ai_key_vis_btn = Gtk.Button(label="👁")
+        self._ai_key_vis_btn.set_size_request(34, -1)
+        self._ai_key_vis_btn.connect("clicked", self._on_ai_key_vis)
+        ai_key_row.append(self._ai_key_vis_btn)
+        box.append(ai_key_row)
+
+        # Estado de la API Key
+        self._ai_key_status = Gtk.Label()
+        self._ai_key_status.set_xalign(0)
+        self._ai_key_status.set_margin_start(12)
+        self._ai_key_status.set_margin_bottom(4)
+        self._update_ai_key_status()
+        box.append(self._ai_key_status)
+
+        # Modelo de OpenAI
+        ai_model_combo = Gtk.ComboBoxText()
+        for m in ("gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-4-turbo"):
+            ai_model_combo.append_text(m)
+        models = ("gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-4-turbo")
+        cur_model = getattr(settings, "openai_model", "gpt-4o")
+        ai_model_combo.set_active(models.index(cur_model) if cur_model in models else 0)
+        ai_model_combo.connect("changed", self._on_ai_model_changed)
+        box.append(_row("Modelo OpenAI", ai_model_combo, "Recomendado: gpt-4o"))
+
+        # Descripción
+        ai_desc = Gtk.Label()
+        ai_desc.set_xalign(0)
+        ai_desc.set_margin_start(8)
+        ai_desc.set_margin_bottom(8)
+        ai_desc.set_wrap(True)
+        ai_desc.set_markup(
+            '<span foreground="#9a9996" size="small">'
+            'El agente analiza todos los mercados en tiempo real: tendencia, CVD, OI, '
+            'absorción, soporte/resistencia y momentum. Razona antes de confirmar cada '
+            'operación. El análisis se guarda en cada trade y se muestra en los detalles.'
+            '</span>'
+        )
+        box.append(ai_desc)
+
+        box.append(_sep())
+
         # ── Conexión (solo lectura) ──────────────────────────────────────────
         box.append(_section("CONEXIÓN"))
 
@@ -592,3 +679,60 @@ class SettingsView(Gtk.ScrolledWindow):
     def refresh_blacklist(self) -> None:
         """Llamar periódicamente para reflejar cambios del auto-blacklist."""
         self._update_bl_label()
+
+    # ── AI Strategy Agent handlers ────────────────────────────────────────────
+
+    def _on_ai_mode_toggle(self, sw: Gtk.Switch, _param) -> None:
+        active = sw.get_active()
+        settings.ai_strategy_mode = active
+        self._update_ai_hint(active)
+
+    def _update_ai_hint(self, active: bool) -> None:
+        if active:
+            has_key = bool(getattr(settings, "openai_api_key", ""))
+            if has_key:
+                self._ai_hint.set_markup(
+                    '<span foreground="#57e389" weight="bold">🤖 ACTIVO</span>'
+                )
+            else:
+                self._ai_hint.set_markup(
+                    '<span foreground="#f8e45c">⚠ Necesita API Key</span>'
+                )
+        else:
+            self._ai_hint.set_markup(
+                '<span foreground="#9a9996" size="small">Estrategia del sistema</span>'
+            )
+
+    def _on_ai_key_changed(self, entry: Gtk.Entry) -> None:
+        key = entry.get_text().strip()
+        settings.openai_api_key = key
+        self._update_ai_key_status()
+        self._update_ai_hint(settings.ai_strategy_mode)
+
+    def _update_ai_key_status(self) -> None:
+        key = getattr(settings, "openai_api_key", "")
+        if not key:
+            self._ai_key_status.set_markup(
+                '<span foreground="#9a9996" size="small">Sin API key — '
+                'configura en openai.com</span>'
+            )
+        elif key.startswith("sk-") and len(key) >= 20:
+            masked = key[:7] + "●●●●●●●" + key[-4:]
+            self._ai_key_status.set_markup(
+                f'<span foreground="#57e389" size="small">● Key detectada: {masked}</span>'
+            )
+        else:
+            self._ai_key_status.set_markup(
+                '<span foreground="#f8e45c" size="small">⚠ Formato inusual — verifica que sea correcta</span>'
+            )
+
+    def _on_ai_key_vis(self, _btn) -> None:
+        """Alternar visibilidad del campo de API key."""
+        visible = self._ai_key_entry.get_visibility()
+        self._ai_key_entry.set_visibility(not visible)
+        self._ai_key_vis_btn.set_label("🙈" if not visible else "👁")
+
+    def _on_ai_model_changed(self, combo: Gtk.ComboBoxText) -> None:
+        model = combo.get_active_text()
+        if model:
+            settings.openai_model = model

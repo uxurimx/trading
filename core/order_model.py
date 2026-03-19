@@ -57,7 +57,10 @@ class OrderRequest:
     reasons:      List[str] = field(default_factory=list)
 
     # Estrategia que generó esta propuesta
-    strategy_tag: str = "absorcion"   # "absorcion" | "tendencia" | "momentum"
+    strategy_tag: str = "absorcion"   # "absorcion" | "tendencia" | "momentum" | "ai_agent"
+
+    # Razonamiento del agente IA (solo en modo AI — vacío en estrategia del sistema)
+    ai_reasoning: str = ""
 
     @property
     def direction(self) -> str:
@@ -119,6 +122,9 @@ class TradeRecord:
 
     signal_health:    int         = -1   # debilidad actual 0-6 (-1=sin datos); ver _weakness_score
     signal_timeframe: str         = "15m"  # timeframe base del setup (ATR + señal)
+
+    # Razonamiento del agente IA (copiado de request.ai_reasoning al abrir el trade)
+    ai_reasoning: str = ""
 
     @property
     def is_active(self) -> bool:
