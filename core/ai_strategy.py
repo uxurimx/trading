@@ -32,11 +32,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("qts.ai_strategy")
 
 TAKER_FEE_RATE   = 0.00055   # 0.055% por lado (0.11% round-trip)
-AI_MIN_INTERVAL  = 60        # segundos mínimos entre llamadas a OpenAI
-AI_TOP_SYMBOLS   = 3         # cuántos símbolos enviar al agente (top por score)
-AI_MIN_SCORE     = 70        # score mínimo para incluir un símbolo en el análisis
-AI_MIN_ATR_PCT   = 0.40      # excluir coins con ATR < 0.4% (fees comerían todo el profit)
-AI_MAX_LATENCY   = 45.0      # [NUEVO] Latencia máxima aceptable para ejecutar un trade
+# Los parámetros de IA ahora se manejan vía settings para ser dinámicos en la UI.
 
 
 # ─── Prompt del sistema (CORREGIDO) ──────────────────────────────────────────
@@ -110,7 +106,7 @@ def _build_market_snapshot(
         opp  = opps.get(sym)
         tech = techs.get(sym)
         ms   = states.get(sym)
-        if not opp or opp.score < AI_MIN_SCORE:
+        if not opp or opp.score < settings.ai_min_score:
             continue
         if not tech or not ms:
             continue
@@ -118,20 +114,20 @@ def _build_market_snapshot(
         if price <= 0:
             continue
         atr_pct = tech.atr_15m / price * 100
-        if atr_pct < AI_MIN_ATR_PCT:
+        if atr_pct < settings.ai_min_atr_pct:
             continue  # ATR demasiado pequeño — fees comerían todo el profit
         candidates.append((opp.score, sym))
     candidates.sort(reverse=True)
-    top = candidates[:AI_TOP_SYMBOLS]
+    top = candidates[:settings.ai_top_symbols]
 
     if not top:
         return (
             f"=== SIN CANDIDATOS VÁLIDOS ===\n"
-            f"(score ≥ {AI_MIN_SCORE} Y ATR ≥ {AI_MIN_ATR_PCT}%)\n"
+            f"(score ≥ {settings.ai_min_score} Y ATR ≥ {settings.ai_min_atr_pct}%)\n"
             "Mercado en baja volatilidad — esperar condiciones mejores."
         )
 
-    lines = [f"=== TOP {len(top)} CANDIDATOS (score ≥ {AI_MIN_SCORE}, ATR ≥ {AI_MIN_ATR_PCT}%) ==="]
+    lines = [f"=== TOP {len(top)} CANDIDATOS (score ≥ {settings.ai_min_score}, ATR ≥ {settings.ai_min_atr_pct}%) ==="]
 
     for _score, sym in top:
         ms   = states.get(sym)
@@ -274,7 +270,7 @@ class AIStrategyAgent:
 
     def seconds_until_ready(self) -> int:
         elapsed = time.monotonic() - self._last_call_ts
-        return max(0, int(AI_MIN_INTERVAL - elapsed))
+        return max(0, int(settings.ai_min_interval_s - elapsed))
 
     async def generate_proposal(
         self,
@@ -304,7 +300,7 @@ class AIStrategyAgent:
 
         n_candidates = sum(
             1 for s in symbols
-            if opps.get(s) and opps[s].score >= AI_MIN_SCORE
+            if opps.get(s) and opps[s].score >= settings.ai_min_score
         )
 
         market_snapshot  = _build_market_snapshot(symbols, states, opps, techs)
@@ -360,8 +356,8 @@ class AIStrategyAgent:
             log.info("AI Strategy: respuesta en %.1fs (%d chars)", elapsed, len(raw))
             
             # --- [NUEVO] CONTROL DE OBSOLESCENCIA ---
-            if elapsed > AI_MAX_LATENCY:
-                log.warning("AI Strategy: descartando propuesta por latencia alta (%.1fs > %.1fs). Precio desactualizado.", elapsed, AI_MAX_LATENCY)
+            if elapsed > settings.ai_max_latency_s:
+                log.warning("AI Strategy: descartando propuesta por latencia alta (%.1fs > %.1fs). Precio desactualizado.", elapsed, settings.ai_max_latency_s)
                 return None
 
         except asyncio.TimeoutError:

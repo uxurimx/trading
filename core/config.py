@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     ai_compat_key:      str  = ""
     ai_compat_model:    str  = ""   # ej: llama-3.1-8b-instant
 
+    # Agente IA — parámetros internos
+    ai_min_interval_s: int   = 60    # segundos mínimos entre llamadas
+    ai_top_symbols:    int   = 3     # cuántos candidatos enviar al agente
+    ai_min_score:      int   = 70    # score mínimo para ser candidato
+    ai_min_atr_pct:    float = 0.40  # ATR mínimo requerido (%)
+    ai_max_latency_s:  float = 45.0  # latencia máxima aceptable para la propuesta
+
     # Mercado — carga dinámica desde Bybit o fallback CSV manual
     # Si auto_load_symbols=True, se reemplaza al iniciar con los top-N por volumen.
     symbols: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"   # fallback mínimo

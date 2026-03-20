@@ -610,6 +610,42 @@ class SettingsView(Gtk.ScrolledWindow):
         self._ai_compat_box.append(compat_hint)
         box.append(self._ai_compat_box)
 
+        # ── Parámetros del Agente ───────────────────────────────────────────
+        box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        param_lbl = Gtk.Label(label="Parámetros del Agente")
+        param_lbl.set_xalign(0)
+        param_lbl.set_margin_start(8); param_lbl.set_margin_top(4)
+        _dim = Pango.AttrList()
+        _dim.insert(Pango.attr_size_new(10 * Pango.SCALE))
+        _dim.insert(Pango.attr_foreground_new(0x9a9a, 0x9999, 0x9696))
+        param_lbl.set_attributes(_dim)
+        box.append(param_lbl)
+
+        # AI Min Score
+        self._ai_score_sp = _spin(30, 95, settings.ai_min_score, 1, 0)
+        self._ai_score_sp.connect("value-changed", lambda sp: setattr(settings, "ai_min_score", int(sp.get_value())))
+        box.append(_row("Score mínimo candidatos", self._ai_score_sp, "Solo analiza monedas con score ≥ X"))
+
+        # AI Top Symbols
+        self._ai_top_sp = _spin(1, 12, settings.ai_top_symbols, 1, 0)
+        self._ai_top_sp.connect("value-changed", lambda sp: setattr(settings, "ai_top_symbols", int(sp.get_value())))
+        box.append(_row("Top candidatos a enviar", self._ai_top_sp, "Más símbolos = más contexto para la IA"))
+
+        # AI Min ATR %
+        self._ai_atr_sp = _spin(0.1, 5.0, settings.ai_min_atr_pct, 0.05, 2)
+        self._ai_atr_sp.connect("value-changed", lambda sp: setattr(settings, "ai_min_atr_pct", sp.get_value()))
+        box.append(_row("ATR % mínimo", self._ai_atr_sp, "Excluye monedas poco volátiles"))
+
+        # AI Max Latency
+        self._ai_lat_sp = _spin(10, 120, settings.ai_max_latency_s, 5, 0)
+        self._ai_lat_sp.connect("value-changed", lambda sp: setattr(settings, "ai_max_latency_s", sp.get_value()))
+        box.append(_row("Latencia máx. propuesta (s)", self._ai_lat_sp, "Descarta trades si la IA tardó mucho"))
+
+        # AI Min Interval
+        self._ai_int_sp = _spin(10, 600, settings.ai_min_interval_s, 10, 0)
+        self._ai_int_sp.connect("value-changed", lambda sp: setattr(settings, "ai_min_interval_s", int(sp.get_value())))
+        box.append(_row("Intervalo mín. entre llamadas (s)", self._ai_int_sp, "Evita gastos excesivos de API"))
+
         # Mostrar solo el panel del proveedor activo
         self._refresh_ai_panels()
 

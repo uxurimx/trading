@@ -808,10 +808,13 @@ class TradeController:
         tp      = trade.current_tp
         is_long = req.side == "Buy"
 
-        if entry <= 0 or tp <= 0 or sl <= 0:
+        # Referencia de TP para cálculos de progreso (aunque ya no exista el TP real)
+        tp_ref = (trade.request.tp_price if (trade.request and trade.request.tp_price > 0) else tp)
+        
+        if entry <= 0 or tp_ref <= 0 or sl <= 0:
             return
 
-        tp_dist = abs(tp - entry)
+        tp_dist = abs(tp_ref - entry)
         if tp_dist <= 0:
             return
 
