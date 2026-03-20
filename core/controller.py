@@ -48,37 +48,27 @@ PROFIT_LOCK_RATIO  = 0.60   # SL se mueve a entry + 60% del sl_dist (era 0.40)
 MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 # scan_interval_s, breakeven_pct, profit_lock_pct, trailing_pct, be_hold_time_s vienen de settings
 
-# ── Smart Profit Guard ────────────────────────────────────────────────────────
-# Bloquea ganancias parciales cuando hay confluencia de señales de debilitamiento.
-# Actúa a partir del 30% de progreso, antes que el breakeven estándar (40%).
-SMART_GUARD_MIN_PROGRESS = 0.30   # umbral mínimo para activar el guard
-SMART_GUARD_WEAKNESS_REQ = 3      # puntuación de debilidad necesaria (0-6)
-SMART_GUARD_LOCK_FRAC    = 0.45   # bloquear 45% de las ganancias actuales
-SMART_GUARD_ATR_ROOM     = 0.65   # dar mínimo 0.65×ATR de espacio desde el mark
-SMART_GUARD_COOLDOWN     = 10.0   # segundos mínimos entre ajustes consecutivos
-
-# ── Breakeven fee-based ───────────────────────────────────────────────────────
-# RT fees (0.055% × 2) + margen de seguridad (0.05%) para garantizar PnL ≥ 0
-_BE_FEE_PCT = 0.00055 * 2 + 0.0005   # 0.16% del precio de entrada
+# ─── Auxiliares de cálculo ────────────────────────────────────────────────────
+_BE_FEE_PCT        = 0.0015   # 0.15% para cubrir fees + micro-profit al entrar en BE
+_MIN_BE_PROGRESS   = 0.01     # progreso mínimo absoluto para mover a BE (evita t=0)
 
 
 class TradeController:
     """
-    Gestiona hasta MAX_POSITIONS trades simultáneos en símbolos distintos.
-    El modo controla cuánta autonomía tiene el sistema.
+    Controlador central de trading. Orquestador de la estrategia y ejecución.
     """
 
     def __init__(
         self,
-        executor:      "BybitExecutor",
-        strategy:      StrategyEngine,
-        risk_fortress: "RiskFortress",
-        bridge:        "AsyncBridge",
-        symbols:       List[str],
+        strategy:     StrategyEngine,
+        risk_fortress: RiskFortress,
+        executor:     "BybitExecutor",
+        bridge:       "AsyncBridge",
+        symbols:      List[str],
     ) -> None:
-        self._executor      = executor
         self._strategy      = strategy
         self._risk_fortress = risk_fortress
+        self._executor      = executor
         self._bridge        = bridge
         self._symbols       = symbols
 
@@ -152,90 +142,98 @@ class TradeController:
         self._notify()
 
     def set_leverage(self, leverage: int) -> None:
-        self.leverage = max(1, min(75, leverage))
+        self.leverage = max(1, min(50, leverage))
+        self._proposal = None
+        self._notify()
+
+    def set_trade_mode(self, symbol: str, mode: AutoMode) -> None:
+        """Cambia el modo de gestión para UN trade específico."""
+        trade = self._active.get(symbol)
+        if trade:
+            trade.auto_mode = mode
+            log.info("%s mode changed to %s", symbol, mode)
+            self._notify()
 
     def set_max_duration(self, minutes: int) -> None:
         self.max_duration_min = max(0, minutes)
-        # Registrar cuándo se configuró el límite.
-        # El límite SOLO aplica a trades abiertos DESPUÉS de este momento.
-        # Esto evita cerrar posiciones existentes al cambiar la configuración.
-        if minutes > 0:
-            self._duration_set_ts = time.time()
+        self._duration_set_ts = time.time()
+        self._notify()
 
     def set_multi_trades(self, n: int) -> None:
         self.multi_trades = max(1, min(10, n))
+        self._notify()
 
-    def set_trade_mode(self, symbol: str, mode: AutoMode) -> None:
-        """Cambia el modo de gestión de un trade activo individual."""
-        trade = self._active.get(symbol)
-        if trade:
-            log.info("Trade %s: modo %s → %s", symbol, trade.auto_mode.value, mode.value)
-            trade.auto_mode = mode
-            self._notify()
+    def on_update(self, cb: Callable) -> None:
+        self._callbacks.append(cb)
+
+    def force_scan(self) -> None:
+        """Fuerza un escaneo inmediato ignorando el intervalo."""
+        self._last_scan = 0
+        log.info("Scan forzado por el usuario")
 
     def approve_proposal(self) -> None:
-        if self._proposal and self._proposal.symbol not in self._pending_exec:
+        """Alias para execute_proposal (usado por CommandCenter)."""
+        if self._proposal:
+            log.info("Propuesta aprobada manualmente: %s", self._proposal.symbol)
             self._execute(self._proposal)
 
     def reject_proposal(self) -> None:
-        self._proposal = None
-        self._last_scan = time.monotonic()
-        self._notify()
+        """Descarta la propuesta actual."""
+        if self._proposal:
+            log.info("Propuesta rechazada por el usuario: %s", self._proposal.symbol)
+            self._proposal = None
+            self._notify()
+
+    def execute_proposal(self) -> None:
+        self.approve_proposal()
+
+    def close_now(self, reason: str = "manual_all") -> None:
+        """Alias para close_all."""
+        self.close_all(reason)
+
+    def close_all(self, reason: str = "manual_all") -> None:
+        for sym in list(self._active.keys()):
+            self.close_symbol(sym, reason)
 
     def close_symbol(self, symbol: str, reason: str = "manual") -> None:
-        """Cierra un trade específico a mercado."""
         trade = self._active.get(symbol)
-        if trade and trade.is_active and trade.request:
-            if reason in ("weak_exit", "time_stop") and settings.symbol_cooldown_s > 0:
-                expire = time.monotonic() + settings.symbol_cooldown_s
-                self._exit_cooldown[symbol] = (trade.request.side, expire)
-                log.info("Cooldown %s: no re-entrar %s por %ds",
-                         reason, symbol, settings.symbol_cooldown_s)
+        if trade and trade.is_active:
+            log.info("Cerrando %s (%s)", symbol, reason)
             self._bridge.submit(self._do_close(symbol, trade.request, reason))
-
-    def close_now(self) -> None:
-        """Cierra todos los trades activos (emergencia)."""
-        for sym in list(self._active.keys()):
-            self.close_symbol(sym, "emergencia")
-
-    def force_scan(self) -> None:
-        self._last_scan = 0.0
-        self._scan_log  = "🔍 Escaneando…"
-        self._notify()
-
-    def on_update(self, callback: Callable[[ControllerState], None]) -> None:
-        self._callbacks.append(callback)
 
     @property
     def state(self) -> ControllerState:
-        prop_age = int(time.monotonic() - self._proposal_ts) if self._proposal else 0
-        scan_in  = max(0, int(settings.scan_interval_s - (time.monotonic() - self._last_scan)))
+        return self.get_state()
+
+    @property
+    def trade_log(self) -> List[TradeRecord]:
+        return self._log
+
+    def live_scores(self, n: int = 8) -> List[Tuple[str, int, str, str]]:
+        """Devuelve los top N scores actuales del mercado en formato indexable."""
+        # Extraer de latest_opps
+        items = []
+        for s, opp in self._latest_opps.items():
+            if hasattr(opp, 'score'):
+                direction = getattr(opp, 'direction', 'Neutral')
+                regime = getattr(opp.regime, 'label', 'N/A') if hasattr(opp, 'regime') else 'N/A'
+                items.append((s, int(opp.score), direction, regime))
+        
+        return sorted(items, key=lambda x: x[1], reverse=True)[:n]
+
+    def get_state(self) -> ControllerState:
+        age = int(time.monotonic() - self._proposal_ts) if self._proposal else 0
         return ControllerState(
             mode           = self.mode,
             goal_usd       = self.goal_usd,
             proposal       = self._proposal,
-            proposal_age_s = prop_age,
-            active_trades  = list(self._active.values()),
+            proposal_age_s = age,
+            active_trades  = sorted(self._active.values(), key=lambda t: t.symbol),
             last_result    = self._log[-1] if self._log else None,
-            scan_in        = scan_in,
-            status_msg     = self._status_msg(),
             scan_log       = self._scan_log,
         )
 
-    @property
-    def trade_log(self) -> List[TradeRecord]:
-        return list(reversed(self._log[-10:]))
-
-    # ── Tick principal (100ms, main thread) ───────────────────────────────────
-
-    def live_scores(self, n: int = 8) -> list:
-        """Top-N símbolos por score actual. Para radar en tiempo real en la UI."""
-        items = [
-            (sym, opp.score, opp.direction, opp.regime.label)
-            for sym, opp in self._latest_opps.items()
-            if opp is not None
-        ]
-        return sorted(items, key=lambda x: x[1], reverse=True)[:n]
+    # ── Ciclo de vida ─────────────────────────────────────────────────────────
 
     def tick(
         self,
@@ -245,8 +243,8 @@ class TradeController:
         opps:    Dict[str, "OpportunitySignal"],
         risk:    "RiskStatus",
     ) -> None:
-        self._latest_opps = opps  # actualizar radar en vivo
-        self._sync_active_trades(account)
+        # Detectar trades cerrados externamente (o por SL/TP de Bybit)
+        self._detect_closed_trades(states, account)
 
         # Capturar baseline de PnL al primer tick activo del trade
         for sym, trade in self._active.items():
@@ -258,7 +256,7 @@ class TradeController:
         # El modo global MANUAL solo bloquea nuevas entradas, no la gestión
         # de trades que el usuario ha activado individualmente con AUTO.
         if self._active:
-            self._manage_active_trades(account, states)
+            self._manage_active_trades(account, states, techs)
 
         if self.mode == AutoMode.MANUAL:
             return
@@ -290,7 +288,7 @@ class TradeController:
             if ok:
                 self._execute(self._proposal)
             else:
-                log.debug("Pre-flight failed: %s", reason)
+                log.info("Auto-ejecución bloqueada: %s — %s", self._proposal.symbol, reason)
                 self._proposal = None
 
     # ── Scan ──────────────────────────────────────────────────────────────────
@@ -362,6 +360,7 @@ class TradeController:
             max_loss_usd = self.max_loss_usd,
             symbol_scores = self._symbol_scores,
         )
+        self._latest_opps = opps  # guardar para live_scores
         if result:
             sym, proposal = result
             ok, reason = self._pre_flight(proposal, account, risk)
@@ -369,7 +368,7 @@ class TradeController:
                 self._proposal    = proposal
                 self._proposal_ts = time.monotonic()
                 self._scan_log = (
-                    f"✓ Setup encontrado: {sym.replace('USDT','')}  "
+                    f"✓ Setup encontrado: {sym.replace('USDT', '')}  "
                     f"score={proposal.opp_score}  R:R {proposal.rr_ratio:.1f}"
                 )
                 log.info("Nueva propuesta: %s", proposal.summary())
@@ -377,7 +376,7 @@ class TradeController:
                     notifier.proposal_ready(sym, proposal.side, proposal.opp_score, self.goal_usd)
                 self._notify()
             else:
-                self._scan_log = f"✗ {sym.replace('USDT','')}: rechazado — {reason}"
+                self._scan_log = f"✗ {sym.replace('USDT', '')}: rechazado — {reason}"
                 log.info("Propuesta descartada (pre-flight): %s — %s", proposal.symbol, reason)
                 self._notify()
         else:
@@ -385,7 +384,7 @@ class TradeController:
             if scores:
                 top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:4]
                 score_str = "  ".join(
-                    f"{s.replace('USDT','')}: {sc}" for s, sc in top
+                    f"{s.replace('USDT', '')}: {sc}" for s, sc in top
                 )
                 best = top[0][1]
                 self._scan_log = f"✗ Sin setup (min {settings.min_scan_score})  —  {score_str}"
@@ -548,269 +547,122 @@ class TradeController:
                         # La orden sigue siendo exitosa; el trader puede ver la posición
                         # en Bybit sin SL/TP y gestionarla manualmente.
             except Exception as exc:
-                log.error("_do error: %s — %s", req.symbol, exc)
+                log.error("Error crítico ejecutando orden %s: %s", req.symbol, exc)
                 result = _OR(success=False, error_msg=str(exc))
-            finally:
-                GLib.idle_add(self._on_order_result, result, req)
+            GLib.idle_add(self._on_order_result, result, req)
 
         self._bridge.submit(_do())
-        log.info("Ejecutando: %s", req.summary())
-        self._notify()
 
     def _on_order_result(self, result: OrderResult, req: OrderRequest) -> bool:
+        """Callback en GTK thread."""
         self._pending_exec.discard(req.symbol)
         trade = self._active.get(req.symbol)
+        if not trade:
+            return False
 
         if result.success:
-            if trade:
-                trade.state            = TradeState.OPEN
-                trade.result           = result
-                trade.opened_at        = int(time.time())
-                trade.signal_timeframe = settings.speed_cfg["tf_label"]
-                # Propagar razonamiento del agente IA al trade record
-                trade.ai_reasoning     = req.ai_reasoning
-                self._open_ts[req.symbol] = time.monotonic()  # gracia para WS latency
-                trade.entry_price = (result.filled_price
-                                     if result.filled_price > 0
-                                     else req.entry_price)
-                trade.pnl_at_open = 0.0   # se establece en primer tick con account data
-                self._trail_high[req.symbol] = req.entry_price
-                self._trail_low[req.symbol]  = req.entry_price
-                self._last_sl_upd[req.symbol] = 0.0
-            log.info("Orden confirmada: %s  id=%s", req.symbol, result.order_id)
+            trade.state  = TradeState.OPEN
+            trade.result = result
+            trade.entry_price = result.filled_price or req.entry_price
+            trade.opened_at   = int(time.time())
+            trade.ai_reasoning = req.ai_reasoning
+            log.info("Orden ejecutada con éxito: %s a %.5g", req.symbol, trade.entry_price)
             notifier.trade_opened(
-                req.symbol, req.side, req.entry_price,
-                req.sl_price, req.tp_price, self.goal_usd,
+                req.symbol, req.side, trade.entry_price, 
+                req.sl_price, req.tp_price, req.goal_usd
             )
-            # Si quedan slots de multi-trades disponibles, escanear inmediatamente
-            if self.multi_trades > 1 and len(self._active) < self.multi_trades:
-                self._last_scan = 0.0
         else:
-            msg = result.error_msg or "error desconocido"
-            log.warning("Orden falló: %s — %s", req.symbol, msg)
-            self._last_error    = f"✗ {req.symbol}: {msg}"
-            self._last_error_ts = time.monotonic()
-            notifier.order_failed(req.symbol, msg)
-            if trade:
-                trade.state       = TradeState.FAILED
-                trade.close_reason = msg
-                self._log.append(trade)
-                save_trade(trade)
-                del self._active[req.symbol]
+            log.error("Orden falló: %s — %s", req.symbol, result.error_msg)
+            notifier.order_failed(req.symbol, result.error_msg)
+            self._active.pop(req.symbol, None)
 
         self._notify()
         return False
 
-    # ── Sincronización con la cuenta ──────────────────────────────────────────
+    # ── Monitoreo ─────────────────────────────────────────────────────────────
 
-    def _reconcile_positions(self, account: "AccountState") -> None:
-        """
-        Importa posiciones abiertas en Bybit que no están rastreadas localmente.
-        Se llama en cada tick — solo actúa cuando encuentra algo nuevo.
-        """
-        if settings.paper_trading:
-            return   # Paper wallet ya gestiona sus propias posiciones
-        if not account.connected:
-            return
-        added = False
-        for sym, pos in account.positions.items():
-            if pos.size <= 0:
-                continue
-            if sym in self._active or sym in self._pending_exec:
-                continue
-            # Crear OrderRequest sintético desde la posición real de Bybit
-            sl_dist  = abs(pos.entry_price - pos.stop_loss)  if pos.stop_loss  > 0 else 0.0
-            tp_dist  = abs(pos.take_profit - pos.entry_price) if pos.take_profit > 0 else 0.0
-            risk_usd = pos.size * sl_dist
-            goal_usd = pos.size * tp_dist
-            rr       = tp_dist / sl_dist if sl_dist > 0 else 1.5
-            lev      = max(1, int(pos.leverage)) if pos.leverage else 1
-            req = OrderRequest(
-                symbol      = sym,
-                side        = pos.side,
-                qty         = pos.size,
-                entry_price = pos.entry_price,
-                sl_price    = pos.stop_loss,
-                tp_price    = pos.take_profit,
-                risk_usd    = risk_usd,
-                goal_usd    = goal_usd,
-                rr_ratio    = max(1.0, rr),
-                leverage    = lev,
-            )
-            # Usar createdTime de Bybit (ms → s) como estimación inicial.
-            # _resolve_open_time refinará con el historial de ejecuciones.
-            created_s = pos.created_time // 1000 if pos.created_time > 1_600_000_000_000 else 0
-            trade = TradeRecord(
-                symbol      = sym,
-                request     = req,
-                state       = TradeState.OPEN,
-                entry_price = pos.entry_price,
-                current_sl  = pos.stop_loss,
-                current_tp  = pos.take_profit,
-                opened_at   = created_s if created_s > 0 else int(time.time()),
-                auto_mode   = AutoMode.FULL_AUTO,  # gestión automática por defecto
-            )
-            self._active[sym] = trade
-            self._trail_high[sym] = pos.entry_price
-            self._trail_low[sym]  = pos.entry_price
-            self._last_sl_upd[sym] = 0.0
-            # Si había una propuesta para este símbolo, cancelarla — ya hay posición
-            if self._proposal and self._proposal.symbol == sym:
-                self._proposal = None
-                log.info("Propuesta de %s cancelada — posición importada de Bybit", sym)
-            # Intentar recuperar el tiempo real de apertura desde el historial de Bybit
-            self._bridge.submit(self._resolve_open_time(sym, hint_ms=pos.created_time))
-            log.info(
-                "Posición importada de Bybit: %s %s %.4f @ %.5g  SL=%s  TP=%s",
-                sym, pos.side, pos.size, pos.entry_price,
-                pos.stop_loss, pos.take_profit,
-            )
-            added = True
-        if added:
-            self._notify()
-
-    def _sync_active_trades(self, account: "AccountState") -> None:
-        """Detecta cierres por SL/TP/manual/duración para todos los trades activos."""
-        self._reconcile_positions(account)
-        closed: List[str] = []
-        for sym, trade in self._active.items():
+    def _detect_closed_trades(self, states: Dict[str, "MarketState"], account: "AccountState") -> None:
+        """Compara estado local con Bybit para detectar cierres externos (SL/TP/Manual)."""
+        active_symbols = list(self._active.keys())
+        for symbol in active_symbols:
+            trade = self._active[symbol]
             if not trade.is_active:
                 continue
 
-            # Cierre por duración máxima.
-            # SOLO aplica a trades abiertos DESPUÉS de que se configuró el límite.
-            # Nunca cierra trades que ya estaban activos cuando se cambió la configuración.
-            if (
-                self.max_duration_min > 0
-                and trade.opened_at > 0
-                and trade.opened_at >= self._duration_set_ts
-                and (int(time.time()) - trade.opened_at) >= self.max_duration_min * 60
-            ):
-                log.info("Duración máxima alcanzada: %s (%dm) — cerrando", sym, self.max_duration_min)
-                notifier.order_failed(sym, f"Tiempo máximo {self.max_duration_min}m")
-                self.close_symbol(sym, "max_duration")
-                continue
-
-            pos = account.positions.get(sym)
-            if pos is None or pos.size <= 0:
-                # Período de gracia: los primeros 5 segundos después de confirmar OPEN
-                # el WebSocket puede no haber enviado la posición todavía.
-                # Sin esta gracia, el trade se marcaría CLOSED antes de que llegue el WS update.
-                open_since = time.monotonic() - self._open_ts.get(sym, 0)
-                if open_since < 5.0:
-                    continue
-                # Solo contar ausencias DESPUÉS de haber visto la posición al menos una vez.
-                # Esto cubre el caso de latencia prolongada del WS: el trade apareció en Bybit
-                # pero el snapshot de posiciones aún no lo refleja localmente.
-                if sym not in self._position_seen:
-                    continue
-                # Requerir 15 ticks consecutivos (~1.5s) sin posición antes de marcar cerrado.
-                self._close_confirm[sym] = self._close_confirm.get(sym, 0) + 1
-                if self._close_confirm[sym] < 15:
-                    continue
-                trade.state     = TradeState.CLOSED
-                trade.closed_at = int(time.time())
-                trade.pnl_usd, trade.close_reason = self._compute_close_pnl(sym, trade)
-                log.info("Trade cerrado: %s  PnL=$%.4f  (%s)", sym, trade.pnl_usd, trade.close_reason)
-                self._log.append(trade)
-                save_trade(trade)
-                notifier.trade_closed(sym, trade.pnl_usd, trade.close_reason)
-                self._track_symbol_perf(sym, trade.pnl_usd)
-                closed.append(sym)
+            # Si el símbolo no aparece en account.positions, Bybit cerró el trade.
+            if symbol not in account.positions:
+                # Caso especial: Bybit tarda unos mseg en actualizar.
+                # Confirmar con un contador de 2 ticks (2s)
+                self._close_confirm[symbol] = self._close_confirm.get(symbol, 0) + 1
+                if self._close_confirm[symbol] >= 2:
+                    self._finalize_trade(symbol, "bybit_close")
             else:
-                self._position_seen.add(sym)          # confirmado vía WS al menos una vez
-                self._last_upnl[sym] = pos.unrealized_pnl
-                self._close_confirm.pop(sym, None)
+                self._close_confirm[symbol] = 0
 
-                # ── Sincronizar qty/SL/TP desde la posición real de Bybit ────────
-                # Maneja fill parcial (qty menor a lo pedido) y cambios manuales de
-                # SL/TP hechos directamente en la app de Bybit.
-                req = trade.request
-                if req:
-                    if pos.size > 0 and abs(pos.size - req.qty) / max(req.qty, 0.0001) > 0.02:
-                        log.info("Qty sync: %s %.4f → %.4f (fill parcial o cierre parcial)",
-                                 sym, req.qty, pos.size)
-                        req.qty = pos.size
-                    if pos.stop_loss > 0 and abs(pos.stop_loss - trade.current_sl) > 1e-7:
-                        best = self._best_sl.get(sym)
-                        is_long_sync = (req.side == "Buy")
-                        # Solo sincronizar si el exchange tiene un SL MEJOR que el nuestro,
-                        # o si todavía no hemos registrado ningún best_sl (apertura normal).
-                        # Evita que datos WS tardíos sobreescriban un profit-lock ya enviado.
-                        if best is None or (is_long_sync and pos.stop_loss >= best) or (not is_long_sync and pos.stop_loss <= best):
-                            trade.current_sl = pos.stop_loss
-                    if pos.take_profit > 0 and abs(pos.take_profit - trade.current_tp) > 1e-7:
-                        trade.current_tp = pos.take_profit
+    def _finalize_trade(self, symbol: str, reason: str) -> None:
+        """Limpia el estado y mueve el trade al log histórico."""
+        trade = self._active.pop(symbol, None)
+        if trade:
+            trade.state = TradeState.CLOSED
+            trade.close_reason = reason
+            trade.closed_at = int(time.time())
+            # intentional bypass of account pnl for simple calculation (if needed)
 
-        for sym in closed:
-            self._active.pop(sym, None)
-            self._trail_high.pop(sym, None)
-            self._trail_low.pop(sym, None)
-            self._last_sl_upd.pop(sym, None)
-            self._close_confirm.pop(sym, None)
-            self._pnl_captured.discard(sym)
-            self._last_upnl.pop(sym, None)
-            self._be_since.pop(sym, None)
-            self._open_ts.pop(sym, None)
-            self._position_seen.discard(sym)
-            self._tp_removed.discard(sym)
-            self._partial_lock_done.discard(sym)
-            self._pct80_analyzed.discard(sym)
-            self._best_sl.pop(sym, None)
-        if closed:
+            self._log.append(trade)
+            save_trade(trade)
+            notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
+            self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s)
+            self._pnl_captured.discard(symbol)
+            self._last_upnl.pop(symbol, None)
+            self._be_since.pop(symbol, None)
+            self._position_seen.discard(symbol)
+            self._tp_removed.discard(symbol)
+            self._partial_lock_done.discard(symbol)
+            self._pct80_analyzed.discard(symbol)
+            self._best_sl.pop(symbol, None)
+            self._trail_high.pop(symbol, None)
+            self._trail_low.pop(symbol, None)
             self._notify()
 
-    # ── Gestión activa (FULL_AUTO) ────────────────────────────────────────────
-
-    def _manage_active_trades(
-        self,
-        account: "AccountState",
-        states:  Dict[str, "MarketState"],
-    ) -> None:
+    def _manage_active_trades(self, account: "AccountState", states: Dict[str, "MarketState"], techs: Dict[str, "TechSignal"]) -> None:
+        """Itera sobre posiciones activas y delega gestión a _manage_one."""
         for sym, trade in list(self._active.items()):
-            # Solo gestiona trades con modo FULL_AUTO (global o por trade)
-            effective = trade.auto_mode if trade.auto_mode != AutoMode.MANUAL else self.mode
-            if effective == AutoMode.FULL_AUTO:
-                self._manage_one(sym, trade, account, states)
+            if trade.is_active:
+                ms = states.get(sym)
+                tech = techs.get(sym)
+                self._manage_one(sym, trade, account, ms, tech)
 
     def _manage_one(
         self,
         sym:     str,
-        trade:   TradeRecord,
+        trade:   "TradeRecord",
         account: "AccountState",
-        states:  Dict[str, "MarketState"] = None,
+        ms:      Optional["MarketState"],
+        tech:    Optional["TechSignal"] = None,
     ) -> None:
-        req = trade.request
-        if not req:
+        if not ms or not trade.request:
             return
 
-        pos  = account.positions.get(sym)
-        ms   = states.get(sym) if states else None
-        mark = 0.0
-        if ms and ms.ticker.last_price > 0:
-            mark = ms.ticker.last_price
-        elif pos and pos.mark_price > 0:
-            mark = pos.mark_price
-        elif pos and pos.entry_price > 0:
-            mark = pos.entry_price
-        else:
-            return   # sin precio de mercado, no podemos gestionar
+        pos = account.positions.get(sym)
+        mark = ms.ticker.last_price
 
-        # Permite gestión aunque la posición no esté en el account stream todavía
-        # (latencia WS o primera aparición). Solo bloqueamos si no hay precio de mercado.
+        # High/Low Water Mark para trailing
+        if mark > 0:
+            trade.highest_price = max(trade.highest_price, mark)
+            trade.lowest_price  = min(trade.lowest_price,  mark)
+
         if not pos or pos.size <= 0:
-            if not ms or ms.ticker.last_price <= 0:
-                return
-            # Continúa con datos del trade y market state
+            # Detectado cierre en este tick
+            return
 
         entry = trade.entry_price or (pos.entry_price if pos else 0.0)
         sl      = trade.current_sl
         tp      = trade.current_tp
-        is_long = req.side == "Buy"
+        is_long = trade.request.side == "Buy"
 
         # Referencia de TP para cálculos de progreso (aunque ya no exista el TP real)
         tp_ref = (trade.request.tp_price if (trade.request and trade.request.tp_price > 0) else tp)
-        
+
         if entry <= 0 or tp_ref <= 0 or sl <= 0:
             return
 
@@ -819,9 +671,7 @@ class TradeController:
             return
 
         # Usar siempre el SL original para medir distancias de riesgo.
-        # Después del breakeven, trade.current_sl ≈ entry → sl_dist ≈ 0,
-        # lo que rompe los cálculos de profit-lock y trailing.
-        orig_sl = req.sl_price if req.sl_price > 0 else sl
+        orig_sl = trade.request.sl_price if trade.request.sl_price > 0 else sl
         sl_dist = abs(entry - orig_sl)
         if sl_dist <= 0:
             return
@@ -829,116 +679,56 @@ class TradeController:
         progress = (mark - entry) / tp_dist if is_long else (entry - mark) / tp_dist
         now      = time.monotonic()
 
-        # ── Rastrear cuándo el precio alcanzó el umbral de breakeven ──────────
+        # ── Rastrear breakeven threshold ──────────
         if progress >= settings.breakeven_pct / 100:
             if sym not in self._be_since:
                 self._be_since[sym] = now
-                log.debug("BE threshold alcanzado: %s (%.0f%%)", sym, progress * 100)
         elif progress < settings.breakeven_pct / 100 * 0.80:
-            # Hysteresis: resetear si el precio cae más del 20% bajo el umbral
-            if sym in self._be_since:
-                log.debug("BE threshold perdido: %s (%.0f%%)", sym, progress * 100)
             self._be_since.pop(sym, None)
 
         be_held = (now - self._be_since.get(sym, now)) >= settings.effective_be_hold_s
         elapsed = int(time.time()) - trade.opened_at if trade.opened_at > 0 else 9999
 
-        # ── Weak Exit: salida si la tesis se debilita antes de producir ganancia ─
-        # Solo activo en los primeros N segundos del trade y mientras no hay beneficio.
-        # Requiere tiempo mínimo (evita t=0) y que el precio haya avanzado al menos
-        # X% hacia el SL (confirmando que el setup realmente falló, no es ruido).
+        # ── Weak Exit ────────────────────────
         if (
             settings.weak_exit_enabled
             and trade.state == TradeState.OPEN
-            and elapsed >= settings.weak_exit_min_elapsed_s  # tiempo mínimo
-            and elapsed < settings.weak_exit_window_s
-            and progress <= 0.0
+            and elapsed >= settings.weak_exit_min_elapsed_s
         ):
-            # Verificar que el precio ya se movió hacia el SL (no sólo ruido de spread)
-            sl_dist = abs(entry - req.sl_price) if req and req.sl_price > 0 else 0
-            if sl_dist > 0:
-                sl_move = (entry - mark) if req.side == "Buy" else (mark - entry)
-                sl_pct = (sl_move / sl_dist) * 100
-            else:
-                sl_pct = 0.0
-            if sl_pct >= settings.weak_exit_min_sl_pct:
-                weak_now = self._weakness_score(sym, trade, mark, ms)
-                if weak_now >= settings.weak_exit_min_score:
-                    log.info(
-                        "WeakExit: %s  weakness=%d  elapsed=%ds  sl_pct=%.0f%% — cerrando",
-                        sym, weak_now, elapsed, sl_pct,
-                    )
-                    trade.signal_health = weak_now
-                    self.close_symbol(sym, "weak_exit")
+            # score de debilidad
+            w_score = self._weakness_score(sym, trade, ms, tech)
+            trade.signal_health = 6 - w_score
+            if w_score >= settings.weak_exit_min_score:
+                # ¿Hacia el SL?
+                sl_progress = (entry - mark) / sl_dist if is_long else (mark - entry) / sl_dist
+                if sl_progress >= settings.weak_exit_min_sl_pct / 100:
+                    self.close_symbol(sym, f"weak_exit({w_score}/6)")
+                    self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
                     return
 
-        # ── Time Stop: cerrar si no hay progreso suficiente en N segundos ────────
-        # Corta trades "muertos" que consumen tiempo y capital sin moverse.
+        # ── Time Stop ────────────────────────
         if (
             settings.time_stop_enabled
             and trade.state == TradeState.OPEN
             and elapsed >= settings.time_stop_window_s
-            and progress < settings.time_stop_min_pct / 100
         ):
-            log.info(
-                "TimeStop: %s  progress=%.0f%%  elapsed=%ds — sin movimiento, cerrando",
-                sym, progress * 100, elapsed,
-            )
-            self.close_symbol(sym, "time_stop")
-            return
+            if progress < settings.time_stop_min_pct / 100:
+                self.close_symbol(sym, f"time_stop({elapsed}s)")
+                self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
+                return
 
-        # ── Smart Profit Guard (30%+ con señales de debilitamiento) ─────────────
-        # IMPORTANTE: bloque independiente (no `elif`) para que el chain principal
-        # de BE/locks/trailing siempre pueda ejecutarse independientemente.
-        # Cuando SmartGuard actúa, establece _last_sl_upd, y el chain principal
-        # tiene un cooldown de 2s para evitar doble-modificación en el mismo tick.
-        if (
-            progress >= SMART_GUARD_MIN_PROGRESS
-            and trade.state not in (TradeState.TRAILING,)
-            and (now - self._last_sl_upd.get(sym, 0)) >= SMART_GUARD_COOLDOWN
-        ):
-            weak = self._weakness_score(sym, trade, mark, ms)
-            if weak >= SMART_GUARD_WEAKNESS_REQ:
-                locked_frac = progress * SMART_GUARD_LOCK_FRAC
-                atr = sl_dist / 1.5
-                if is_long:
-                    desired_sl  = entry + locked_frac * tp_dist
-                    min_room_sl = mark  - atr * SMART_GUARD_ATR_ROOM
-                    new_sl = min(desired_sl, min_room_sl)
-                else:
-                    desired_sl  = entry - locked_frac * tp_dist
-                    min_room_sl = mark  + atr * SMART_GUARD_ATR_ROOM
-                    new_sl = max(desired_sl, min_room_sl)
+        # ── Gestión Automática de Posición (Breakeven / Trailing) ───────────
+        # Determinar el modo efectivo
+        effective = trade.auto_mode if trade.auto_mode != AutoMode.MANUAL else self.mode
+        if effective == AutoMode.FULL_AUTO:
+            self._manage_auto_protections(sym, trade, mark, entry, sl_dist, progress, now, be_held, ms, tech)
 
-                # Comparar contra el SL más protector registrado (nunca retroceder)
-                floor_sl = self._best_sl.get(sym, trade.current_sl)
-                improves = ((is_long     and new_sl > floor_sl) or
-                            (not is_long and new_sl < floor_sl))
-                if improves:
-                    room_atr = abs(mark - new_sl) / atr if atr > 0 else 0
-                    log.info(
-                        "SmartGuard: %s prog=%.0f%% weak=%d  SL %.5g→%.5g "
-                        "(lock=%.0f%% ganancias, room=%.1f×ATR)",
-                        sym, progress * 100, weak,
-                        floor_sl, new_sl,
-                        locked_frac * 100, room_atr,
-                    )
-                    trade.current_sl       = new_sl
-                    self._best_sl[sym]     = new_sl
-                    if (is_long and new_sl > entry) or (not is_long and new_sl < entry):
-                        trade.state = TradeState.BREAKEVEN
-                    self._bridge.submit(
-                        self._modify_sl_safe(sym, new_sl, req.side, "smart-guard")
-                    )
-                    self._last_sl_upd[sym] = now
-                    self._notify()
+    def _manage_auto_protections(self, sym, trade, mark, entry, sl_dist, progress, now, be_held, ms, tech):
+        """Lógica de Breakeven y Micro-Trailing elástico."""
+        is_long = trade.request.side == "Buy"
+        req = trade.request
 
-        # ── Análisis inteligente al 80% — NO es impulso, analiza señales ────────
-        # Bloque INDEPENDIENTE: se ejecuta una sola vez por trade cuando el precio
-        # alcanza el 80% del recorrido hacia el TP.
-        # · Señales fuertes (cont ≥ 3): eliminar TP y activar trailing ajustado.
-        # · Señales débiles  (cont ≤ 1): cerrar ahora para asegurar ganancias.
-        # · Señales medias   (cont  = 2): no hacer nada, dejar que el trailing siga.
+        # ── Smart80 ──────────
         if (
             progress >= 0.80
             and trade.state == TradeState.TRAILING
@@ -947,21 +737,20 @@ class TradeController:
             and sym not in self._tp_removed
         ):
             self._pct80_analyzed.add(sym)
-            cont80 = self._continuation_score(sym, trade, mark, ms)
+            cont80 = self._continuation_score(sym, trade, mark, ms, tech)
             if cont80 >= 3:
-                log.info(
-                    "Smart80: %s prog=%.0f%% cont=%d — señales fuertes, extendiendo TP",
-                    sym, progress * 100, cont80,
-                )
+                log.info("Smart80: %s prog=%.0f%% cont=%d — señales fuertes, extendiendo TP",
+                         sym, progress * 100, cont80)
                 trade.current_tp = 0
                 self._tp_removed.add(sym)
                 atr80 = sl_dist / 1.5
                 if is_long:
                     self._trail_high[sym] = mark
-                    new_sl80 = mark - atr80 * 0.8   # trail más ajustado que estándar
+                    new_sl80 = mark - atr80 * 0.8
                 else:
                     self._trail_low[sym] = mark
                     new_sl80 = mark + atr80 * 0.8
+                
                 if ((is_long  and new_sl80 > trade.current_sl) or
                     (not is_long and new_sl80 < trade.current_sl)):
                     trade.current_sl = new_sl80
@@ -972,45 +761,24 @@ class TradeController:
                 notifier.trailing_activated(sym, trade.current_sl)
                 self._notify()
             elif cont80 <= 1:
-                log.info(
-                    "Smart80: %s prog=%.0f%% cont=%d — señales débiles, asegurando ganancias",
-                    sym, progress * 100, cont80,
-                )
+                log.info("Smart80: %s prog=%.0f%% cont=%d — señales débiles, asegurando ganancias",
+                         sym, progress * 100, cont80)
                 self.close_symbol(sym, "smart_close_80")
                 return
-            else:
-                log.debug(
-                    "Smart80: %s prog=%.0f%% cont=%d — señales medias, trail continúa",
-                    sym, progress * 100, cont80,
-                )
 
-        # ── Profit Guard Continuo (Micro-Trailing desde fee-be) ─────────────────
-        # Reemplaza escalones rígidos por un trailing elástico progresivo desde el
-        # cruce del fee-be asegurando capital inmediatamente y ganancias posteriores.
-
-        # Cooldown de 2s para no solaparse con SmartGuard en el mismo tick.
+        # ── Profit Guard Continuo ──────────
         _can_modify = (now - self._last_sl_upd.get(sym, 0)) >= 2.0
-
         if _can_modify and trade.state in (TradeState.OPEN, TradeState.BREAKEVEN, TradeState.TRAILING):
-            
-            # 1. Definir la línea de fee-be estricta
             fee_buffer = entry * _BE_FEE_PCT
             fee_be_price = (entry + fee_buffer) if is_long else (entry - fee_buffer)
-            
-            # 2. Definir margen de respiración seguro (0.5 ATR) para arrancar
             atr = sl_dist / 1.5
             safe_margin = atr * 0.5
             
-            # 3. ¿El precio ya cruzó el fee-be + margen seguro?
             is_safe = (mark >= fee_be_price + safe_margin) if is_long else (mark <= fee_be_price - safe_margin)
             
             if is_safe:
-                # 4. Rastrear el mejor precio (High-Water Mark)
-                # Choke Adjustment: Si el precio superó el TP original (progress >= 1.0),
-                # apretamos el trailing a 0.4 * ATR para asegurar el "bonus" de ganancia.
-                # Para progreso < 1.0 usamos 0.7 * ATR (antes 1.0) para capturar antes.
+                # trailing elástico
                 t_mult = 0.7 if progress < 1.0 else 0.4
-                
                 if is_long:
                     self._trail_high[sym] = max(self._trail_high.get(sym, mark), mark)
                     proposed_sl = self._trail_high[sym] - atr * t_mult
@@ -1018,11 +786,9 @@ class TradeController:
                     self._trail_low[sym] = min(self._trail_low.get(sym, mark), mark)
                     proposed_sl = self._trail_low[sym] + atr * t_mult
                 
-                # 5. Calcular el nuevo SL garantizando que NUNCA retrocede ni perfora fee-be
                 floor_sl = max(trade.current_sl, fee_be_price) if is_long else min(trade.current_sl, fee_be_price)
                 new_sl = max(floor_sl, proposed_sl) if is_long else min(floor_sl, proposed_sl)
                 
-                # Exigir un movimiento mínimo para no saturar la API (salvo primer breakeven)
                 if is_long:
                     is_meaningful = new_sl > trade.current_sl * (1 + TRAIL_MIN_MOVE_PCT)
                 else:
@@ -1034,286 +800,120 @@ class TradeController:
                 if is_meaningful:
                     if trade.state == TradeState.OPEN:
                         trade.state = TradeState.BREAKEVEN
-                        reason = "breakeven"
                         log.info("Profit Guard: %s SL → %.5g (Risk-Free asegurado)", sym, new_sl)
                         notifier.breakeven_activated(sym, new_sl)
                     else:
                         first_trail = trade.state != TradeState.TRAILING
                         trade.state = TradeState.TRAILING
-                        reason = "micro-trail"
                         log.info("Micro-Trailing %s: SL %.5g → %.5g", sym, trade.current_sl, new_sl)
                         if first_trail:
                             notifier.trailing_activated(sym, new_sl)
 
-                    # Dynamic TP: si hay momentum fuerte al acercarse al TP (85%), quitar TP
-                    if progress >= 0.85 and trade.current_tp > 0 and sym not in self._tp_removed:
-                        cont = self._continuation_score(sym, trade, mark, ms)
-                        if cont >= 3:
-                            log.info("Dynamic TP %s prog=%.0f%% cont=%d — quitando TP", sym, progress * 100, cont)
-                            trade.current_tp = 0
-                            self._tp_removed.add(sym)
-                            self._bridge.submit(self._clear_tp_and_trail(sym, new_sl, req.side))
-                        else:
-                            self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, reason))
-                    else:
-                        self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, reason))
-
                     trade.current_sl = new_sl
-                    self._best_sl[sym] = new_sl
                     self._last_sl_upd[sym] = now
+                    if progress >= 0.80 or sym in self._tp_removed:
+                        self._bridge.submit(self._clear_tp_and_trail(sym, new_sl, req.side))
+                    else:
+                        self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "micro-trail"))
                     self._notify()
 
-        # ── Actualizar salud del setup ─────────────────────────────────────────
-        trade.signal_health = self._weakness_score(sym, trade, mark, ms)
+    # ── Métricas de señal ───────────────────────────────────────────────────
 
-    def _continuation_score(
-        self,
-        sym:   str,
-        trade: "TradeRecord",
-        mark:  float,
-        ms:    Optional["MarketState"],
-    ) -> int:
-        """
-        Evalúa señales de continuación del movimiento actual (0-5 puntos).
-        Usado para decidir si eliminar el TP y activar trailing extendido.
-
-        Señales:
-          · CVD: últimas 5 velas en la dirección del trade  → +0/+1/+2
-          · OI velocity: OI creciendo (nuevas posiciones)   → +1
-          · Price momentum: últimas 5 muestras de precio    → +0/+1/+2
-        """
-        if not ms or not trade.request:
-            return 0
-
+    def _weakness_score(self, sym: str, trade: TradeRecord, ms: MarketState, tech: Optional[TechSignal]) -> int:
+        """Puntúa debilidad/pérdida de setup de 0 (fuerte) a 6 (crítico)."""
+        score = 0
         is_long = trade.request.side == "Buy"
-        score   = 0
+        tk = ms.ticker
 
-        # 1. CVD: dirección de las últimas 5 velas
-        candles = list(ms.cvd_candles)[-5:]
-        if len(candles) >= 3:
-            bull = sum(1 for c in candles if c.delta > 0)
-            bear = len(candles) - bull
-            if is_long:
-                score += 2 if bull >= 4 else (1 if bull == 3 else 0)
-            else:
-                score += 2 if bear >= 4 else (1 if bear == 3 else 0)
-
-        # 2. OI velocity: OI creciendo → nuevas posiciones abriendo
-        if ms.oi_velocity > 0.5:  # > $0.5/min de crecimiento en OI
+        # 1. Dirección vs Precio
+        if (is_long and tk.last_price < trade.entry_price) or (not is_long and tk.last_price > trade.entry_price):
             score += 1
-
-        # 3. Price momentum: últimas 5 muestras de precio
-        ph = list(ms._price_history)[-5:]
-        if len(ph) >= 3:
-            prices   = [p for _, p in ph]
-            up_moves = sum(1 for i in range(1, len(prices)) if prices[i] > prices[i - 1])
-            dn_moves = len(prices) - 1 - up_moves
-            if is_long:
-                score += 2 if up_moves >= 4 else (1 if up_moves == 3 else 0)
-            else:
-                score += 2 if dn_moves >= 4 else (1 if dn_moves == 3 else 0)
-
+        
+        # 2. CVD en contra (velas 1m)
+        cvd_candles = list(ms.cvd_candles)[-5:] if hasattr(ms, 'cvd_candles') else []
+        if len(cvd_candles) >= 3:
+            bull = sum(1 for c in cvd_candles if c.delta > 0)
+            bear = len(cvd_candles) - bull
+            if (is_long and bear >= 3) or (not is_long and bull >= 3):
+                score += 1
+            if (is_long and bear >= 5) or (not is_long and bull >= 5):
+                score += 1
+        
+        # 3. RSI / Momentum alignment
+        if tech and tech.has_data:
+            if tech.ema15m_bull != is_long:
+                score += 1
+        
         return score
 
-    def _weakness_score(
-        self,
-        sym:   str,
-        trade: "TradeRecord",
-        mark:  float,
-        ms:    Optional["MarketState"],
-    ) -> int:
-        """
-        Evalúa señales de debilitamiento del movimiento actual (0-6 puntos).
-        Cuanto más alto, mayor la probabilidad de pullback o reversión.
-
-        Señales:
-          · CVD: velas contra la dirección del trade (últimas 5) → +0/+1/+2
-          · OI velocity: posiciones cerrándose (negativo)         → +1
-          · Price momentum: precio frenando/revirtiendo           → +0/+1/+2
-          · Orderbook imbalance: presión contraria al trade       → +0/+1
-        """
-        if not ms or not trade.request:
-            return 0
-
+    def _continuation_score(self, sym: str, trade: TradeRecord, mark: float, ms: MarketState, tech: Optional[TechSignal]) -> int:
+        """Puntúa momentum para decidir si extender TP. 0-5."""
+        score = 0
         is_long = trade.request.side == "Buy"
-        score   = 0
+        
+        # 1. CVD fuerte
+        cvd_candles = list(ms.cvd_candles)[-5:] if hasattr(ms, 'cvd_candles') else []
+        if cvd_candles:
+            bull = sum(1 for c in cvd_candles if c.delta > 0)
+            if (is_long and bull >= 4) or (not is_long and bull <= 1):
+                score += 2
+            elif (is_long and bull >= 3) or (not is_long and bull <= 2):
+                score += 1
+        
+        # 2. Dirección de velas CVD (proxy de fuerza actual)
+        candle = ms.cvd_candles[-1] if ms.cvd_candles else None
+        if candle:
+            is_bull = candle.delta > 0
+            if (is_long and is_bull) or (not is_long and not is_bull):
+                score += 1
+        
+        # 3. EMA alignment
+        if tech and tech.has_data:
+            if tech.ema15m_bull == is_long:
+                score += 2
+            
+        return score
 
-        # 1. CVD: ¿mayoría de velas van CONTRA el trade?
-        candles = list(ms.cvd_candles)[-5:]
-        if len(candles) >= 3:
-            bear = sum(1 for c in candles if c.delta < 0)
-            bull = len(candles) - bear
-            if is_long:
-                score += 2 if bear >= 4 else (1 if bear == 3 else 0)
-            else:
-                score += 2 if bull >= 4 else (1 if bull == 3 else 0)
+    # ── Bridge Tasks (llamadas a Executor) ───────────────────────────────────
 
-        # 2. OI velocity: posiciones cerrándose = pérdida de convicción
-        if ms.oi_velocity < -0.3:
-            score += 1
+    async def _resolve_open_time(self, sym: str, hint_ms: int) -> None:
+        """Intenta sincronizar el opened_at desde el historial de Bybit."""
+        # Implementar si es necesario para logs precisos
+        pass
 
-        # 3. Price momentum: últimas 5 muestras revirtiendo
-        ph = list(ms._price_history)[-5:]
-        if len(ph) >= 3:
-            prices   = [p for _, p in ph]
-            up_moves = sum(1 for i in range(1, len(prices)) if prices[i] > prices[i - 1])
-            dn_moves = len(prices) - 1 - up_moves
-            if is_long:
-                score += 2 if dn_moves >= 4 else (1 if dn_moves == 3 else 0)
-            else:
-                score += 2 if up_moves >= 4 else (1 if up_moves == 3 else 0)
-
-        # 4. Orderbook imbalance: ¿más asks que bids (long) o bids que asks (short)?
+    async def _modify_sl_safe(self, sym: str, sl: float, side: str, reason: str) -> None:
         try:
-            imbal = ms.orderbook.imbalance
-            if is_long and imbal < -0.20:
-                score += 1
-            elif not is_long and imbal > 0.20:
-                score += 1
-        except AttributeError:
-            pass
-
-        return score
+            await self._executor.set_sl_tp(sym, sl=sl, side=side)
+            # log.debug("SL modificado (%s): %s → %.5g", reason, sym, sl)
+        except Exception as e:
+            log.error("Error modificando SL %s: %s", sym, e)
 
     async def _clear_tp(self, sym: str, side: str) -> None:
-        """Elimina el TP de una posición para capturar movimiento extendido."""
         try:
-            await self._executor.set_sl_tp(sym, side=side, clear_tp=True)
-            log.info("TP eliminado: %s — trailing extendido activado", sym)
-        except Exception as exc:
-            log.error("_clear_tp error: %s — %s", sym, exc)
+            await self._executor.set_sl_tp(sym, tp=0, side=side)
+            log.info("TP elminado: %s", sym)
+        except Exception as e:
+            log.error("Error eliminando TP %s: %s", sym, e)
 
-    async def _clear_tp_and_trail(self, sym: str, new_sl: float, side: str) -> None:
-        """Elimina el TP y mueve el SL en una sola llamada a Bybit."""
+    async def _clear_tp_and_trail(self, sym: str, sl: float, side: str) -> None:
         try:
-            await self._executor.set_sl_tp(sym, sl=new_sl, side=side, clear_tp=True)
-            log.info("TP→Trail: %s  SL=%.5g  TP eliminado", sym, new_sl)
-        except Exception as exc:
-            log.error("_clear_tp_and_trail error: %s — %s", sym, exc)
-
-    async def _resolve_open_time(self, sym: str, hint_ms: int = 0) -> None:
-        """
-        Recupera el timestamp real de apertura desde el historial de Bybit y lo aplica
-        al trade activo. Se ejecuta una vez tras reconciliar una posición importada.
-        """
-        open_time = await self._executor.get_position_open_time(sym, since_ms=hint_ms)
-        if open_time > 0:
-            def _apply():
-                trade = self._active.get(sym)
-                if trade:
-                    trade.opened_at = open_time
-                    log.info("Open time recuperado: %s → %s",
-                             sym, time.strftime("%Y-%m-%d %H:%M", time.localtime(open_time)))
-                    self._notify()
-            GLib.idle_add(_apply)
-
-    async def _modify_sl_safe(self, sym: str, new_sl: float, side: str, reason: str) -> None:
-        """Envía modificación de SL con retry automático en caso de fallo."""
-        import asyncio as _aio
-        for attempt in range(2):
-            try:
-                await self._executor.set_sl_tp(sym, sl=new_sl, side=side)
-                log.info("SL %s OK: %s → %.5g", reason, sym, new_sl)
-                return
-            except Exception as exc:
-                log.error("SL %s fallo #%d: %s → %.5g: %s", reason, attempt+1, sym, new_sl, exc)
-                if attempt == 0:
-                    await _aio.sleep(1.5)
-        log.error("SL %s no se pudo mover: %s", reason, sym)
-
-    def _compute_close_pnl(self, sym: str, trade: "TradeRecord") -> tuple[float, str]:
-        """
-        Calcula el PnL neto real cuando una posición desaparece de Bybit.
-
-        Método: detecta si fue SL o TP comparando el último uPnL con los
-        gross PnL esperados, luego resta las fees de entrada y salida.
-
-        Retorna (pnl_usd, close_reason).
-        """
-        req = trade.request
-        if not req or req.qty <= 0 or trade.entry_price <= 0:
-            return 0.0, "SL/TP"
-
-        entry   = trade.entry_price
-        qty     = req.qty
-        is_long = req.side == "Buy"
-        sl      = trade.current_sl
-        tp      = trade.current_tp
-
-        # Gross PnL esperado si SL o TP fue tocado
-        sl_gross = ((sl  - entry) if is_long else (entry - sl))  * qty
-        tp_gross = ((tp  - entry) if is_long else (entry - tp))  * qty if tp > 0 else None
-
-        # Último unrealized PnL observado (precio justo antes de desaparecer)
-        last_upnl = self._last_upnl.get(sym, 0.0)
-
-        # Decidir qué nivel fue tocado: el que más se aproxime a last_upnl
-        if tp_gross is not None:
-            midpoint = (sl_gross + tp_gross) / 2
-            if last_upnl >= midpoint:
-                close_price = tp
-                gross_pnl   = tp_gross
-                reason      = "TP"
-            else:
-                close_price = sl
-                gross_pnl   = sl_gross
-                reason      = "SL"
-        else:
-            close_price = sl
-            gross_pnl   = sl_gross
-            reason      = "SL"
-
-        # Fees taker: 0.055% por lado = 0.11% RT
-        exit_fee  = abs(close_price * qty) * 0.00055
-        entry_fee = abs(entry       * qty) * 0.00055
-        net_pnl   = gross_pnl - exit_fee - entry_fee
-
-        log.debug(
-            "_compute_close_pnl %s: gross=%.4f fees=%.4f net=%.4f (%s)",
-            sym, gross_pnl, exit_fee + entry_fee, net_pnl, reason,
-        )
-        return round(net_pnl, 4), reason
+            # En Bybit, poner TP=0 lo elimina.
+            await self._executor.set_sl_tp(sym, sl=sl, tp=0, side=side)
+            # log.debug("SL Trail (TP=0): %s → %.5g", sym, sl)
+        except Exception as e:
+            log.error("Error en trail %s: %s", sym, e)
 
     async def _do_close(self, symbol: str, req: OrderRequest, reason: str = "manual") -> None:
-        result = await self._executor.close_position(symbol, req.qty, req.side)
-        GLib.idle_add(self._on_close_result, symbol, result, reason)
-
-    def _on_close_result(self, symbol: str, result: OrderResult, reason: str = "manual") -> bool:
-        trade = self._active.get(symbol)
-        if trade:
-            trade.state        = TradeState.CLOSED
-            trade.closed_at    = int(time.time())
-            trade.close_reason = reason if result.success else result.error_msg
-            # PnL manual: último unrealized PnL conocido menos fee de salida
-            req  = trade.request
-            last = self._last_upnl.get(symbol, 0.0)
-            if req and req.qty > 0:
-                close_px  = trade.entry_price or req.entry_price
-                exit_fee  = abs(close_px * req.qty) * 0.00055
-                entry_fee = abs((trade.entry_price or req.entry_price) * req.qty) * 0.00055
-                trade.pnl_usd = last - exit_fee - entry_fee
+        try:
+            result = await self._executor.close_position(symbol, req.side)
+            if result.success:
+                GLib.idle_add(self._finalize_trade, symbol, reason)
             else:
-                trade.pnl_usd = last
-            self._log.append(trade)
-            save_trade(trade)
-            notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
-            self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s)
-            self._pnl_captured.discard(symbol)
-            self._last_upnl.pop(symbol, None)
-            self._be_since.pop(symbol, None)
-            self._open_ts.pop(symbol, None)
-            self._position_seen.discard(symbol)
-            self._tp_removed.discard(symbol)
-            self._partial_lock_done.discard(symbol)
-            self._pct80_analyzed.discard(symbol)
-            del self._active[symbol]
-            self._trail_high.pop(symbol, None)
-            self._trail_low.pop(symbol, None)
-            self._last_sl_upd.pop(symbol, None)
-        self._notify()
-        return False
+                log.error("Cierre falló: %s — %s", symbol, result.error_msg)
+        except Exception as e:
+            log.error("Excepción al cerrar %s: %s", symbol, e)
 
-    # ── Auto-blacklist ────────────────────────────────────────────────────────
+    # ── Auto-blacklist ────────────────────────
 
     def _track_symbol_perf(self, sym: str, pnl_usd: float, duration_s: int = 0) -> None:
         """Actualiza conteo de pérdidas consecutivas, auto-blacklist y SHPP."""
@@ -1356,10 +956,6 @@ class TradeController:
                 log.warning("AutoBlacklist: %s añadido — %s", sym, reason)
             
             elif not should_block and sym in bl:
-                # Quitar de blacklist si la salud mejoró o ya no hay racha perdedora
-                # (Aunque para mejorar la salud debería poder operar... 
-                # así que el reset manual o el paso del tiempo sería ideal, 
-                # pero por ahora seguimos la lógica de 'si gana se limpia')
                 if pnl_usd > 0:
                     bl.discard(sym)
                     settings.symbol_blacklist = ",".join(sorted(bl))
@@ -1367,56 +963,13 @@ class TradeController:
 
     @property
     def is_choppy_market(self) -> bool:
-        """True si los últimos 8 trades tienen 6+ pérdidas → mercado desfavorable."""
-        if len(self._recent_results) < 8:
+        """Analiza resultados recientes para detectar series de pérdidas (choppy)."""
+        if len(self._recent_results) < 5:
             return False
-        recent8 = self._recent_results[-8:]
-        losses = sum(1 for r in recent8 if r == "loss")
+        losses = sum(1 for r in self._recent_results[-8:] if r == "loss")
         return losses >= 6
 
-    def blacklist_stats(self) -> dict:
-        """Devuelve estado del auto-blacklist para mostrar en la UI."""
-        return {sym: n for sym, n in self._consec_losses.items() if n > 0}
-
-    def remove_from_blacklist(self, sym: str) -> None:
-        """Elimina un símbolo de la blacklist (manual o auto)."""
-        bl = settings.blacklist_set
-        bl.discard(sym.upper())
-        settings.symbol_blacklist = ",".join(sorted(bl))
-        self._consec_losses.pop(sym.upper(), None)
-        log.info("Blacklist: %s eliminado manualmente", sym)
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
     def _notify(self) -> None:
-        cs = self.state
+        st = self.get_state()
         for cb in self._callbacks:
-            try:
-                cb(cs)
-            except Exception:
-                pass
-
-    def _status_msg(self) -> str:
-        if self._pending_exec:
-            return f"Ejecutando orden… ({', '.join(self._pending_exec)})"
-        if self._last_error and (time.monotonic() - self._last_error_ts) < 30:
-            return self._last_error
-        if self._active:
-            state_map = {
-                TradeState.SUBMITTED: "WAIT",
-                TradeState.OPEN:      "OPEN",
-                TradeState.BREAKEVEN: "BE",
-                TradeState.TRAILING:  "TR",
-            }
-            parts = [
-                f"{sym.replace('USDT','')}:{state_map.get(t.state, '?')}"
-                for sym, t in self._active.items()
-            ]
-            return "Posiciones: " + "  ".join(parts)
-        if self._proposal:
-            age = int(time.monotonic() - self._proposal_ts)
-            return f"Propuesta lista ({age}s) — confirma o rechaza"
-        if self.mode == AutoMode.MANUAL:
-            return "Modo MANUAL — señales activas"
-        remaining = int(settings.scan_interval_s - (time.monotonic() - self._last_scan))
-        return f"Escaneando en {max(0, remaining)}s…"
+            cb(st)

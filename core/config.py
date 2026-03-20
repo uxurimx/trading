@@ -147,6 +147,71 @@ class Settings(BaseSettings):
     partial_lock_at_pct:  float = 50.0  # % de progreso al TP para activar
     partial_lock_frac:    float = 0.55  # SL = entry ± sl_dist × frac (bloquea 55% del riesgo)
 
+    # Flag interno para evitar guardar durante la carga inicial de Pydantic
+    _initialized: bool = False
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Forzamos inicialización manual del flag privado en Pydantic v2
+        object.__setattr__(self, "_initialized", True)
+
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if getattr(self, "_initialized", False) and not name.startswith("_"):
+            self.save()
+
+    def save(self) -> None:
+        """Guarda la configuración actual en el archivo .env preservando comentarios."""
+        import os
+        env_path = ".env"
+        # Exportar datos (campos privados se excluyen por defecto en Pydantic v2)
+        current_data = self.model_dump()
+        
+        lines = []
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except: pass
+        
+        new_lines = []
+        seen_keys = set()
+        
+        # 1. Actualizar líneas existentes y preservar comentarios
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                new_lines.append(line)
+                continue
+            
+            if "=" in stripped:
+                key = stripped.split("=")[0].upper()
+                field_name = key.lower()
+                if field_name in current_data:
+                    val = current_data[field_name]
+                    if isinstance(val, bool): val = str(val).lower()
+                    new_lines.append(f"{key}={val}\n")
+                    seen_keys.add(field_name)
+                else:
+                    new_lines.append(line)
+            else:
+                new_lines.append(line)
+        
+        # 2. Añadir campos nuevos que no estaban en el .env original
+        for field, val in current_data.items():
+            if field not in seen_keys:
+                key = field.upper()
+                if isinstance(val, bool): val = str(val).lower()
+                new_lines.append(f"{key}={val}\n")
+        
+        try:
+            # Escribir de forma atómica si es posible (simple write aquí)
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+        except Exception as e:
+            # Usar print o logging directo para evitar ciclos
+            print(f"Settings: error al persistir .env: {e}")
+
     @property
     def speed_cfg(self) -> Dict[str, Any]:
         return SPEED_CONFIGS.get(self.speed_level, SPEED_CONFIGS["standard"])

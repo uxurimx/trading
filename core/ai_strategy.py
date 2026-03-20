@@ -37,7 +37,7 @@ TAKER_FEE_RATE   = 0.00055   # 0.055% por lado (0.11% round-trip)
 
 # ─── Prompt del sistema (CORREGIDO) ──────────────────────────────────────────
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT_TEMPLATE = """\
 Eres un trader experto en futuros perpetuos de criptomonedas (Bybit).
 Tu trabajo es SELECCIONAR EL MEJOR TRADE del lote de candidatos, no buscar excusas para rechazar.
 
@@ -58,15 +58,15 @@ Tu trabajo es SELECCIONAR EL MEJOR TRADE del lote de candidatos, no buscar excus
 
 ═══ SL / TP — cálculo ═══
   Fees round-trip = 0.11% × entry (ya provistos como rt_fees en cada candidato).
-  R:R neto = (TP_dist − rt_fees) / (SL_dist + rt_fees) ≥ 2.0
+  R:R neto = (TP_dist − rt_fees) / (SL_dist + rt_fees) ≥ {min_rr}
 
   Orden de preferencia para SL/TP:
     1. Usa el nivel S (soporte) o R (resistencia) más cercano del candidato.
     2. Si no hay S/R útil: SL = 1.5×ATR, TP = 4.0×ATR desde entry.
-       (Con ATR ≥ 0.4% esto garantiza R:R ≥ 2.0 después de fees.)
+       (Con ATR ≥ 0.4% esto garantiza R:R ≥ {min_rr} después de fees.)
 
   ▶ Siempre verifica la fórmula R:R antes de responder.
-  ▶ Si el nivel S/R más cercano no da R:R ≥ 2.0, usa 4×ATR como TP.
+  ▶ Si el nivel S/R más cercano no da R:R neto ≥ {min_rr}, usa 4×ATR como TP.
 
 ═══ PROCESO obligatorio ═══
   1. Ordena los candidatos por score (mayor primero).
@@ -74,17 +74,17 @@ Tu trabajo es SELECCIONAR EL MEJOR TRADE del lote de candidatos, no buscar excus
      a. Confirma dirección vs tendencia.
      b. Verifica CVD con la regla de mayoría.
      c. Calcula SL y TP (usa S/R o ATR×multiplicador).
-     d. Calcula R:R neto. Si ≥ 2.0 → TRADE. Detén el análisis.
-  3. Solo retorna NO_TRADE si TODOS los candidatos tienen R:R neto < 2.0
+     d. Calcula R:R neto. Si ≥ {min_rr} → TRADE. Detén el análisis.
+  3. Solo retorna NO_TRADE si TODOS los candidatos tienen R:R neto < {min_rr}
      O si la dirección va contra la tendencia fuerte.
 
 ═══ RESPUESTA: solo JSON válido, sin texto, sin markdown ═══
 
 Si hay trade:
-{"action":"TRADE","symbol":"SOLUSDT","side":"Buy","entry":145.50,"sl":143.80,"tp":150.90,"confidence":79,"reasoning":"SOL score=73, ALCISTA 68%, CVD=4/5 bull (alineado LONG), EMA↑. SL=1.5×ATR(1.13)=143.80, TP en resistencia 150.90. rt_fees=0.16. R:R=(5.40-0.16)/(1.70+0.16)=5.24/1.86=2.82"}
+{{"action":"TRADE","symbol":"SOLUSDT","side":"Buy","entry":145.50,"sl":143.80,"tp":150.90,"confidence":79,"reasoning":"SOL score=73, ALCISTA 68%, CVD=4/5 bull (alineado LONG), EMA↑. SL=1.5×ATR(1.13)=143.80, TP en resistencia 150.90. rt_fees=0.16. R:R=(5.40-0.16)/(1.70+0.16)=5.24/1.86=2.82"}}
 
 Si ninguno califica:
-{"action":"NO_TRADE","reasoning":"Candidato A: dir LONG vs tendencia BAJISTA fuerte. Candidato B: CVD=1/5 bull en LONG (no alineado). Candidato C: R:R neto=1.8 (insuficiente incluso con TP en resistencia R=X)."}
+{{"action":"NO_TRADE","reasoning":"Candidato A: dir LONG vs tendencia BAJISTA fuerte. Candidato B: CVD=1/5 bull en LONG (no alineado). Candidato C: R:R neto=1.8 (insuficiente incluso con TP en resistencia R=X)."}}
 """
 
 
@@ -123,7 +123,7 @@ def _build_market_snapshot(
     if not top:
         return (
             f"=== SIN CANDIDATOS VÁLIDOS ===\n"
-            f"(score ≥ {settings.ai_min_score} Y ATR ≥ {settings.ai_min_atr_pct}%)\n"
+            f"(score ≥ {settings.ai_min_score} Y ATR ≥ {settings.ai_min_atr_pct}% Y R:R ≥ {settings.min_rr})\n"
             "Mercado en baja volatilidad — esperar condiciones mejores."
         )
 
@@ -184,7 +184,7 @@ def _build_market_snapshot(
             f"\n  trend={opp.trend_direction}({opp.trend_score}%)  régimen={opp.regime.label}"
             f"\n  {cvd_str}{oi_str}  {ema_str}  {sr_str}"
             f"\n  RefSL≈{sl_ref:.6g} RefTP≈{tp_ref:.6g} → R:R_ref={rr_ref:.2f}"
-            f"  {'✓ VIABLE' if rr_ref >= 2.0 else '⚠ usar S/R para mejorar TP'}"
+            f"  {'✓ VIABLE' if rr_ref >= settings.min_rr else '⚠ usar S/R para mejorar TP'}"
         )
 
     return "\n".join(lines)
@@ -323,7 +323,7 @@ class AIStrategyAgent:
             "Evalúa candidatos de mayor a menor score.\n"
             "CVD LONG alineado: ≥ 3/5 bull.  CVD SHORT alineado: ≤ 2/5 bull (= ≥ 3/5 bear).\n"
             "Para SL/TP: usa niveles S/R si están disponibles; si no, usa RefSL y RefTP del candidato.\n"
-            "Si RefTP no da R:R ≥ 2.0, busca el nivel S/R más lejano que sí lo dé.\n"
+            f"Si RefTP no da R:R ≥ {settings.min_rr}, busca el nivel S/R más lejano que sí lo dé.\n"
             "Un score ≥ 60 con dirección coherente y CVD mayoritariamente alineado ES suficiente.\n"
             f"Responde SOLO con el JSON.{json_reminder}"
         )
@@ -337,7 +337,7 @@ class AIStrategyAgent:
         create_kwargs: dict = dict(
             model    = model,
             messages = [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": _SYSTEM_PROMPT_TEMPLATE.format(min_rr=settings.min_rr)},
                 {"role": "user",   "content": user_prompt},
             ],
             temperature = 0.15,
@@ -443,7 +443,7 @@ class AIStrategyAgent:
                 log.error("AI Strategy: SHORT pero TP(%.5g) >= entry(%.5g)", tp, entry)
                 return None
 
-        # ── Validar R:R neto ≥ 2.0 ────────────────────────────────────────
+        # ── Validar R:R neto ≥ settings.min_rr ────────────────────────────────────────
         sl_dist = abs(entry - sl)
         tp_dist = abs(tp    - entry)
         rt_fees = entry * TAKER_FEE_RATE * 2
@@ -455,12 +455,9 @@ class AIStrategyAgent:
             return None
 
         rr = net_tp / net_sl
-        if rr < 2.0:
-            log.warning(
-                "AI Strategy: R:R neto %.2f < 2.0 — rechazando "
-                "(entry=%.5g sl=%.5g tp=%.5g)",
-                rr, entry, sl, tp,
-            )
+        if rr < settings.min_rr:
+            log.warning("AI: %s rechazado por R:R insuficiente (%.2f < %.1f)", 
+                        symbol, rr, settings.min_rr)
             return None
 
         # ── Sizing ─────────────────────────────────────────────────────────
