@@ -62,11 +62,22 @@ class Settings(BaseSettings):
     bybit_testnet: bool = False
 
     # ── AI Strategy Agent ──────────────────────────────────────────────────────
-    # Cuando ai_strategy_mode=True, el agente de OpenAI genera las estrategias
-    # en tiempo real analizando todos los datos del mercado.
+    # Cuando ai_strategy_mode=True, el agente IA genera las estrategias en tiempo real.
     ai_strategy_mode:   bool = False
+    ai_provider:        str  = "openai"   # "openai" | "ollama" | "compatible"
+
+    # OpenAI (proveedor por defecto)
     openai_api_key:     str  = ""
     openai_model:       str  = "gpt-4o"   # "gpt-4o" | "gpt-4o-mini" | "o3-mini"
+
+    # Ollama — LLM local
+    ollama_host:        str  = "http://localhost:11434"
+    ollama_model:       str  = "llama3.2"
+
+    # Compatible OpenAI (Groq, Together, Mistral, Perplexity, etc.)
+    ai_compat_url:      str  = ""   # ej: https://api.groq.com/openai/v1
+    ai_compat_key:      str  = ""
+    ai_compat_model:    str  = ""   # ej: llama-3.1-8b-instant
 
     # Mercado — carga dinámica desde Bybit o fallback CSV manual
     # Si auto_load_symbols=True, se reemplaza al iniciar con los top-N por volumen.

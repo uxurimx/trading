@@ -438,10 +438,10 @@ class SettingsView(Gtk.ScrolledWindow):
 
         box.append(_sep())
 
-        # ── Agente IA (OpenAI) ───────────────────────────────────────────────
+        # ── Agente IA (multi-proveedor) ──────────────────────────────────────
         box.append(_section("AGENTE IA · ESTRATEGIA EN TIEMPO REAL"))
 
-        # Toggle principal
+        # Toggle + hint
         ai_sw = Gtk.Switch()
         ai_sw.set_active(settings.ai_strategy_mode)
         ai_sw.set_valign(Gtk.Align.CENTER)
@@ -457,15 +457,31 @@ class SettingsView(Gtk.ScrolledWindow):
         ai_lbl = Gtk.Label(label="Estrategia por Agente IA")
         ai_lbl.set_xalign(0)
         ai_lbl.set_size_request(220, -1)
-        attrs2 = Pango.AttrList()
-        attrs2.insert(Pango.attr_weight_new(Pango.Weight.SEMIBOLD))
-        ai_lbl.set_attributes(attrs2)
+        _bold = Pango.AttrList()
+        _bold.insert(Pango.attr_weight_new(Pango.Weight.SEMIBOLD))
+        ai_lbl.set_attributes(_bold)
         ai_mode_row.append(ai_lbl)
         ai_mode_row.append(ai_sw)
         ai_mode_row.append(self._ai_hint)
         box.append(ai_mode_row)
 
-        # API Key de OpenAI
+        # ── Selector de proveedor ────────────────────────────────────────────
+        _PROVIDERS     = ("openai", "ollama", "compatible")
+        _PROVIDER_LBLS = ("OpenAI",  "Ollama (local)",  "Compatible OpenAI")
+        self._ai_provider_combo = Gtk.ComboBoxText()
+        for lbl in _PROVIDER_LBLS:
+            self._ai_provider_combo.append_text(lbl)
+        cur_prov = getattr(settings, "ai_provider", "openai")
+        self._ai_provider_combo.set_active(
+            _PROVIDERS.index(cur_prov) if cur_prov in _PROVIDERS else 0
+        )
+        self._ai_provider_combo.connect("changed", self._on_ai_provider_changed)
+        box.append(_row("Proveedor IA", self._ai_provider_combo))
+
+        # ── Panel OpenAI ─────────────────────────────────────────────────────
+        self._ai_openai_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # API Key
         ai_key_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         ai_key_row.set_margin_start(8); ai_key_row.set_margin_end(8)
         ai_key_row.set_margin_top(2);   ai_key_row.set_margin_bottom(2)
@@ -473,42 +489,125 @@ class SettingsView(Gtk.ScrolledWindow):
         ai_key_lbl.set_xalign(0)
         ai_key_lbl.set_size_request(220, -1)
         ai_key_row.append(ai_key_lbl)
-
         self._ai_key_entry = Gtk.Entry()
-        self._ai_key_entry.set_visibility(False)          # ocultar como password
+        self._ai_key_entry.set_visibility(False)
         self._ai_key_entry.set_placeholder_text("sk-…")
         self._ai_key_entry.set_hexpand(True)
         if settings.openai_api_key:
             self._ai_key_entry.set_text(settings.openai_api_key)
         self._ai_key_entry.connect("changed", self._on_ai_key_changed)
         ai_key_row.append(self._ai_key_entry)
-
-        # Botón mostrar/ocultar
         self._ai_key_vis_btn = Gtk.Button(label="👁")
         self._ai_key_vis_btn.set_size_request(34, -1)
         self._ai_key_vis_btn.connect("clicked", self._on_ai_key_vis)
         ai_key_row.append(self._ai_key_vis_btn)
-        box.append(ai_key_row)
+        self._ai_openai_box.append(ai_key_row)
 
-        # Estado de la API Key
         self._ai_key_status = Gtk.Label()
         self._ai_key_status.set_xalign(0)
         self._ai_key_status.set_margin_start(12)
         self._ai_key_status.set_margin_bottom(4)
         self._update_ai_key_status()
-        box.append(self._ai_key_status)
+        self._ai_openai_box.append(self._ai_key_status)
 
-        # Modelo de OpenAI
+        # Modelo OpenAI
+        _OAI_MODELS = ("gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-4-turbo")
         ai_model_combo = Gtk.ComboBoxText()
-        for m in ("gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-4-turbo"):
+        for m in _OAI_MODELS:
             ai_model_combo.append_text(m)
-        models = ("gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-4-turbo")
         cur_model = getattr(settings, "openai_model", "gpt-4o")
-        ai_model_combo.set_active(models.index(cur_model) if cur_model in models else 0)
+        ai_model_combo.set_active(_OAI_MODELS.index(cur_model) if cur_model in _OAI_MODELS else 0)
         ai_model_combo.connect("changed", self._on_ai_model_changed)
-        box.append(_row("Modelo OpenAI", ai_model_combo, "Recomendado: gpt-4o"))
+        self._ai_openai_box.append(_row("Modelo OpenAI", ai_model_combo, "Recomendado: gpt-4o"))
+        box.append(self._ai_openai_box)
 
-        # Descripción
+        # ── Panel Ollama ─────────────────────────────────────────────────────
+        self._ai_ollama_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        self._ollama_host_entry = Gtk.Entry()
+        self._ollama_host_entry.set_hexpand(True)
+        self._ollama_host_entry.set_placeholder_text("http://localhost:11434")
+        self._ollama_host_entry.set_text(getattr(settings, "ollama_host", "http://localhost:11434"))
+        self._ollama_host_entry.connect("changed", self._on_ollama_host_changed)
+        self._ai_ollama_box.append(_row("Host Ollama", self._ollama_host_entry, "URL del servidor"))
+
+        self._ollama_model_entry = Gtk.Entry()
+        self._ollama_model_entry.set_hexpand(True)
+        self._ollama_model_entry.set_placeholder_text("llama3.2  /  mistral  /  qwen2.5:14b")
+        self._ollama_model_entry.set_text(getattr(settings, "ollama_model", "llama3.2"))
+        self._ollama_model_entry.connect("changed", self._on_ollama_model_changed)
+        self._ai_ollama_box.append(_row("Modelo Ollama", self._ollama_model_entry, "nombre del modelo instalado"))
+
+        # Sugerencias de modelos populares
+        ollama_hint = Gtk.Label()
+        ollama_hint.set_xalign(0)
+        ollama_hint.set_margin_start(12)
+        ollama_hint.set_margin_bottom(4)
+        ollama_hint.set_markup(
+            '<span foreground="#9a9996" size="small">'
+            'Modelos recomendados: llama3.2 · mistral · qwen2.5:14b · deepseek-r1:8b\n'
+            'Instalar con: <tt>ollama pull llama3.2</tt>'
+            '</span>'
+        )
+        self._ai_ollama_box.append(ollama_hint)
+        box.append(self._ai_ollama_box)
+
+        # ── Panel Compatible OpenAI ──────────────────────────────────────────
+        self._ai_compat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        self._compat_url_entry = Gtk.Entry()
+        self._compat_url_entry.set_hexpand(True)
+        self._compat_url_entry.set_placeholder_text("https://api.groq.com/openai/v1")
+        self._compat_url_entry.set_text(getattr(settings, "ai_compat_url", ""))
+        self._compat_url_entry.connect("changed", self._on_compat_url_changed)
+        self._ai_compat_box.append(_row("Base URL", self._compat_url_entry, "endpoint del proveedor"))
+
+        compat_key_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        compat_key_row.set_margin_start(8); compat_key_row.set_margin_end(8)
+        compat_key_row.set_margin_top(2);   compat_key_row.set_margin_bottom(2)
+        compat_key_lbl = Gtk.Label(label="API Key")
+        compat_key_lbl.set_xalign(0)
+        compat_key_lbl.set_size_request(220, -1)
+        compat_key_row.append(compat_key_lbl)
+        self._compat_key_entry = Gtk.Entry()
+        self._compat_key_entry.set_visibility(False)
+        self._compat_key_entry.set_hexpand(True)
+        self._compat_key_entry.set_text(getattr(settings, "ai_compat_key", ""))
+        self._compat_key_entry.connect("changed", self._on_compat_key_changed)
+        compat_key_row.append(self._compat_key_entry)
+        compat_key_vis = Gtk.Button(label="👁")
+        compat_key_vis.set_size_request(34, -1)
+        compat_key_vis.connect("clicked", lambda b: (
+            self._compat_key_entry.set_visibility(not self._compat_key_entry.get_visibility()),
+            b.set_label("🙈" if self._compat_key_entry.get_visibility() else "👁"),
+        ))
+        compat_key_row.append(compat_key_vis)
+        self._ai_compat_box.append(compat_key_row)
+
+        self._compat_model_entry = Gtk.Entry()
+        self._compat_model_entry.set_hexpand(True)
+        self._compat_model_entry.set_placeholder_text("llama-3.1-8b-instant  /  mixtral-8x7b-32768")
+        self._compat_model_entry.set_text(getattr(settings, "ai_compat_model", ""))
+        self._compat_model_entry.connect("changed", self._on_compat_model_changed)
+        self._ai_compat_box.append(_row("Modelo", self._compat_model_entry))
+
+        compat_hint = Gtk.Label()
+        compat_hint.set_xalign(0)
+        compat_hint.set_margin_start(12)
+        compat_hint.set_margin_bottom(4)
+        compat_hint.set_markup(
+            '<span foreground="#9a9996" size="small">'
+            'Compatible con Groq · Together AI · Mistral · Perplexity · LM Studio\n'
+            'Cualquier API que implemente el protocolo OpenAI Chat Completions.'
+            '</span>'
+        )
+        self._ai_compat_box.append(compat_hint)
+        box.append(self._ai_compat_box)
+
+        # Mostrar solo el panel del proveedor activo
+        self._refresh_ai_panels()
+
+        # Descripción general
         ai_desc = Gtk.Label()
         ai_desc.set_xalign(0)
         ai_desc.set_margin_start(8)
@@ -687,21 +786,41 @@ class SettingsView(Gtk.ScrolledWindow):
         settings.ai_strategy_mode = active
         self._update_ai_hint(active)
 
+    def _refresh_ai_panels(self) -> None:
+        """Muestra solo el panel del proveedor seleccionado."""
+        prov = getattr(settings, "ai_provider", "openai")
+        self._ai_openai_box.set_visible(prov == "openai")
+        self._ai_ollama_box.set_visible(prov == "ollama")
+        self._ai_compat_box.set_visible(prov == "compatible")
+
+    def _on_ai_provider_changed(self, combo: Gtk.ComboBoxText) -> None:
+        _PROVIDERS = ("openai", "ollama", "compatible")
+        idx = combo.get_active()
+        if 0 <= idx < len(_PROVIDERS):
+            settings.ai_provider = _PROVIDERS[idx]
+        self._refresh_ai_panels()
+        self._update_ai_hint(settings.ai_strategy_mode)
+
     def _update_ai_hint(self, active: bool) -> None:
         if active:
-            has_key = bool(getattr(settings, "openai_api_key", ""))
-            if has_key:
+            from core.ai_strategy import ai_agent
+            ready = ai_agent.is_ready()
+            if ready:
+                prov = getattr(settings, "ai_provider", "openai")
+                label = {"openai": "OpenAI", "ollama": "Ollama", "compatible": "Compatible"}.get(prov, prov)
                 self._ai_hint.set_markup(
-                    '<span foreground="#57e389" weight="bold">🤖 ACTIVO</span>'
+                    f'<span foreground="#57e389" weight="bold">🤖 ACTIVO ({label})</span>'
                 )
             else:
                 self._ai_hint.set_markup(
-                    '<span foreground="#f8e45c">⚠ Necesita API Key</span>'
+                    '<span foreground="#f8e45c">⚠ Proveedor no configurado</span>'
                 )
         else:
             self._ai_hint.set_markup(
                 '<span foreground="#9a9996" size="small">Estrategia del sistema</span>'
             )
+
+    # ── OpenAI handlers ───────────────────────────────────────────────────────
 
     def _on_ai_key_changed(self, entry: Gtk.Entry) -> None:
         key = entry.get_text().strip()
@@ -727,7 +846,6 @@ class SettingsView(Gtk.ScrolledWindow):
             )
 
     def _on_ai_key_vis(self, _btn) -> None:
-        """Alternar visibilidad del campo de API key."""
         visible = self._ai_key_entry.get_visibility()
         self._ai_key_entry.set_visibility(not visible)
         self._ai_key_vis_btn.set_label("🙈" if not visible else "👁")
@@ -736,3 +854,26 @@ class SettingsView(Gtk.ScrolledWindow):
         model = combo.get_active_text()
         if model:
             settings.openai_model = model
+
+    # ── Ollama handlers ───────────────────────────────────────────────────────
+
+    def _on_ollama_host_changed(self, entry: Gtk.Entry) -> None:
+        settings.ollama_host = entry.get_text().strip()
+        self._update_ai_hint(settings.ai_strategy_mode)
+
+    def _on_ollama_model_changed(self, entry: Gtk.Entry) -> None:
+        settings.ollama_model = entry.get_text().strip()
+        self._update_ai_hint(settings.ai_strategy_mode)
+
+    # ── Compatible OpenAI handlers ────────────────────────────────────────────
+
+    def _on_compat_url_changed(self, entry: Gtk.Entry) -> None:
+        settings.ai_compat_url = entry.get_text().strip()
+        self._update_ai_hint(settings.ai_strategy_mode)
+
+    def _on_compat_key_changed(self, entry: Gtk.Entry) -> None:
+        settings.ai_compat_key = entry.get_text().strip()
+
+    def _on_compat_model_changed(self, entry: Gtk.Entry) -> None:
+        settings.ai_compat_model = entry.get_text().strip()
+        self._update_ai_hint(settings.ai_strategy_mode)

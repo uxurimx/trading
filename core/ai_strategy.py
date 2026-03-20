@@ -8,12 +8,15 @@ Fixes vs v1:
   · Prompt corregido: mercado trending = OPERAR EN LA DIRECCIÓN, no rechazar
   · Intervalo mínimo 60 s entre llamadas (evita spam a la API)
   · Formato de contexto más limpio y directo
+  · [NUEVO] Filtro de Latencia: descarta trades obsoletos (> 45s)
+  · [NUEVO] Extractor JSON robusto (ignora <think> y basura de modelos locales)
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
+import re
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from core.config import settings
@@ -30,9 +33,10 @@ log = logging.getLogger("qts.ai_strategy")
 
 TAKER_FEE_RATE   = 0.00055   # 0.055% por lado (0.11% round-trip)
 AI_MIN_INTERVAL  = 60        # segundos mínimos entre llamadas a OpenAI
-AI_TOP_SYMBOLS   = 15        # cuántos símbolos enviar al agente (top por score)
+AI_TOP_SYMBOLS   = 3         # cuántos símbolos enviar al agente (top por score)
 AI_MIN_SCORE     = 50        # score mínimo para incluir un símbolo en el análisis
 AI_MIN_ATR_PCT   = 0.40      # excluir coins con ATR < 0.4% (fees comerían todo el profit)
+AI_MAX_LATENCY   = 45.0      # [NUEVO] Latencia máxima aceptable para ejecutar un trade
 
 
 # ─── Prompt del sistema (CORREGIDO) ──────────────────────────────────────────
@@ -212,16 +216,61 @@ def _build_account_snapshot(
 
 class AIStrategyAgent:
     """
-    Agente de IA que genera propuestas de trading usando la API de OpenAI.
-    Solo envía los mejores candidatos (top 12 por score) para un análisis enfocado.
-    Intervalo mínimo de 60 segundos entre llamadas para no saturar la API.
+    Agente de IA multi-proveedor para generar propuestas de trading.
+    Soporta: OpenAI · Ollama (LLM local) · Compatible OpenAI (Groq, Mistral, etc.)
+    Intervalo mínimo de 60 s entre llamadas.
     """
 
     def __init__(self) -> None:
         self._last_call_ts: float = 0.0
 
     def is_ready(self) -> bool:
-        return bool(getattr(settings, "openai_api_key", ""))
+        provider = getattr(settings, "ai_provider", "openai")
+        if provider == "openai":
+            return bool(getattr(settings, "openai_api_key", ""))
+        if provider == "ollama":
+            return bool(getattr(settings, "ollama_host", ""))
+        if provider == "compatible":
+            return bool(getattr(settings, "ai_compat_url", "")) and bool(getattr(settings, "ai_compat_model", ""))
+        return False
+
+    def provider_label(self) -> str:
+        """Nombre legible del proveedor activo."""
+        provider = getattr(settings, "ai_provider", "openai")
+        if provider == "ollama":
+            model = getattr(settings, "ollama_model", "?")
+            return f"Ollama({model})"
+        if provider == "compatible":
+            model = getattr(settings, "ai_compat_model", "?")
+            return f"Compatible({model})"
+        return getattr(settings, "openai_model", "gpt-4o")
+
+    def _make_client_and_model(self):
+        """
+        Retorna (AsyncOpenAI_client, model_name, use_json_format).
+        Ollama y compatibles usan la misma interfaz OpenAI con base_url diferente.
+        use_json_format=False para Ollama (soporte inconsistente según modelo).
+        """
+        import openai as _openai
+        provider = getattr(settings, "ai_provider", "openai")
+
+        if provider == "ollama":
+            host  = getattr(settings, "ollama_host", "http://localhost:11434").rstrip("/")
+            model = getattr(settings, "ollama_model", "llama3.2")
+            client = _openai.AsyncOpenAI(api_key="ollama", base_url=f"{host}/v1")
+            return client, model, False   # sin response_format para Ollama
+
+        if provider == "compatible":
+            url   = getattr(settings, "ai_compat_url",   "").rstrip("/")
+            key   = getattr(settings, "ai_compat_key",   "") or "none"
+            model = getattr(settings, "ai_compat_model", "")
+            client = _openai.AsyncOpenAI(api_key=key, base_url=url)
+            return client, model, True
+
+        # openai (default)
+        model  = getattr(settings, "openai_model", "gpt-4o")
+        client = _openai.AsyncOpenAI(api_key=settings.openai_api_key)
+        return client, model, True
 
     def seconds_until_ready(self) -> int:
         elapsed = time.monotonic() - self._last_call_ts
@@ -247,12 +296,12 @@ class AIStrategyAgent:
             return None
 
         if not self.is_ready():
-            log.warning("AI Strategy: sin API key de OpenAI")
+            log.warning("AI Strategy: proveedor '%s' no configurado",
+                        getattr(settings, "ai_provider", "openai"))
             return None
 
         self._last_call_ts = time.monotonic()
 
-        # Contar cuántos candidatos hay antes de construir el snapshot
         n_candidates = sum(
             1 for s in symbols
             if opps.get(s) and opps[s].score >= AI_MIN_SCORE
@@ -260,8 +309,15 @@ class AIStrategyAgent:
 
         market_snapshot  = _build_market_snapshot(symbols, states, opps, techs)
         account_snapshot = _build_account_snapshot(account, active_trades)
-        model            = getattr(settings, "openai_model", "gpt-4o")
 
+        try:
+            client, model, use_json_fmt = self._make_client_and_model()
+        except Exception as e:
+            log.error("AI Strategy: error al crear cliente: %s", e)
+            return None
+
+        # Para Ollama: añadir instrucción JSON al final del prompt de usuario
+        json_reminder = "" if use_json_fmt else "\nIMPORTANTE: responde ÚNICAMENTE con el JSON, sin ningún texto adicional. No uses etiquetas <think>."
         user_prompt = (
             f"{account_snapshot}\n\n"
             f"{market_snapshot}\n\n"
@@ -273,44 +329,62 @@ class AIStrategyAgent:
             "Para SL/TP: usa niveles S/R si están disponibles; si no, usa RefSL y RefTP del candidato.\n"
             "Si RefTP no da R:R ≥ 2.0, busca el nivel S/R más lejano que sí lo dé.\n"
             "Un score ≥ 60 con dirección coherente y CVD mayoritariamente alineado ES suficiente.\n"
-            "Responde SOLO con el JSON."
+            f"Responde SOLO con el JSON.{json_reminder}"
         )
 
         log.info(
-            "AI Strategy: consultando %s — %d candidatos de %d símbolos",
-            model, n_candidates, len(symbols),
+            "AI Strategy: consultando %s (%s) — %d candidatos de %d símbolos",
+            self.provider_label(), model, n_candidates, len(symbols),
         )
         t0 = time.monotonic()
 
+        create_kwargs: dict = dict(
+            model    = model,
+            messages = [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user",   "content": user_prompt},
+            ],
+            temperature = 0.15,
+            max_tokens  = 1800,
+        )
+        if use_json_fmt:
+            create_kwargs["response_format"] = {"type": "json_object"}
+
         try:
-            client   = _openai.AsyncOpenAI(api_key=settings.openai_api_key)
             response = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model    = model,
-                    messages = [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user",   "content": user_prompt},
-                    ],
-                    temperature     = 0.15,
-                    max_tokens      = 1800,
-                    response_format = {"type": "json_object"},
-                ),
-                timeout=50.0,
+                client.chat.completions.create(**create_kwargs),
+                timeout=90.0,   # Timeout máximo del socket
             )
             elapsed = time.monotonic() - t0
             raw     = response.choices[0].message.content or "{}"
             log.info("AI Strategy: respuesta en %.1fs (%d chars)", elapsed, len(raw))
+            
+            # --- [NUEVO] CONTROL DE OBSOLESCENCIA ---
+            if elapsed > AI_MAX_LATENCY:
+                log.warning("AI Strategy: descartando propuesta por latencia alta (%.1fs > %.1fs). Precio desactualizado.", elapsed, AI_MAX_LATENCY)
+                return None
 
         except asyncio.TimeoutError:
-            log.error("AI Strategy: timeout (50s)")
+            log.error("AI Strategy: timeout (90s) con %s", self.provider_label())
             return None
         except Exception as e:
-            log.error("AI Strategy: error OpenAI: %s", e)
+            log.error("AI Strategy: error con %s: %s", self.provider_label(), e)
             return None
 
-        # ── Parsear ───────────────────────────────────────────────────────────
+        # ── Parsear [NUEVO: Extractor Regex Robusto] ──────────────────────────
         try:
-            data = json.loads(raw)
+            raw = raw.strip()
+            # Limpiar etiquetas <think> que meten modelos como DeepSeek-R1
+            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+            
+            # Extraer solo lo que parezca un JSON (Ignora texto antes o después)
+            json_match = re.search(r'\{.*\}', raw, flags=re.DOTALL)
+            if json_match:
+                raw_json = json_match.group(0)
+            else:
+                raw_json = raw # Fallback por si la regex falla
+
+            data = json.loads(raw_json)
         except json.JSONDecodeError as e:
             log.error("AI Strategy: JSON inválido: %s\n%s", e, raw[:300])
             return None
