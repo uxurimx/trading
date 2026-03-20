@@ -78,7 +78,13 @@ Tu trabajo es SELECCIONAR EL MEJOR TRADE del lote de candidatos, no buscar excus
   3. Solo retorna NO_TRADE si TODOS los candidatos tienen R:R neto < {min_rr}
      O si la dirección va contra la tendencia fuerte.
 
-═══ RESPUESTA: solo JSON válido, sin texto, sin markdown ═══
+5. DINÁMICA DE VOLUMEN (CRUCIAL):
+- Entra en LONG solo si CVD es positivo y ascendente (confirmación de compra real).
+- La 'Velocidad de Cinta' (Tape Speed) indica urgencia. Solo considera trades con Tape Speed > 0.5.
+- Ignora monedas con bajo volumen o 'ruido' donde el ATR sea puramente por falta de liquidez.
+
+6. FORMATO DE RESPUESTA:
+solo JSON válido, sin texto, sin markdown ═══
 
 Si hay trade:
 {{"action":"TRADE","symbol":"SOLUSDT","side":"Buy","entry":145.50,"sl":143.80,"tp":150.90,"confidence":79,"reasoning":"SOL score=73, ALCISTA 68%, CVD=4/5 bull (alineado LONG), EMA↑. SL=1.5×ATR(1.13)=143.80, TP en resistencia 150.90. rt_fees=0.16. R:R=(5.40-0.16)/(1.70+0.16)=5.24/1.86=2.82"}}
@@ -145,7 +151,7 @@ def _build_market_snapshot(
         if cvd_candles:
             bull = sum(1 for c in cvd_candles if c.delta > 0)
             bear = 5 - bull
-            cvd_str = f"CVD={bull}/5bull({bear}/5bear)"
+            cvd_str = f"CVD={bull}/5bull({bear}/5bear) {ms.cvd_momentum}"
         else:
             cvd_str = "CVD=N/D"
 

@@ -71,6 +71,8 @@ class CandleCVD:
     interval: int    # duración en segundos
     buy_vol:  float = 0.0
     sell_vol: float = 0.0
+    open:     float = 0.0
+    close:    float = 0.0
 
     @property
     def delta(self) -> float:
@@ -229,6 +231,9 @@ class MarketState:
         self.spot_connected:   bool  = False
         self.last_update:      float = 0.0
 
+        # Historial de volumen por minuto para detectar caídas súbitas
+        self._vol_history: deque[float] = deque(maxlen=10)
+
     # ── Trade ingestion ───────────────────────────────────────────────────────
 
     def add_trade(self, trade: Trade) -> None:
@@ -250,9 +255,10 @@ class MarketState:
         candle_ts = (ts_sec // interval) * interval
 
         if not self.cvd_candles or self.cvd_candles[-1].ts != candle_ts:
-            self.cvd_candles.append(CandleCVD(ts=candle_ts, interval=interval))
+            self.cvd_candles.append(CandleCVD(ts=candle_ts, interval=interval, open=trade.price, close=trade.price))
 
         candle = self.cvd_candles[-1]
+        candle.close = trade.price
         if trade.side == "Buy":
             candle.buy_vol += trade.qty
         else:
@@ -342,9 +348,72 @@ class MarketState:
         trades = list(self.trades)
         return trades[-n:][::-1]
 
+    @property
+    def rsi_1m(self) -> float:
+        """Calcula RSI period=14 sobre cierres de 1m (cvd_candles)."""
+        candles = list(self.cvd_candles)
+        if len(candles) < 15:
+            return 50.0
+        closes = [c.close for c in candles]
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            d = closes[i] - closes[i-1]
+            gains.append(max(0.0, d))
+            losses.append(max(0.0, -d))
+        
+        period = 14
+        ag = sum(gains[-period:]) / period
+        al = sum(losses[-period:]) / period
+        if al == 0: return 100.0
+        rs = ag / al
+        return 100 - (100 / (1 + rs))
+
     def recent_liquidations(self, n: int = 8) -> List[Liquidation]:
         liqs = list(self.liquidations)
         return liqs[-n:][::-1]
+
+    @property
+    def tape_speed(self) -> float:
+        """Trades por segundo en los últimos 10 segundos."""
+        if not self.trades:
+            return 0.0
+        now_ms = time.time() * 1000
+        # Contar trades en la ventana de 10s
+        count = 0
+        for t in reversed(self.trades):
+            if now_ms - t.timestamp < 10000:
+                count += 1
+            else:
+                break
+        return count / 10.0
+
+    @property
+    def cvd_momentum(self) -> str:
+        """Describe la tendencia del CVD en las últimas 5 velas."""
+        candles = list(self.cvd_candles)[-5:]
+        if len(candles) < 3:
+            return "NEUTRAL"
+        deltas = [c.delta for c in candles]
+        pos = sum(1 for d in deltas if d > 0)
+        if pos >= 4: return "FUERTE ALCISTA"
+        if pos <= 1: return "FUERTE BAJISTA"
+        
+        # Pendiente (última vs penúltima)
+        if deltas[-1] > deltas[-2]:
+            return "ASCENDENTE" if deltas[-1] > 0 else "RECUPERANDO"
+        return "DESCENDENTE" if deltas[-1] < 0 else "DEBILITÁNDOSE"
+
+    @property
+    def vol_drop_50(self) -> bool:
+        """True si el volumen actual es < 50% de la media de los últimos 5 mins."""
+        if not self.cvd_candles or len(self.cvd_candles) < 2:
+            return False
+        current_vol = self.cvd_candles[-1].total
+        prev_vols = [c.total for c in list(self.cvd_candles)[-6:-1]]
+        if not prev_vols:
+            return False
+        avg_prev = sum(prev_vols) / len(prev_vols)
+        return avg_prev > 0 and current_vol < (avg_prev * 0.5)
 
 
 # ─── MarketStream ─────────────────────────────────────────────────────────────
