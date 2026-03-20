@@ -126,7 +126,7 @@ class PaperWallet:
         net      = gross - exit_fee
 
         self._margin     = max(0.0, self._margin - pp.margin)
-        self._cash      += pp.margin + net   # devolver margen + PnL
+        self._cash      += net   # PnL neto (fees ya descontadas de gross / entry_fee al entrar)
         self._daily_pnl += net
         self._total     += 1
         if net > 0:

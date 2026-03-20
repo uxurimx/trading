@@ -131,7 +131,7 @@ class SettingsView(Gtk.ScrolledWindow):
         box.append(pt_row)
 
         # Balance inicial
-        self._pt_balance_sp = _spin(100.0, 1_000_000.0, settings.paper_balance, 500.0, 0, w=110)
+        self._pt_balance_sp = _spin(0.0, 1_000_000.0, settings.paper_balance, 500.0, 0, w=110)
         self._pt_balance_sp.connect(
             "value-changed",
             lambda sp: setattr(settings, "paper_balance", sp.get_value()),

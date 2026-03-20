@@ -5,8 +5,10 @@ JournalView — Historial completo de trades con equity curve y estadísticas.
 """
 from __future__ import annotations
 
+import csv
 import datetime
 import math
+import os
 import time
 from typing import List
 
@@ -373,6 +375,29 @@ class JournalView(Gtk.Box):
             flt_box.append(btn)
             self._period_btns[key] = btn
 
+        flt_box.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+
+        # ── Búsqueda ──
+        self._search_entry = Gtk.SearchEntry(placeholder_text="Buscar (ej. BTC)")
+        self._search_entry.add_css_class("qts-mono-sm")
+        self._search_entry.set_hexpand(True)
+        self._search_entry.set_halign(Gtk.Align.END)
+        self._search_entry.connect("search-changed", self._on_search_changed)
+        flt_box.append(self._search_entry)
+
+        # ── Ordenamiento ──
+        sort_model = Gtk.StringList.new(["Fecha ↓", "Fecha ↑", "PnL ↓", "PnL ↑", "Sym A-Z"])
+        self._sort_dd = Gtk.DropDown.new(model=sort_model)
+        self._sort_dd.connect("notify::selected", self._on_sort_changed)
+        flt_box.append(self._sort_dd)
+
+        # ── Exportar CSV ──
+        csv_btn = Gtk.Button(icon_name="document-save-symbolic")
+        csv_btn.set_tooltip_text("Exportar Journal a CSV")
+        csv_btn.add_css_class("flat")
+        csv_btn.connect("clicked", self._export_csv)
+        flt_box.append(csv_btn)
+
         self.append(flt_box)
 
         # ── Header con stats resumidas ────────────────────────────────────────
@@ -426,12 +451,36 @@ class JournalView(Gtk.Box):
             self._period = key
             self._apply_filter()
 
+    def _on_search_changed(self, _entry) -> None:
+        self._apply_filter()
+
+    def _on_sort_changed(self, _dd, _pspec) -> None:
+        self._apply_filter()
+
     def _apply_filter(self) -> None:
         cutoff = _period_cutoff(self._period)
-        if cutoff > 0:
-            filtered = [t for t in self._all_trades if t.get("closed_at", 0) >= cutoff]
-        else:
-            filtered = self._all_trades
+        query = self._search_entry.get_text().strip().upper()
+        
+        filtered = []
+        for t in self._all_trades:
+            if cutoff > 0 and t.get("closed_at", 0) < cutoff:
+                continue
+            if query and query not in t.get("symbol", "").upper():
+                continue
+            filtered.append(t)
+
+        # ── Aplicar Ordenamiento ──
+        sort_idx = self._sort_dd.get_selected()
+        if sort_idx == 0:   # Fecha ↓
+            filtered.sort(key=lambda x: x.get("closed_at", 0), reverse=True)
+        elif sort_idx == 1: # Fecha ↑
+            filtered.sort(key=lambda x: x.get("closed_at", 0))
+        elif sort_idx == 2: # PnL ↓
+            filtered.sort(key=lambda x: x.get("pnl_usd", 0.0), reverse=True)
+        elif sort_idx == 3: # PnL ↑
+            filtered.sort(key=lambda x: x.get("pnl_usd", 0.0))
+        elif sort_idx == 4: # Sym A-Z
+            filtered.sort(key=lambda x: x.get("symbol", ""))
 
         stats = _stats_from_trades(filtered)
         self._update_stats(stats)
@@ -456,6 +505,26 @@ class JournalView(Gtk.Box):
 
         self._all_trades = get_all_trades(300)
         self._apply_filter()
+
+    def _export_csv(self, _btn) -> None:
+        if not self._all_trades:
+            return
+        
+        # Guardar en Documentos o Home
+        docs_dir = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS) or os.path.expanduser("~")
+        filename = os.path.join(docs_dir, f"qts_journal_{int(time.time())}.csv")
+        
+        try:
+            with open(filename, mode='w', newline='') as f:
+                # Usar los campos del primer trade como cabeceras
+                fieldnames = list(self._all_trades[0].keys())
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for trade in self._all_trades:
+                    writer.writerow(trade)
+            print(f"Journal exportado a {filename}")
+        except Exception as e:
+            print(f"Error exportando CSV: {e}")
 
     def _update_stats(self, s: dict) -> None:
         total  = s.get("total", 0)
