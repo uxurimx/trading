@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     max_trades_per_day:      int   = 10
     circuit_breaker_enabled: bool  = True
 
+    # ── Módulo de Sesiones (TSAA) ──────────────────────────────────────────
+    session_duration_h:   float = 4.0      # Duración máxima de la sesión en horas
+    session_target_pnl:   float = 50.0     # Take-Profit global de la sesión (USDT)
+    session_max_drawdown: float = -20.0    # Stop-Loss global de la sesión (USDT)
+
     # Protección activa (breakeven / trailing)
     breakeven_pct:    float = 40.0   # % del TP distance para activar breakeven
     profit_lock_pct:  float = 60.0   # % para profit lock
@@ -123,6 +128,7 @@ class Settings(BaseSettings):
     # Estrategia
     min_scan_score:   int   = 70     # score mínimo para generar propuesta
     min_rr:           float = 2.5    # R:R mínimo aceptado en pre-flight (subido de 1.3)
+    min_trade_margin: float = 10.50  # Margen mínimo para consultar IA (Margin Guard)
     scan_interval_s:  int   = 30     # segundos entre scans automáticos
     speed_level:      str   = "standard"  # "nano" | "scalp" | "fast" | "standard"
 

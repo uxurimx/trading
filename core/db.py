@@ -52,11 +52,14 @@ def initialize_db() -> None:
     """)
 
     con.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id         BIGINT PRIMARY KEY,
-            start_time TIMESTAMP DEFAULT now(),
-            end_time   TIMESTAMP,
-            notes      TEXT
+        CREATE TABLE IF NOT EXISTS trading_sessions (
+            id              VARCHAR PRIMARY KEY,
+            start_ts        BIGINT  NOT NULL,
+            end_ts          BIGINT  DEFAULT 0,
+            initial_balance DOUBLE  DEFAULT 0,
+            final_balance   DOUBLE  DEFAULT 0,
+            pnl             DOUBLE  DEFAULT 0,
+            status          VARCHAR DEFAULT 'ACTIVE'
         )
     """)
 
@@ -88,6 +91,7 @@ def initialize_db() -> None:
     for migration in [
         "ALTER TABLE trade_journal ADD COLUMN strategy_tag VARCHAR DEFAULT 'absorcion'",
         "ALTER TABLE trade_journal ADD COLUMN ai_reasoning TEXT DEFAULT ''",
+        "ALTER TABLE trade_journal ADD COLUMN session_id VARCHAR DEFAULT ''",
     ]:
         try:
             con.execute(migration)
@@ -109,8 +113,8 @@ def save_trade(trade: "TradeRecord") -> None:
                 (id, symbol, side, auto_mode, state,
                  entry_price, sl_price, tp_price, qty, risk_usd,
                  rr_ratio, opp_score, pnl_usd, close_reason, strategy_tag, ai_reasoning,
-                 opened_at, closed_at, duration_s)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 opened_at, closed_at, duration_s, session_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             trade.id,
             trade.symbol,
@@ -131,6 +135,7 @@ def save_trade(trade: "TradeRecord") -> None:
             trade.opened_at,
             trade.closed_at or int(time.time()),
             trade.duration_s,
+            getattr(trade, "session_id", ""),
         ))
         con.close()
         log.info("Journal: %s guardado  %s  PnL=$%.2f",
@@ -276,3 +281,56 @@ def get_cumulative_pnl() -> list:
     except Exception as e:
         log.error("get_cumulative_pnl falló: %s", e)
         return []
+
+
+def save_session(session_data: dict) -> None:
+    """Guarda/actualiza el registro de una sesión TSAA."""
+    try:
+        con = get_connection()
+        con.execute("""
+            INSERT OR REPLACE INTO trading_sessions
+                (id, start_ts, end_ts, initial_balance, final_balance, pnl, status)
+            VALUES (?,?,?,?,?,?,?)
+        """, (
+            session_data["id"],
+            session_data["start_ts"],
+            session_data["end_ts"],
+            session_data["initial_balance"],
+            session_data["final_balance"],
+            session_data["pnl"],
+            session_data["status"],
+        ))
+        con.close()
+    except Exception as e:
+        log.error("save_session falló: %s", e)
+
+
+def get_session_trades(session_id: str) -> list:
+    """Retorna todos los trades asociados a una sesión para la auditoría."""
+    try:
+        con = get_connection()
+        rows = con.execute("""
+            SELECT id, symbol, side, state, pnl_usd, opp_score, rr_ratio, close_reason, strategy_tag
+            FROM trade_journal
+            WHERE session_id = ? AND state = 'CLOSED'
+            ORDER BY closed_at ASC
+        """, (session_id,)).fetchall()
+        con.close()
+        return [
+            {
+                "id":           r[0],
+                "symbol":       r[1],
+                "side":         r[2] or "",
+                "state":        r[3],
+                "pnl_usd":      float(r[4] or 0),
+                "opp_score":    int(r[5] or 0),
+                "rr_ratio":     float(r[6] or 0),
+                "close_reason": r[7] or "",
+                "strategy_tag": r[8] or "",
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        log.error("get_session_trades falló: %s", e)
+        return []
+

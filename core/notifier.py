@@ -79,3 +79,10 @@ def proposal_ready(symbol: str, side: str, score: int, goal: float) -> None:
 def order_failed(symbol: str, error: str) -> None:
     sym = symbol.replace("USDT", "")
     notify(f"⚠ Orden fallida: {sym}", error[:120], urgency="critical")
+
+def session_report_ready(session_id: str, path: str) -> None:
+    notify(
+        f"📊 Auditoría TSAA lista",
+        f"Sesión {session_id} analizada. Reporte guardado en {path}",
+        urgency="normal"
+    )

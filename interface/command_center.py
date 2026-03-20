@@ -1017,6 +1017,118 @@ class TradeCard(Gtk.Box):
 
 # ─── CommandCenter ────────────────────────────────────────────────────────────
 
+class SessionHeader(Gtk.Box):
+    """
+    Cabecera de control de sesión TSAA.
+    Muestra PnL, Tiempo restante y controles de Iniciar/Pausar/Detener.
+    """
+    def __init__(self, controller: "TradeController") -> None:
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.add_css_class("qts-card")
+        self.set_margin_bottom(6)
+        self.set_valign(Gtk.Align.START)
+        
+        self._controller = controller
+        self._build()
+
+    def _build(self) -> None:
+        # Título y Status
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        title_box.set_valign(Gtk.Align.CENTER)
+        self._title_lbl = Gtk.Label(label="SESIÓN TSAA")
+        self._title_lbl.add_css_class("qts-title")
+        self._title_lbl.set_xalign(0)
+        self._status_lbl = _ml("INACTIVA", size="small")
+        title_box.append(self._title_lbl)
+        title_box.append(self._status_lbl)
+        self.append(title_box)
+
+        self.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+
+        # Métricas (PnL y Tiempo)
+        metrics_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        metrics_box.set_valign(Gtk.Align.CENTER)
+        metrics_box.set_hexpand(True)
+
+        self._pnl_lbl = _ml("PnL: $0.00")
+        self._time_lbl = _ml("Tiempo: ──")
+        
+        metrics_box.append(self._pnl_lbl)
+        metrics_box.append(self._time_lbl)
+        self.append(metrics_box)
+
+        # Controles
+        self._ctrl_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._ctrl_box.set_valign(Gtk.Align.CENTER)
+        
+        self._start_btn = Gtk.Button(label="INICIAR")
+        self._start_btn.add_css_class("suggested-action")
+        self._start_btn.connect("clicked", self._on_start)
+        
+        self._pause_btn = Gtk.Button(label="PAUSAR")
+        self._pause_btn.connect("clicked", self._on_pause)
+        
+        self._stop_btn = Gtk.Button(label="DETENER")
+        self._stop_btn.add_css_class("destructive-action")
+        self._stop_btn.connect("clicked", self._on_stop)
+        
+        self._ctrl_box.append(self._start_btn)
+        self._ctrl_box.append(self._pause_btn)
+        self._ctrl_box.append(self._stop_btn)
+        self.append(self._ctrl_box)
+
+    def update(self) -> None:
+        session = self._controller._session
+        if not session:
+            self._status_lbl.set_markup(f'<span color="{HEX["over"]}">INACTIVA</span>')
+            self._pnl_lbl.set_markup(f'<span color="{HEX["over"]}">PnL: $0.00</span>')
+            self._time_lbl.set_markup(f'<span color="{HEX["over"]}">Tiempo: ──</span>')
+            self._start_btn.set_visible(True)
+            self._pause_btn.set_visible(False)
+            self._stop_btn.set_visible(False)
+            return
+
+        self._start_btn.set_visible(False)
+        self._pause_btn.set_visible(True)
+        self._stop_btn.set_visible(True)
+
+        # Status y Modo
+        is_paused = self._controller.mode == AutoMode.MANUAL
+        status_text = "PAUSADA" if is_paused else f"ACTIVA ({session.status.value})"
+        status_col = HEX["warn"] if is_paused else HEX["buy"]
+        self._status_lbl.set_markup(f'<span color="{status_col}" weight="bold">{status_text}</span>')
+        self._pause_btn.set_label("REANUDAR" if is_paused else "PAUSAR")
+
+        # PnL
+        pnl = session.closed_pnl
+        pnl_col = HEX["buy"] if pnl >= 0 else HEX["sell"]
+        self._pnl_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">PnL Sesión: </span>'
+            f'<span color="{pnl_col}" weight="bold">${pnl:+.2f}</span>'
+            f' <span color="{HEX["over"]}" size="small">/ ${session.target_pnl:.0f}</span>'
+        )
+
+        # Tiempo
+        time_left = session.time_left_s
+        time_col = HEX["warn"] if time_left < 1800 else HEX["text"]
+        self._time_lbl.set_markup(
+            f'<span color="{HEX["sub"]}">Meta Tiempo: </span>'
+            f'<span color="{time_col}">{_fmt_duration_s(time_left)} restante</span>'
+        )
+
+    def _on_start(self, _btn) -> None:
+        self._controller.start_session()
+
+    def _on_pause(self, _btn) -> None:
+        if self._controller.mode == AutoMode.MANUAL:
+            self._controller.set_mode(AutoMode.FULL_AUTO)
+        else:
+            self._controller.set_mode(AutoMode.MANUAL)
+
+    def _on_stop(self, _btn) -> None:
+        self._controller.stop_session()
+
+
 class CommandCenter(Gtk.Box):
     """
     Pantalla principal de operaciones.
@@ -1067,6 +1179,10 @@ class CommandCenter(Gtk.Box):
         top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         top.set_margin_start(P); top.set_margin_end(P)
         top.set_margin_top(3);   top.set_margin_bottom(2)
+
+        # TSAA Session Panel
+        self._session_header = SessionHeader(self._controller)
+        top.append(self._session_header)
 
         # Fila A: balance (full width, tamaño pequeño)
         self._balance_lbl = _ml()
@@ -1590,6 +1706,7 @@ class CommandCenter(Gtk.Box):
         sim:           Optional[dict] = None,
         market_states: Optional[dict] = None,
     ) -> None:
+        self._session_header.update()
         self._market_states = market_states or {}
         self._render_balance(account)
         self._render_active_trades(account, self._market_states)

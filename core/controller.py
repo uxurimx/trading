@@ -29,6 +29,8 @@ from core.order_model import (
 from core.strategy import StrategyEngine
 from core.config import settings
 from core.db import save_trade
+from core.session import SessionManager, SessionStatus
+from core.audit_agent import audit_agent
 import core.notifier as notifier
 
 if TYPE_CHECKING:
@@ -120,6 +122,10 @@ class TradeController:
         # Sistema de Salud de Símbolos (SHPP): sym → score (-10 a +10)
         self._symbol_scores: Dict[str, float] = {}
 
+        # ── Módulo de Sesiones (TSAA) ──
+        self._session: Optional[SessionManager] = None
+        self._last_balance: float = 0.0
+
     # ── API pública ───────────────────────────────────────────────────────────
 
     def set_mode(self, mode: AutoMode) -> None:
@@ -158,6 +164,50 @@ class TradeController:
         self.max_duration_min = max(0, minutes)
         self._duration_set_ts = time.time()
         self._notify()
+
+    def start_session(self) -> bool:
+        """Inicia manualmente una nueva sesión TSAA."""
+        if self._session:
+            return False
+        if self._last_balance <= 0:
+            log.warning("[TSAA] No se puede iniciar sesión sin balance conocido.")
+            return False
+            
+        self._session = SessionManager(self._last_balance)
+        self.set_mode(AutoMode.FULL_AUTO)
+        self._notify()
+        return True
+
+    def stop_session(self) -> None:
+        """Detiene manualmente la sesión actual y dispara auditoría."""
+        if not self._session:
+            return
+        log.info("[TSAA] Parada manual de sesión solicitada.")
+        self._finalize_session_and_audit()
+        self.set_mode(AutoMode.MANUAL)
+        self._notify()
+
+    def _finalize_session_and_audit(self) -> None:
+        """Lógica común para cerrar sesión y lanzar agente de auditoría."""
+        if not self._session:
+            return
+            
+        summary = {
+            "pnl": self._session.closed_pnl,
+            "duration_s": self._session.elapsed_s,
+            "target_pnl": self._session.target_pnl,
+        }
+        session_id = self._session.id
+        self._session.close()
+        self._session = None
+        
+        async def _run_audit():
+            report, path = await audit_agent.audit_session(session_id, summary)
+            log.info("[TSAA] Auditoría Completada para sesión %s. Reporte en: %s", session_id, path)
+            if path:
+                notifier.session_report_ready(session_id, path)
+        
+        self._bridge.submit(_run_audit())
 
     def set_multi_trades(self, n: int) -> None:
         self.multi_trades = max(1, min(10, n))
@@ -243,6 +293,26 @@ class TradeController:
         opps:    Dict[str, "OpportunitySignal"],
         risk:    "RiskStatus",
     ) -> None:
+        # ── 0. Gestión de Sesión (TSAA) ──
+        self._last_balance = account.balance.wallet_balance
+        upnl = sum(p.unrealized_pnl for p in account.positions.values())
+
+        # Auto-inicio eliminado - ahora es manual vía UI
+        
+        status = SessionStatus.ACTIVE
+        if self._session:
+            status = self._session.update(self._last_balance, upnl)
+
+        # Si la sesión está liquidando o terminó tiempo, cerramos todo y notificamos
+        if status in [SessionStatus.LIQUIDATING, SessionStatus.CLOSED]:
+            if self._active:
+                log.warning("[TSAA] CIERRE DE SESIÓN: Liquidando posiciones activas.")
+                self.close_all("tsaa_end")
+            
+            if self._session:
+                self._finalize_session_and_audit()
+            return
+
         # Detectar trades cerrados externamente (o por SL/TP de Bybit)
         self._detect_closed_trades(states, account)
 
@@ -307,6 +377,22 @@ class TradeController:
                      if s not in self._active
                      and s not in self._pending_exec
                      and s not in blacklist]
+
+        # ── API Optimization Guard: Slots Ocupados ──
+        if len(self._active) >= self.multi_trades:
+            self._scan_log = f"⌛ Slots llenos ({len(self._active)}/{self.multi_trades}) — esperando cierre"
+            self._notify()
+            return
+
+        # ── Margin Guard ──
+        # Verificamos si hay suficiente margen para al menos UN trade mínimo
+        av_margin = account.balance.available_balance
+        if av_margin < settings.min_trade_margin:
+            self._scan_log = f"⚠️ Margen insuficiente (${av_margin:.2f}) — esperando liberación"
+            log.warning("[MARGIN GUARD] Saldo insuficiente para operar ($%.2f < $%.2f). Saltando IA.",
+                        av_margin, settings.min_trade_margin)
+            self._notify()
+            return
 
         # Recopilar scores para feedback
         scores: dict[str, int] = {}
@@ -426,8 +512,19 @@ class TradeController:
     def _on_ai_result(self, result) -> bool:
         """Callback en GTK thread — recibe la propuesta del agente IA."""
         self._ai_scanning = False
+        
+        # Verificar modo Harvest: no aceptar nuevas propuestas de entrada
+        if self._session and self._session.status == SessionStatus.HARVESTING:
+            log.info("[TSAA] Propuesta rechazada: Modo HARVEST activo.")
+            self._scan_log = "TSAA: Modo HARVEST - No se permiten nuevas entradas."
+            return False
+
         if result:
             sym, proposal = result
+            
+            # Enriquecer propuesta con metadatos de sesión
+            if self._session:
+                proposal.session_id = self._session.id
             self._proposal    = proposal
             self._proposal_ts = time.monotonic()
             self._scan_log = (
@@ -518,6 +615,7 @@ class TradeController:
 
         trade = TradeRecord(
             symbol     = req.symbol,
+            session_id = req.session_id,
             request    = req,
             state      = TradeState.SUBMITTED,
             current_sl = req.sl_price,
