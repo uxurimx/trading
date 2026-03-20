@@ -672,10 +672,17 @@ class SettingsView(Gtk.ScrolledWindow):
         cfg = SPEED_CONFIGS.get(settings.speed_level, SPEED_CONFIGS["standard"])
         colors = {"nano": "#ff3c3c", "scalp": "#ff7b00", "fast": "#f8e45c", "standard": "#57e389"}
         color  = colors.get(settings.speed_level, "#9a9996")
+        
+        # Escapar dinámicamente los campos que pueden contener caracteres especiales (como < en NANO)
+        label_esc = GLib.markup_escape_text(cfg["label"])
+        tf_esc    = GLib.markup_escape_text(cfg["tf_label"])
+        slow_esc  = GLib.markup_escape_text(str(cfg["slow"]))
+        desc_esc  = GLib.markup_escape_text(cfg["desc"])
+
         self._speed_hint.set_markup(
-            f'<span foreground="{color}" size="small" weight="bold">{cfg["label"]}</span>'
-            f'<span foreground="#9a9996" size="small"> — kline base: {cfg["tf_label"]}  '
-            f'contexto: {cfg["slow"]}m  {cfg["desc"]}</span>'
+            f'<span foreground="{color}" size="small" weight="bold">{label_esc}</span>'
+            f'<span foreground="#9a9996" size="small"> — kline base: {tf_esc}  '
+            f'contexto: {slow_esc}m  {desc_esc}</span>'
         )
 
     # ─────────────────────────────────────────────────────────────────────────
