@@ -388,7 +388,7 @@ class TradeController:
                 self._scan_log = f"✗ Sin setup (min {settings.min_scan_score})  —  {score_str}"
             else:
                 self._scan_log = "✗ Sin datos de mercado aún"
-            log.info("Scan: sin setup válido — scores: %s", scores)
+            #log.info("Scan: sin setup válido — scores: %s", scores)
             self._notify()
 
     # ── AI Strategy scan (asíncrono) ──────────────────────────────────────────
@@ -1000,12 +1000,17 @@ class TradeController:
             
             if is_safe:
                 # 4. Rastrear el mejor precio (High-Water Mark)
+                # Choke Adjustment: Si el precio superó el TP original (progress >= 1.0),
+                # apretamos el trailing a 0.4 * ATR para asegurar el "bonus" de ganancia.
+                # Para progreso < 1.0 usamos 0.7 * ATR (antes 1.0) para capturar antes.
+                t_mult = 0.7 if progress < 1.0 else 0.4
+                
                 if is_long:
                     self._trail_high[sym] = max(self._trail_high.get(sym, mark), mark)
-                    proposed_sl = self._trail_high[sym] - atr * 1.0
+                    proposed_sl = self._trail_high[sym] - atr * t_mult
                 else:
                     self._trail_low[sym] = min(self._trail_low.get(sym, mark), mark)
-                    proposed_sl = self._trail_low[sym] + atr * 1.0
+                    proposed_sl = self._trail_low[sym] + atr * t_mult
                 
                 # 5. Calcular el nuevo SL garantizando que NUNCA retrocede ni perfora fee-be
                 floor_sl = max(trade.current_sl, fee_be_price) if is_long else min(trade.current_sl, fee_be_price)
