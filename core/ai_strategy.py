@@ -34,7 +34,7 @@ log = logging.getLogger("qts.ai_strategy")
 TAKER_FEE_RATE   = 0.00055   # 0.055% por lado (0.11% round-trip)
 AI_MIN_INTERVAL  = 60        # segundos mínimos entre llamadas a OpenAI
 AI_TOP_SYMBOLS   = 3         # cuántos símbolos enviar al agente (top por score)
-AI_MIN_SCORE     = 50        # score mínimo para incluir un símbolo en el análisis
+AI_MIN_SCORE     = 70        # score mínimo para incluir un símbolo en el análisis
 AI_MIN_ATR_PCT   = 0.40      # excluir coins con ATR < 0.4% (fees comerían todo el profit)
 AI_MAX_LATENCY   = 45.0      # [NUEVO] Latencia máxima aceptable para ejecutar un trade
 

@@ -19,8 +19,8 @@ SPEED_CONFIGS: Dict[str, Dict[str, Any]] = {
         "label": "NANO",
         "desc": "Trades <90s · SL/TP ultrajustado",
         "be_hold_s": 2,       # 2 s para confirmar breakeven
-        "atr_sl_mult": 0.6,   # SL ultra-corto (menos recorrido en contra)
-        "atr_tp_mult": 1.0,   # TP mínimo — R:R ~1.6 mínimo garantizado
+        "atr_sl_mult": 0.4,   # SL ultra-corto (R:R 2.5)
+        "atr_tp_mult": 1.0,   # TP mínimo
     },
     "scalp": {
         "fast": "1",   "fast_limit": 100,
@@ -115,7 +115,7 @@ class Settings(BaseSettings):
 
     # Estrategia
     min_scan_score:   int   = 70     # score mínimo para generar propuesta
-    min_rr:           float = 1.3    # R:R mínimo aceptado en pre-flight
+    min_rr:           float = 2.5    # R:R mínimo aceptado en pre-flight (subido de 1.3)
     scan_interval_s:  int   = 30     # segundos entre scans automáticos
     speed_level:      str   = "standard"  # "nano" | "scalp" | "fast" | "standard"
 

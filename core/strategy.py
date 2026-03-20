@@ -404,6 +404,16 @@ class StrategyEngine:
         if opp.score < settings.min_scan_score:
             return None
 
+        tk    = state.ticker
+        entry = tk.last_price
+        if entry <= 0:
+            return None
+
+        # Filtro de volatilidad extrema (>5% de ATR en 15m)
+        if (tech.atr_15m / entry) > 0.05:
+            log.debug("propose(%s) bloqueado: volatilidad extrema (>5%%)", symbol)
+            return None
+
         _MIN_RR = settings.min_rr if hasattr(settings, "min_rr") else MIN_RR
 
         if not opp.is_actionable:
@@ -414,11 +424,6 @@ class StrategyEngine:
 
         equity = account.balance.total_equity
         if equity <= 0:
-            return None
-
-        tk    = state.ticker
-        entry = tk.last_price
-        if entry <= 0:
             return None
 
         side = "Buy" if opp.direction == "LONG" else "Sell"
@@ -523,6 +528,7 @@ class StrategyEngine:
         executor:     "BybitExecutor",
         leverage:     int   = DEFAULT_LEVERAGE,
         max_loss_usd: float = 0.0,
+        symbol_scores: Dict[str, float] = None,
     ) -> Optional[Tuple[str, OrderRequest]]:
         """
         Escanea todos los símbolos y retorna (symbol, best_proposal).
@@ -530,19 +536,26 @@ class StrategyEngine:
         """
         best_score  = -1
         best_result: Optional[Tuple[str, OrderRequest]] = None
+        symbol_scores = symbol_scores or {}
 
         for sym in symbols:
+            # Soft Blacklist SHPP: si la salud es pésima, ni lo intentamos
+            s_score = symbol_scores.get(sym, 0.0)
+            if s_score < -7.0:
+                continue
+
             state = states.get(sym)
             opp   = opps.get(sym)
             tech  = techs.get(sym)
             if not state or not opp or not tech:
                 continue
 
-            # Velocity boost: para objetivos pequeños, preferir símbolos con
-            # ATR% en rango óptimo para resolución rápida (0.5%-3%).
+            # Velocity boost + SHPP health boost
             entry = state.ticker.last_price if state.ticker.last_price > 0 else 0
-            vboost = _velocity_boost(goal_usd, entry, tech.atr_15m)
-            effective_score = opp.score + vboost
+            v_boost = _velocity_boost(goal_usd, entry, tech.atr_15m)
+            h_boost = s_score * 2.5   # +/- 25 pts máximo
+            
+            effective_score = opp.score + v_boost + h_boost
 
             if effective_score <= best_score:
                 continue   # no mejora el mejor encontrado hasta ahora

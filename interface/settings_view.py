@@ -342,6 +342,12 @@ class SettingsView(Gtk.ScrolledWindow):
                         self._score_sp,
                         "Más bajo = más señales, menos calidad"))
 
+        self._rr_sp = _spin(1.5, 10.0, settings.min_rr, 0.1, 1)
+        self._rr_sp.connect("value-changed", lambda sp: setattr(settings, "min_rr", sp.get_value()))
+        box.append(_row("R:R Mínimo (Neto)",
+                        self._rr_sp,
+                        "Relación Ganancia/Riesgo mínima para operar"))
+
         self._scan_sp = _spin(10, 300, settings.scan_interval_s, 5, 0)
         self._scan_sp.connect("value-changed", lambda sp: setattr(settings, "scan_interval_s", int(sp.get_value())))
         box.append(_row("Intervalo entre scans (s)", self._scan_sp))

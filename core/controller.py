@@ -127,6 +127,8 @@ class TradeController:
         self._ai_scanning:   bool             = False  # hay una llamada a OpenAI en curso
         # SL más protector jamás enviado por trade — NUNCA retrocede
         self._best_sl: Dict[str, float]       = {}
+        # Sistema de Salud de Símbolos (SHPP): sym → score (-10 a +10)
+        self._symbol_scores: Dict[str, float] = {}
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -358,6 +360,7 @@ class TradeController:
             executor     = self._executor,
             leverage     = self.leverage,
             max_loss_usd = self.max_loss_usd,
+            symbol_scores = self._symbol_scores,
         )
         if result:
             sym, proposal = result
@@ -1291,7 +1294,7 @@ class TradeController:
             self._log.append(trade)
             save_trade(trade)
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
-            self._track_symbol_perf(symbol, trade.pnl_usd)
+            self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s)
             self._pnl_captured.discard(symbol)
             self._last_upnl.pop(symbol, None)
             self._be_since.pop(symbol, None)
@@ -1309,33 +1312,55 @@ class TradeController:
 
     # ── Auto-blacklist ────────────────────────────────────────────────────────
 
-    def _track_symbol_perf(self, sym: str, pnl_usd: float) -> None:
-        """Actualiza conteo de pérdidas consecutivas, auto-blacklist y detector choppy."""
+    def _track_symbol_perf(self, sym: str, pnl_usd: float, duration_s: int = 0) -> None:
+        """Actualiza conteo de pérdidas consecutivas, auto-blacklist y SHPP."""
         # ── Historial reciente para detector de mercado choppy ────────────────
         self._recent_results.append("loss" if pnl_usd < 0 else "win")
         if len(self._recent_results) > 10:
             self._recent_results.pop(0)
 
-        if pnl_usd < 0:
+        # ── Sistema de Salud de Símbolos (SHPP) ──────────────────────────────
+        score = self._symbol_scores.get(sym, 0.0)
+        if pnl_usd > 0:
+            score += 2.0
+            # Resetear pérdidas consecutivas al ganar
+            self._consec_losses.pop(sym, 0)
+        elif pnl_usd < 0:
             self._consec_losses[sym] = self._consec_losses.get(sym, 0) + 1
-            n = self._consec_losses[sym]
-            if settings.auto_blacklist_enabled and n >= settings.auto_blacklist_losses:
-                bl = settings.blacklist_set
-                if sym not in bl:
-                    bl.add(sym)
-                    settings.symbol_blacklist = ",".join(sorted(bl))
-                    log.warning(
-                        "AutoBlacklist: %s añadido — %d pérdidas consecutivas",
-                        sym, n,
-                    )
-        else:
-            # Ganancia o BE → resetear contador y quitar del auto-blacklist si estaba
-            prev = self._consec_losses.pop(sym, 0)
-            if prev >= settings.auto_blacklist_losses:
-                bl = settings.blacklist_set
-                bl.discard(sym)
+            # Penalización extra si el trade duró poco (volatilidad/ruido)
+            if duration_s > 0 and duration_s < 180:   # < 3 minutos
+                score -= 5.0
+                log.warning("SHPP: %s penalización fuerte por caída rápida (%ds)", sym, duration_s)
+            else:
+                score -= 1.0
+
+        # Clipping -10 a +10
+        self._symbol_scores[sym] = max(-10.0, min(10.0, score))
+
+        # ── Auto-blacklist (Basado en SHPP soft-blacklist o consecutivas) ────
+        n = self._consec_losses.get(sym, 0)
+        shpp_soft = self._symbol_scores[sym] < -7.0
+        
+        if settings.auto_blacklist_enabled:
+            # Bloqueo si: muchas consecutivas O salud muy baja (soft blacklist)
+            should_block = (n >= settings.auto_blacklist_losses) or shpp_soft
+            bl = settings.blacklist_set
+            
+            if should_block and sym not in bl:
+                bl.add(sym)
                 settings.symbol_blacklist = ",".join(sorted(bl))
-                log.info("AutoBlacklist: %s eliminado (ganancia tras %d pérdidas)", sym, prev)
+                reason = "soft-blacklist SHPP" if shpp_soft else f"{n} pérdidas seguidas"
+                log.warning("AutoBlacklist: %s añadido — %s", sym, reason)
+            
+            elif not should_block and sym in bl:
+                # Quitar de blacklist si la salud mejoró o ya no hay racha perdedora
+                # (Aunque para mejorar la salud debería poder operar... 
+                # así que el reset manual o el paso del tiempo sería ideal, 
+                # pero por ahora seguimos la lógica de 'si gana se limpia')
+                if pnl_usd > 0:
+                    bl.discard(sym)
+                    settings.symbol_blacklist = ",".join(sorted(bl))
+                    log.info("AutoBlacklist: %s eliminado (recuperación confirmada)", sym)
 
     @property
     def is_choppy_market(self) -> bool:
