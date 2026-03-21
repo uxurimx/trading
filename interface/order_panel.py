@@ -620,7 +620,7 @@ class OrderPanel(Gtk.Box):
             if i < len(actives):
                 trade = actives[i]
                 sym   = trade.symbol
-                pos   = account.positions.get(sym)
+                pos   = account.get_position(sym)
                 mark  = pos.mark_price if pos and pos.mark_price > 0 else (pos.entry_price if pos else 0.0)
                 upnl  = pos.unrealized_pnl if pos else 0.0
                 row.show_trade(trade, mark, upnl)

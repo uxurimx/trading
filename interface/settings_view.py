@@ -666,6 +666,38 @@ class SettingsView(Gtk.ScrolledWindow):
 
         box.append(_sep())
 
+        # ── Gestión de Sesiones (TSAA) ────────────────────────────────────────
+        box.append(_section("GESTIÓN DE SESIONES (TSAA)"))
+        
+        # Nombre de sesión
+        self._sess_name_entry = Gtk.Entry()
+        self._sess_name_entry.set_hexpand(True)
+        self._sess_name_entry.set_text(settings.session_name)
+        self._sess_name_entry.connect("changed", lambda e: setattr(settings, "session_name", e.get_text()))
+        box.append(_row("Nombre de sesión", self._sess_name_entry, "Identificador para los reportes"))
+
+        # Duración
+        self._sess_dur_sp = _spin(0.1, 24.0, settings.session_duration_h, 0.1, 1)
+        self._sess_dur_sp.connect("value-changed", lambda sp: setattr(settings, "session_duration_h", sp.get_value()))
+        box.append(_row("Duración máxima (h)", self._sess_dur_sp, "Cierra sesión al expirar"))
+
+        # Meta PnL
+        self._sess_tp_sp = _spin(0.01, 5000.0, settings.session_target_pnl, 1.0, 2)
+        self._sess_tp_sp.connect("value-changed", lambda sp: setattr(settings, "session_target_pnl", sp.get_value()))
+        box.append(_row("Objetivo de beneficio ($)", self._sess_tp_sp, "Activa modo HARVEST"))
+
+        # Max Drawdown
+        self._sess_sl_sp = _spin(-5000.0, -0.01, settings.session_max_drawdown, 1.0, 2)
+        self._sess_sl_sp.connect("value-changed", lambda sp: setattr(settings, "session_max_drawdown", sp.get_value()))
+        box.append(_row("Pérdida máxima ($)", self._sess_sl_sp, "Liquida y detiene el bot"))
+        
+        # Límite API
+        self._sess_api_sp = _spin(0.01, 100.0, settings.session_api_limit, 0.1, 2)
+        self._sess_api_sp.connect("value-changed", lambda sp: setattr(settings, "session_api_limit", sp.get_value()))
+        box.append(_row("Límite gasto API ($)", self._sess_api_sp, "Detiene IA al alcanzar el costo"))
+
+        box.append(_sep())
+
         # ── Conexión (solo lectura) ──────────────────────────────────────────
         box.append(_section("CONEXIÓN"))
 

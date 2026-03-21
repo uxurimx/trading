@@ -54,11 +54,13 @@ def initialize_db() -> None:
     con.execute("""
         CREATE TABLE IF NOT EXISTS trading_sessions (
             id              VARCHAR PRIMARY KEY,
+            name            VARCHAR DEFAULT 'Nueva Sesión',
             start_ts        BIGINT  NOT NULL,
             end_ts          BIGINT  DEFAULT 0,
             initial_balance DOUBLE  DEFAULT 0,
             final_balance   DOUBLE  DEFAULT 0,
             pnl             DOUBLE  DEFAULT 0,
+            api_cost        DOUBLE  DEFAULT 0,
             status          VARCHAR DEFAULT 'ACTIVE'
         )
     """)
@@ -92,6 +94,8 @@ def initialize_db() -> None:
         "ALTER TABLE trade_journal ADD COLUMN strategy_tag VARCHAR DEFAULT 'absorcion'",
         "ALTER TABLE trade_journal ADD COLUMN ai_reasoning TEXT DEFAULT ''",
         "ALTER TABLE trade_journal ADD COLUMN session_id VARCHAR DEFAULT ''",
+        "ALTER TABLE trading_sessions ADD COLUMN name VARCHAR DEFAULT 'Nueva Sesión'",
+        "ALTER TABLE trading_sessions ADD COLUMN api_cost DOUBLE DEFAULT 0",
     ]:
         try:
             con.execute(migration)
@@ -229,7 +233,7 @@ def get_all_trades(limit: int = 200) -> list:
             SELECT id, symbol, side, auto_mode, state,
                    entry_price, sl_price, tp_price, qty, risk_usd,
                    rr_ratio, opp_score, pnl_usd, close_reason, strategy_tag,
-                   opened_at, closed_at, duration_s
+                   opened_at, closed_at, duration_s, session_id
             FROM trade_journal
             ORDER BY closed_at DESC LIMIT ?
         """, (limit,)).fetchall()
@@ -254,6 +258,7 @@ def get_all_trades(limit: int = 200) -> list:
                 "opened_at":    int(r[15] or 0),
                 "closed_at":    int(r[16] or 0),
                 "duration_s":   int(r[17] or 0),
+                "session_id":   r[18] or "",
             }
             for r in rows
         ]
@@ -289,20 +294,38 @@ def save_session(session_data: dict) -> None:
         con = get_connection()
         con.execute("""
             INSERT OR REPLACE INTO trading_sessions
-                (id, start_ts, end_ts, initial_balance, final_balance, pnl, status)
-            VALUES (?,?,?,?,?,?,?)
+                (id, name, start_ts, end_ts, initial_balance, final_balance, pnl, api_cost, status)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, (
             session_data["id"],
+            session_data.get("name", "Nueva Sesión"),
             session_data["start_ts"],
             session_data["end_ts"],
             session_data["initial_balance"],
             session_data["final_balance"],
             session_data["pnl"],
+            session_data.get("api_cost", 0.0),
             session_data["status"],
         ))
         con.close()
     except Exception as e:
         log.error("save_session falló: %s", e)
+
+
+def close_all_sessions() -> None:
+    """Marca todas las sesiones ACTIVE como CLOSED (útil para limpieza de huérfanas)."""
+    try:
+        con = get_connection()
+        now = int(time.time())
+        con.execute("""
+            UPDATE trading_sessions 
+            SET status = 'CLOSED', end_ts = ? 
+            WHERE status != 'CLOSED'
+        """, (now,))
+        con.close()
+        log.info("DB: Todas las sesiones activas han sido cerradas forzosamente.")
+    except Exception as e:
+        log.error("close_all_sessions falló: %s", e)
 
 
 def get_session_trades(session_id: str) -> list:
@@ -315,6 +338,7 @@ def get_session_trades(session_id: str) -> list:
             WHERE session_id = ? AND state = 'CLOSED'
             ORDER BY closed_at ASC
         """, (session_id,)).fetchall()
+        con.close()
         con.close()
         return [
             {
@@ -332,5 +356,33 @@ def get_session_trades(session_id: str) -> list:
         ]
     except Exception as e:
         log.error("get_session_trades falló: %s", e)
+        return []
+
+def get_all_sessions(limit: int = 50) -> list:
+    """Retorna historial completo de sesiones para la UI."""
+    try:
+        con = get_connection()
+        rows = con.execute("""
+            SELECT id, name, start_ts, end_ts, initial_balance, final_balance, pnl, api_cost, status
+            FROM trading_sessions
+            ORDER BY start_ts DESC LIMIT ?
+        """, (limit,)).fetchall()
+        con.close()
+        return [
+            {
+                "id":              r[0],
+                "name":            r[1],
+                "start_ts":        int(r[2]),
+                "end_ts":          int(r[3]),
+                "initial_balance": float(r[4]),
+                "final_balance":   float(r[5]),
+                "pnl":             float(r[6]),
+                "api_cost":        float(r[7]),
+                "status":          r[8],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        log.error("get_all_sessions falló: %s", e)
         return []
 

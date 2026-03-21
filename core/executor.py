@@ -394,9 +394,12 @@ class BybitExecutor:
 
         try:
             data = await self._post("/v5/position/trading-stop", body)
-            ok = data.get("retCode") == 0
+            ret_code = data.get("retCode")
+            # 0 = éxito. 
+            # 3400099 = "not modified" (ya tiene ese SL/TP), a veces ocurre si el create_order ya lo puso.
+            ok = ret_code in (0, 3400099)
             if not ok:
-                log.warning("set_sl_tp failed: %s — %s", symbol, data.get("retMsg"))
+                log.warning("set_sl_tp failed: %s — %s (code %s)", symbol, data.get("retMsg"), ret_code)
             return ok
         except Exception as e:
             log.error("set_sl_tp exception: %s", e)

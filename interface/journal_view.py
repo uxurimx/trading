@@ -211,6 +211,7 @@ class _TradeCard(Gtk.Box):
         auto   = t["auto_mode"] or ""
         opened = t["opened_at"]
         closed = t["closed_at"]
+        sess_id = t.get("session_id", "")
 
         # Hora de cierre
         hora = (datetime.datetime.fromtimestamp(closed).strftime("%H:%M")
@@ -266,6 +267,8 @@ class _TradeCard(Gtk.Box):
             f'<span color="{HEX["sell"]}">${risk:.2f}</span>'
             f'  <span color="{HEX["sub"]}">Modo: </span>'
             f'<span color="{HEX["blue"]}">{auto}</span>'
+            f'  <span color="{HEX["sub"]}">Sesión: </span>'
+            f'<span color="{HEX["warn"]}">{sess_id}</span>'
             f'  <span color="{HEX["sub"]}">Estrategia: </span>'
             f'<span color="{strat_color}" weight="bold">{strategy.upper()}</span>'
         )
@@ -465,7 +468,7 @@ class JournalView(Gtk.Box):
         for t in self._all_trades:
             if cutoff > 0 and t.get("closed_at", 0) < cutoff:
                 continue
-            if query and query not in t.get("symbol", "").upper():
+            if query and query not in t.get("symbol", "").upper() and query not in t.get("session_id", "").upper():
                 continue
             filtered.append(t)
 

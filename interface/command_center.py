@@ -1764,7 +1764,7 @@ class CommandCenter(Gtk.Box):
                 self._trade_cards[sym] = card
                 self._cards_box.append(card)
 
-            pos = account.positions.get(sym)
+            pos = account.get_position(sym)
 
             # Precio en tiempo real: usar ticker del MarketStream (actualiza con cada trade)
             # Fallback: mark_price de la posición (solo se actualiza en cambios de posición)

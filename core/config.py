@@ -115,9 +115,11 @@ class Settings(BaseSettings):
     circuit_breaker_enabled: bool  = True
 
     # ── Módulo de Sesiones (TSAA) ──────────────────────────────────────────
+    session_name:         str   = "Nueva Sesión"
     session_duration_h:   float = 4.0      # Duración máxima de la sesión en horas
     session_target_pnl:   float = 50.0     # Take-Profit global de la sesión (USDT)
     session_max_drawdown: float = -20.0    # Stop-Loss global de la sesión (USDT)
+    session_api_limit:    float = 5.0      # Límite de gasto en API por sesión (USD)
 
     # Protección activa (breakeven / trailing)
     breakeven_pct:    float = 40.0   # % del TP distance para activar breakeven

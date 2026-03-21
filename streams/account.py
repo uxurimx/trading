@@ -111,7 +111,20 @@ class AccountState:
     connected:   bool                 = False
     error:       str                  = ""
 
+    def get_position(self, symbol: str) -> Optional[Position]:
+        """Busca la posición para un símbolo, probando claves directas y compuestas (Hedge)."""
+        # 1. Probar clave directa (One-way o ya formateada)
+        if symbol in self.positions:
+            return self.positions[symbol]
+        # 2. Probar modo Hedge (idx 1=Long, 2=Short)
+        for idx in (1, 2):
+            key = f"{symbol}_{idx}"
+            if key in self.positions:
+                return self.positions[key]
+        return None
+
     def open_positions(self) -> List[Position]:
+        """Lista de todas las posiciones con tamaño > 0."""
         return [p for p in self.positions.values() if p.size > 0]
 
 
@@ -194,23 +207,41 @@ class AccountStream:
             if size <= 0:
                 continue
             sym = item.get("symbol", "")
-            self.state.positions[sym] = self._parse_position(item)
+            idx = int(item.get("positionIdx", 0))
+            self.state.positions[f"{sym}_{idx}"] = self._parse_position(item)
 
     async def _fetch_balance(self, session: aiohttp.ClientSession) -> None:
-        data = await self._get(session, "/v5/account/wallet-balance", {
-            "accountType": "UNIFIED",
-        })
-        if data.get("retCode") != 0:
-            return
-        for acc in data.get("result", {}).get("list", []):
-            if acc.get("accountType") in ("UNIFIED", "CONTRACT"):
+        # Intentar UNIFIED primero (Standard en Bybit v5 a veces requiere CONTRACT)
+        for acc_type in ("UNIFIED", "CONTRACT"):
+            data = await self._get(session, "/v5/account/wallet-balance", {
+                "accountType": acc_type,
+            })
+            if data.get("retCode") != 0 or not data.get("result", {}).get("list"):
+                continue
+                
+            for acc in data.get("result", {}).get("list", []):
                 b = self.state.balance
-                b.total_equity      = float(acc.get("totalEquity", 0) or 0)
-                b.wallet_balance    = float(acc.get("totalWalletBalance", 0) or 0)
-                b.available_balance = float(acc.get("totalAvailableBalance", 0) or 0)
-                b.used_margin       = float(acc.get("totalInitialMargin", 0) or 0)
-                b.unrealized_pnl    = float(acc.get("totalUnrealisedPnl", 0) or 0)
-                break
+                # Aggregate fields (Unified)
+                b.total_equity      = float(acc.get("totalEquity") or acc.get("equity") or 0)
+                b.wallet_balance    = float(acc.get("totalWalletBalance") or acc.get("walletBalance") or 0)
+                b.available_balance = float(acc.get("totalAvailableBalance") or acc.get("availableBalance") or 0)
+                b.used_margin       = float(acc.get("totalInitialMargin") or acc.get("marginBalance") or 0)
+                b.unrealized_pnl    = float(acc.get("totalUnrealisedPnl") or acc.get("unrealisedPnl") or 0)
+                
+                # Coin-specific fields (Standard/Classic) - ALWAYS Check these
+                if "coin" in acc and acc["coin"]:
+                    # Buscar USDT específicamente en la lista de monedas
+                    u_coin = next((c for c in acc["coin"] if c.get("coin") == "USDT"), acc["coin"][0])
+                    # Si los campos globales se detectan como 0, usar los de la moneda
+                    if b.wallet_balance == 0:
+                        b.wallet_balance = float(u_coin.get("walletBalance") or 0)
+                    if b.available_balance == 0:
+                        b.available_balance = float(u_coin.get("availableToWithdraw") or u_coin.get("availableBalance") or 0)
+                    if b.total_equity == 0:
+                        b.total_equity = float(u_coin.get("equity") or b.wallet_balance)
+                
+                if b.wallet_balance > 0:
+                    return # Éxito
 
     async def _fetch_daily_pnl(self, session: aiohttp.ClientSession) -> None:
         """PnL realizado del día (posiciones cerradas desde 00:00 UTC)."""
@@ -298,12 +329,14 @@ class AccountStream:
             for item in data:
                 size = float(item.get("size", 0) or 0)
                 sym  = item.get("symbol", "")
+                idx  = int(item.get("positionIdx", 0))
                 if not sym:
                     continue
+                key = f"{sym}_{idx}"
                 if size <= 0:
-                    self.state.positions.pop(sym, None)
+                    self.state.positions.pop(key, None)
                 else:
-                    self.state.positions[sym] = self._parse_position(item)
+                    self.state.positions[key] = self._parse_position(item)
 
         elif topic == "execution":
             for item in data:
@@ -318,13 +351,19 @@ class AccountStream:
                 if item.get("accountType") in ("UNIFIED", "CONTRACT"):
                     b = self.state.balance
                     for coin in item.get("coin", []):
-                        if coin.get("coin") in ("USDT", ""):
-                            pass
-                    b.total_equity      = float(item.get("totalEquity", b.total_equity) or b.total_equity)
-                    b.wallet_balance    = float(item.get("totalWalletBalance", b.wallet_balance) or b.wallet_balance)
-                    b.available_balance = float(item.get("totalAvailableBalance", b.available_balance) or b.available_balance)
-                    b.used_margin       = float(item.get("totalInitialMargin", b.used_margin) or b.used_margin)
-                    b.unrealized_pnl    = float(item.get("totalUnrealisedPnl", b.unrealized_pnl) or b.unrealized_pnl)
+                        if coin.get("coin") == "USDT":
+                            b.total_equity      = float(coin.get("equity") or b.total_equity)
+                            b.wallet_balance    = float(coin.get("walletBalance") or b.wallet_balance)
+                            b.available_balance = float(coin.get("availableToWithdraw") or b.available_balance)
+                            b.unrealized_pnl    = float(coin.get("unrealisedPnl") or b.unrealized_pnl)
+                            break
+                    
+                    # También intentar campos globales (Unified)
+                    b.total_equity      = float(item.get("totalEquity") or item.get("equity") or b.total_equity)
+                    b.wallet_balance    = float(item.get("totalWalletBalance") or item.get("walletBalance") or b.wallet_balance)
+                    b.available_balance = float(item.get("totalAvailableBalance") or item.get("availableBalance") or b.available_balance)
+                    b.used_margin       = float(item.get("totalInitialMargin") or item.get("marginBalance") or b.used_margin)
+                    b.unrealized_pnl    = float(item.get("totalUnrealisedPnl") or item.get("unrealisedPnl") or b.unrealized_pnl)
 
     def _parse_position(self, item: dict) -> Position:
         def f(key: str, default: float = 0.0) -> float:

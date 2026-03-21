@@ -50,6 +50,7 @@ from interface.order_panel import OrderPanel
 from interface.command_center import CommandCenter
 from interface.journal_view import JournalView
 from interface.settings_view import SettingsView
+from interface.session_view import SessionView
 from interface.extractor_view import ExtractorView
 from streams.account import AccountStream, AccountState, Position, AccountBalance
 from streams.klines import KlineStream
@@ -1470,6 +1471,12 @@ class MainWindow(Adw.ApplicationWindow):
             self._journal_view, "journal", "📋 Journal", "document-open-symbolic"
         )
 
+        # ── Pestaña 4: Sesiones ─────────────────────────────────────────
+        self._session_view = SessionView()
+        self._stack.add_titled_with_icon(
+            self._session_view, "sessions", "📁 Sesiones", "folder-open-symbolic"
+        )
+
         # ── Pestaña 4: Configuración ────────────────────────────────────
         self._settings_view = SettingsView(paper_wallet=self._paper_wallet,
                                            on_paper_toggle=self._on_paper_toggle)
@@ -1665,6 +1672,7 @@ class MainWindow(Adw.ApplicationWindow):
                                 market_states=self.stream.states)
         self._extractor_view.update(account, market_states=self.stream.states)
         self._journal_view.refresh()
+        self._session_view.refresh()
         if settings.paper_trading:
             self._settings_view.refresh_paper_stats()
 

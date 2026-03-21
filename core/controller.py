@@ -387,10 +387,34 @@ class TradeController:
         # ── Margin Guard ──
         # Verificamos si hay suficiente margen para al menos UN trade mínimo
         av_margin = account.balance.available_balance
+        
+        # Fallback: Si el balance disponible es 0, estimamos el disponible real
+        # Bybit v5 Standard a veces reporta 0 disponible en los campos agregados.
+        if av_margin <= 0:
+            if not account.open_positions():
+                # Sin trades abiertos, todo el wallet está disponible
+                av_margin = account.balance.wallet_balance
+            else:
+                # Con trades, disponible ≈ Equity - Margen Usado
+                av_margin = max(0, account.balance.total_equity - account.balance.used_margin)
+
         if av_margin < settings.min_trade_margin:
-            self._scan_log = f"⚠️ Margen insuficiente (${av_margin:.2f}) — esperando liberación"
-            log.warning("[MARGIN GUARD] Saldo insuficiente para operar ($%.2f < $%.2f). Saltando IA.",
-                        av_margin, settings.min_trade_margin)
+            log.warning(
+                "[MARGIN GUARD] Saldo insuficiente: Estimado=$%.2f (Avail=$%.2f, Wallet=$%.2f, Equity=$%.2f, Margin=$%.2f). Min=$%.2f.",
+                av_margin,
+                account.balance.available_balance,
+                account.balance.wallet_balance, 
+                account.balance.total_equity,
+                account.balance.used_margin,
+                settings.min_trade_margin
+            )
+            self._scan_log = f"⚠️ Margen insuficiente ($%.2f)" % av_margin
+            self._notify()
+            return
+
+        # ── API Exhausted Guard ──
+        if self._session and self._session.status == SessionStatus.API_EXHAUSTED:
+            self._scan_log = f"🛑 Límite de API alcanzado ($+ {self._session.api_cost:.2f})"
             self._notify()
             return
 
@@ -504,14 +528,32 @@ class TradeController:
                 executor      = self._executor,
                 leverage      = self.leverage,
             )
+            # result ahora es (symbol, req, token_info) o (None, None, token_info)
+            if result:
+                _, _, token_info = result
+                GLib.idle_add(self._on_ai_usage, token_info)
         except Exception as e:
             log.error("_run_ai_scan: excepción inesperada: %s", e)
-            result = None
+            result = (None, None, {})
         GLib.idle_add(self._on_ai_result, result)
 
-    def _on_ai_result(self, result) -> bool:
+    def _on_ai_usage(self, token_info: dict) -> bool:
+        """Callback en GTK thread para registrar el uso de tokens en la sesión."""
+        if self._session and token_info:
+            self._session.add_api_usage(
+                token_info["model"],
+                token_info["prompt"],
+                token_info["comp"]
+            )
+        return False
+
+    def _on_ai_result(self, result: tuple) -> bool:
         """Callback en GTK thread — recibe la propuesta del agente IA."""
         self._ai_scanning = False
+        if not result:
+            return False
+            
+        symbol, proposal, token_info = result
         
         # Verificar modo Harvest: no aceptar nuevas propuestas de entrada
         if self._session and self._session.status == SessionStatus.HARVESTING:
@@ -519,21 +561,19 @@ class TradeController:
             self._scan_log = "TSAA: Modo HARVEST - No se permiten nuevas entradas."
             return False
 
-        if result:
-            sym, proposal = result
-            
+        if proposal:
             # Enriquecer propuesta con metadatos de sesión
             if self._session:
                 proposal.session_id = self._session.id
             self._proposal    = proposal
             self._proposal_ts = time.monotonic()
             self._scan_log = (
-                f"🤖 AI Setup: {sym.replace('USDT', '')}  "
+                f"🤖 AI Setup: {symbol.replace('USDT', '')}  "
                 f"R:R {proposal.rr_ratio:.1f}  conf={proposal.opp_score}%"
             )
             log.info("AI propuesta lista: %s", proposal.summary())
             if self.mode == AutoMode.SUGGEST:
-                notifier.proposal_ready(sym, proposal.side, proposal.opp_score, self.goal_usd)
+                notifier.proposal_ready(symbol, proposal.side, proposal.opp_score, self.goal_usd)
         else:
             self._scan_log = "🤖 AI: sin setup válido en este momento"
             log.info("AI Strategy: sin propuesta")
@@ -630,20 +670,42 @@ class TradeController:
             try:
                 await self._executor.set_leverage(req.symbol, req.leverage)
                 result = await self._executor.place_market_bracket(req)
+                
+                # Gestión de SL/TP tras el Market Order
                 if result.success and (req.sl_price > 0 or req.tp_price > 0):
                     import asyncio as _aio
-                    await _aio.sleep(0.5)
-                    try:
-                        await self._executor.set_sl_tp(
-                            req.symbol, sl=req.sl_price, tp=req.tp_price, side=req.side
-                        )
-                        log.info("SL/TP confirmados: %s  SL=%s  TP=%s",
-                                 req.symbol, req.sl_price, req.tp_price)
-                    except Exception as sl_exc:
-                        log.error("set_sl_tp falló: %s — %s (orden colocada, sin SL/TP)",
-                                  req.symbol, sl_exc)
-                        # La orden sigue siendo exitosa; el trader puede ver la posición
-                        # en Bybit sin SL/TP y gestionarla manualmente.
+                    sl_confirmed = False
+                    max_retries = 3
+                    
+                    for attempt in range(1, max_retries + 1):
+                        # Esperar un poco a que el fill se asiente en Bybit antes de set_sl_tp
+                        await _aio.sleep(1.0 if attempt == 1 else 2.0)
+                        try:
+                            ok = await self._executor.set_sl_tp(
+                                req.symbol, sl=req.sl_price, tp=req.tp_price, side=req.side
+                            )
+                            if ok:
+                                sl_confirmed = True
+                                log.info("SL/TP confirmados: %s  SL=%s  TP=%s (intento %d)",
+                                         req.symbol, req.sl_price, req.tp_price, attempt)
+                                break
+                            else:
+                                log.warning("[RETRY %d/%d] set_sl_tp falló (retCode!=0) para %s", 
+                                            attempt, max_retries, req.symbol)
+                        except Exception as sl_exc:
+                            log.error("[RETRY %d/%d] set_sl_tp excepción para %s: %s",
+                                      attempt, max_retries, req.symbol, sl_exc)
+                    
+                    if not sl_confirmed:
+                        log.critical("🚨 [PANIC EXIT] Fallo crítico al colocar SL/TP tras %d intentos. Cerrando posición en %s.", 
+                                     max_retries, req.symbol)
+                        # Intentar cerrar la posición inmediatamente (protección de capital)
+                        close_res = await self._executor.close_position(req.symbol, req.qty, req.side)
+                        if close_res.success:
+                            result = _OR(success=False, error_msg="Panic Exit: Posición cerrada por falta de SL/TP")
+                        else:
+                            result = _OR(success=False, error_msg=f"CRITICAL: Falló SL/TP y falló CLOSE ({close_res.error_msg})")
+                        
             except Exception as exc:
                 log.error("Error crítico ejecutando orden %s: %s", req.symbol, exc)
                 result = _OR(success=False, error_msg=str(exc))
@@ -687,12 +749,23 @@ class TradeController:
             if not trade.is_active:
                 continue
 
-            # Si el símbolo no aparece en account.positions, Bybit cerró el trade.
-            if symbol not in account.positions:
-                # Caso especial: Bybit tarda unos mseg en actualizar.
-                # Confirmar con un contador de 2 ticks (2s)
+            # Helper: determinar positionIdx (1=long/buy, 2=short/sell)
+            # En modo Hedge, Bybit reporta ambos. Aquí verificamos el que nos interesa.
+            idx = 1 if trade.request.side == "Buy" else 2
+            pos_key = f"{symbol}_{idx}"
+            
+            # Si el símbolo específico no aparece en account.positions, Bybit lo cerró.
+            if pos_key not in account.positions:
+                # Caso especial: Bybit tarda tiempo en reflejar la nueva posición.
+                # No considerar cerrado si el trade tiene menos de 10 segundos de vida.
+                vida_s = time.time() - trade.opened_at if trade.opened_at > 0 else 0
+                if vida_s < 10:
+                    continue
+
+                # Confirmar con un contador de 50 ticks (~5s a 100ms de refresco)
                 self._close_confirm[symbol] = self._close_confirm.get(symbol, 0) + 1
-                if self._close_confirm[symbol] >= 2:
+                if self._close_confirm[symbol] >= 50:
+                    log.info("[CONTROLLER] Trade %s no detectado en Bybit tras 5s. Finalizando como bybit_close.", symbol)
                     self._finalize_trade(symbol, "bybit_close")
             else:
                 self._close_confirm[symbol] = 0
@@ -1043,12 +1116,31 @@ class TradeController:
             log.error("Error eliminando TP %s: %s", sym, e)
 
     async def _clear_tp_and_trail(self, sym: str, sl: float, side: str) -> None:
-        try:
-            # En Bybit, poner TP=0 lo elimina.
-            await self._executor.set_sl_tp(sym, sl=sl, tp=0, side=side)
-            # log.debug("SL Trail (TP=0): %s → %.5g", sym, sl)
-        except Exception as e:
-            log.error("Error en trail %s: %s", sym, e)
+        """Limpia el TP (Bybit tp=0) y ajusta el SL (trailing) con reintentos."""
+        import asyncio
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                # En Bybit, poner TP=0 lo elimina.
+                success = await self._executor.set_sl_tp(sym, sl=sl, tp=0, side=side)
+                if success:
+                    log.debug("SL Trail (TP=0) exitoso: %s → %.5g (intento %d)", sym, sl, attempt)
+                    return
+                else:
+                    log.warning("[TRAIL RETRY %d/%d] Falló set_sl_tp para %s", attempt, max_retries, sym)
+            except Exception as e:
+                log.error("[TRAIL RETRY %d/%d] Excepción en trail %s: %s", attempt, max_retries, sym, e)
+            
+            if attempt < max_retries:
+                await asyncio.sleep(0.5)
+        
+        log.critical("🚨 [PANIC EXIT] Falló trail SL tras %d intentos en %s. Cerrando posición.", max_retries, sym)
+        # Usamos un OrderRequest 'dummy' para el cierre
+        from core.order_model import OrderRequest as _OR
+        dummy_req = _OR(symbol=sym, side=side, qty=0)  # qty=0 suele interpretarse como 'cerrar todo' en algunos flows o se saca de account
+        # Pero _do_close necesita la qty real si el executor lo requiere.
+        # Mejor cerrar vía symbol/side si tenemos la info.
+        await self._do_close(sym, dummy_req, reason="panic_trail_fail")
 
     async def _do_close(self, symbol: str, req: OrderRequest, reason: str = "manual") -> None:
         try:

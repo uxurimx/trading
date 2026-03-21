@@ -289,7 +289,7 @@ class AIStrategyAgent:
         goal_usd:      float,
         executor:      "BybitExecutor",
         leverage:      int,
-    ) -> Optional[Tuple[str, "OrderRequest"]]:
+    ) -> Optional[Tuple[str, "OrderRequest", dict]]:
         import asyncio
         try:
             import openai as _openai
@@ -359,7 +359,15 @@ class AIStrategyAgent:
             )
             elapsed = time.monotonic() - t0
             raw     = response.choices[0].message.content or "{}"
-            log.info("AI Strategy: respuesta en %.1fs (%d chars)", elapsed, len(raw))
+            usage   = response.usage
+            token_info = {
+                "model":  model,
+                "prompt": usage.prompt_tokens,
+                "comp":   usage.completion_tokens
+            } if usage else {}
+
+            log.info("AI Strategy: respuesta en %.1fs (%d chars) | Tokens: %s", 
+                     elapsed, len(raw), usage.total_tokens if usage else "?")
             
             # --- [NUEVO] CONTROL DE OBSOLESCENCIA ---
             if elapsed > settings.ai_max_latency_s:
@@ -396,7 +404,7 @@ class AIStrategyAgent:
 
         if action != "TRADE":
             log.info("AI Strategy: NO_TRADE — %s", reasoning[:200])
-            return None
+            return None, None, token_info
 
         # ── Extraer y validar campos ───────────────────────────────────────────
         symbol = str(data.get("symbol", "")).strip().upper()
@@ -513,7 +521,7 @@ class AIStrategyAgent:
             "AI Strategy: TRADE %s %s  entry=%.5g  SL=%.5g  TP=%.5g  R:R=%.2f  conf=%d%%",
             side, symbol, entry, sl, tp, rr, conf,
         )
-        return symbol, req
+        return symbol, req, token_info
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
