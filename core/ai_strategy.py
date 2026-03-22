@@ -116,6 +116,7 @@ def _build_market_snapshot(
     Formato denso pero legible para el modelo.
     """
     # Filtrar y rankear
+    _MIN_VOL_24H = 5_000_000.0   # $5M USD — mínimo de liquidez para ejecución segura de SL
     candidates = []
     for sym in symbols:
         opp  = opps.get(sym)
@@ -127,6 +128,10 @@ def _build_market_snapshot(
             continue
         price = ms.ticker.last_price
         if price <= 0:
+            continue
+        # Filtro de liquidez: descartar símbolos con volumen 24h < $5M USD
+        vol_24h = ms.ticker.volume_24h
+        if vol_24h < _MIN_VOL_24H:
             continue
         atr_pct = tech.atr_15m / price * 100
         if atr_pct < settings.ai_min_atr_pct:
@@ -316,7 +321,8 @@ class AIStrategyAgent:
         with strategy_logger.context() as trace_id:
             self._last_call_ts = time.monotonic()
 
-            # Contar candidatos que pasan TODOS los filtros (score + ATR)
+            # Contar candidatos que pasan TODOS los filtros (score + ATR + volumen 24h)
+            _MIN_VOL_24H = 5_000_000.0
             n_candidates = 0
             for s in symbols:
                 opp  = opps.get(s)
@@ -325,6 +331,8 @@ class AIStrategyAgent:
                 if not opp or opp.score < settings.ai_min_score:
                     continue
                 if not tech or not ms or ms.ticker.last_price <= 0:
+                    continue
+                if ms.ticker.volume_24h < _MIN_VOL_24H:
                     continue
                 if tech.atr_15m / ms.ticker.last_price * 100 < settings.ai_min_atr_pct:
                     continue
@@ -536,8 +544,12 @@ class AIStrategyAgent:
                 return None
 
             # ── Sizing ─────────────────────────────────────────────────────────
+            # Slippage buffer del 15%: reduce qty para que el riesgo real (con slippage)
+            # no supere el planeado. Equivale a calcular el tamaño como si el riesgo
+            # fuera 15% mayor al esperado, absorbiendo movimientos de precio al ejecutar SL.
+            _SLIPPAGE_BUFFER = 1.15
             net_tp_unit = tp_dist - rt_fees
-            qty = goal_usd / net_tp_unit
+            qty = goal_usd / (net_tp_unit * _SLIPPAGE_BUFFER)
 
             # Calcular balance disponible real (mismo fallback que _run_scan)
             _bal   = account.balance

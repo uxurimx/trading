@@ -52,7 +52,7 @@ MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 # scan_interval_s, breakeven_pct, profit_lock_pct, trailing_pct, be_hold_time_s vienen de settings
 
 # ─── Auxiliares de cálculo ────────────────────────────────────────────────────
-_BE_FEE_PCT        = 0.0015   # 0.15% para cubrir fees + micro-profit al entrar en BE
+_BE_FEE_PCT        = 0.0025   # 0.11% round-trip fees + 0.14% slippage buffer para alts de baja liquidez
 _MIN_BE_PROGRESS   = 0.01     # progreso mínimo absoluto para mover a BE (evita t=0)
 
 
@@ -124,6 +124,8 @@ class TradeController:
         self._best_sl: Dict[str, float]       = {}
         # Sistema de Salud de Símbolos (SHPP): sym → score (-10 a +10)
         self._symbol_scores: Dict[str, float] = {}
+        # Blacklist temporal por slippage excesivo: sym → unix_ts de expiración
+        self._slippage_blacklist: Dict[str, float] = {}
 
         # ── Módulo de Sesiones (TSAA) ──
         self._session: Optional[SessionManager] = None
@@ -618,6 +620,15 @@ class TradeController:
         if req.symbol in settings.blacklist_set:
             return False, f"{req.symbol} está en la blacklist"
 
+        # Blacklist temporal por slippage excesivo (4h tras pérdida > 1.5× riesgo)
+        if req.symbol in self._slippage_blacklist:
+            expiry = self._slippage_blacklist[req.symbol]
+            if time.time() < expiry:
+                remaining_h = (expiry - time.time()) / 3600
+                return False, f"{req.symbol} bloqueado por slippage excesivo ({remaining_h:.1f}h restantes)"
+            else:
+                del self._slippage_blacklist[req.symbol]
+
         # Cooldown por símbolo+dirección tras weak_exit / time_stop
         if req.symbol in self._exit_cooldown:
             prev_side, expire_at = self._exit_cooldown[req.symbol]
@@ -910,22 +921,38 @@ class TradeController:
                 if vida_s < 10:
                     continue
 
-                # Confirmar con un contador de 50 ticks (~5s a 100ms de refresco)
+                # Confirmar con un contador de 150 ticks (~15s a 100ms de refresco)
+                # Bybit puede tardar varios segundos en reflejar posiciones cerradas vía API
                 self._close_confirm[symbol] = self._close_confirm.get(symbol, 0) + 1
-                if self._close_confirm[symbol] >= 50:
+                if self._close_confirm[symbol] >= 150:
                     # Calcular PnL real desde execution events acumulados por WebSocket.
                     # account.daily_pnl se actualiza con execPnl - execFee de cada ejecución.
                     # delta = PnL total (incluyendo fees de entrada y salida) desde apertura.
+                    real_pnl = 0.0
                     if symbol in self._pnl_captured:
                         real_pnl = account.daily_pnl - trade.pnl_at_open
                         log.info(
-                            "[CONTROLLER] %s bybit_close — PnL real=$%.4f "
+                            "[CONTROLLER] %s — PnL real=$%.4f "
                             "(daily=%.4f − base=%.4f)",
                             symbol, real_pnl, account.daily_pnl, trade.pnl_at_open,
                         )
                         trade.pnl_usd = real_pnl
-                    log.info("[CONTROLLER] Trade %s no detectado en Bybit tras 5s. Finalizando como bybit_close.", symbol)
-                    self._finalize_trade(symbol, "bybit_close")
+
+                    # Determinar razón de cierre más descriptiva según estado y PnL
+                    _close_reason = "bybit_close"
+                    if trade.state in (TradeState.TRAILING, TradeState.BREAKEVEN):
+                        _close_reason = "be_sl"
+                    elif real_pnl > 0:
+                        _close_reason = "tp_triggered"
+                    else:
+                        _close_reason = "sl_triggered"
+
+                    log.info(
+                        "[CONTROLLER] Trade %s no detectado en Bybit tras 15s. "
+                        "Finalizando como %s (estado=%s PnL=$%.4f).",
+                        symbol, _close_reason, trade.state.name, real_pnl,
+                    )
+                    self._finalize_trade(symbol, _close_reason)
             else:
                 self._close_confirm[symbol] = 0
 
@@ -942,6 +969,18 @@ class TradeController:
             save_trade(trade)
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
             self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s, trade.close_reason)
+
+            # ── Slippage Blacklist: pérdida > 1.5× riesgo planeado → 4h de bloqueo ──
+            planned_risk = abs(trade.request.risk_usd) if trade.request and trade.request.risk_usd else 0.0
+            actual_loss  = -trade.pnl_usd  # positivo cuando hay pérdida
+            if planned_risk > 0 and actual_loss > planned_risk * 1.5:
+                expiry = time.time() + 4 * 3600
+                self._slippage_blacklist[symbol] = expiry
+                log.warning(
+                    "[SLIPPAGE] %s bloqueado 4h — pérdida $%.4f = %.1f× riesgo planeado ($%.4f)",
+                    symbol, actual_loss, actual_loss / planned_risk, planned_risk,
+                )
+
             self._pnl_captured.discard(symbol)
             self._last_upnl.pop(symbol, None)
             self._be_since.pop(symbol, None)
@@ -1058,27 +1097,13 @@ class TradeController:
                     self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
                     return
 
-        # ── Salida por Pérdida de Fuerza (Volume Drop / RSI) ───────────────
+        # ── Salida por RSI Agotado ───────────────────────────────────────────
+        # vol_drop_50 eliminado: el Trailing Escalonado protege ganancias sin cerrar por susto de volumen.
         if trade.state == TradeState.OPEN and progress > 0.15:
-            # Umbral mínimo de profit para permitir salida de emergencia:
-            # no cerrar si no cubrimos al menos el round-trip de fees (0.12% del notional).
-            # Sin ganancia real, es mejor aguantar hacia el TP o el SL original.
-            _notional    = trade.request.notional if trade.request else 0.0
-            _fee_thresh  = _notional * 0.0012       # 0.12% round-trip
-            _has_profit  = trade.pnl_usd > _fee_thresh
+            _notional   = trade.request.notional if trade.request else 0.0
+            _fee_thresh = _notional * 0.0012
+            _has_profit = trade.pnl_usd > _fee_thresh
 
-            # 1. Caída de volumen > 50% vs media suavizada de 3 velas
-            if ms.vol_drop_50:
-                if not _has_profit:
-                    log.debug("LossOfStrength: %s vol_drop_50 bloqueado — PnL $%.4f < fees $%.4f, esperando TP/SL",
-                              sym, trade.pnl_usd, _fee_thresh)
-                else:
-                    log.warning("LossOfStrength: %s exit por caída súbita de volumen (PnL $%.4f > fees $%.4f)",
-                                sym, trade.pnl_usd, _fee_thresh)
-                    self.close_symbol(sym, "vol_drop_50")
-                    return
-
-            # 2. RSI 1m agotado (cruzando 70 abajo para LONG o 30 arriba para SHORT)
             rsi = ms.rsi_1m
             if is_long and rsi < 70 and getattr(trade, '_rsi_peak', 0) >= 70:
                 if not _has_profit:
@@ -1096,7 +1121,7 @@ class TradeController:
                     log.warning("LossOfStrength: %s exit por RSI 1m agotado (%.1f)", sym, rsi)
                     self.close_symbol(sym, "rsi_exhaustion")
                     return
-            
+
             # Track RSI peaks
             if is_long: trade._rsi_peak = max(getattr(trade, '_rsi_peak', 0), rsi)
             else: trade._rsi_bottom = min(getattr(trade, '_rsi_bottom', 100), rsi)
@@ -1124,128 +1149,105 @@ class TradeController:
             self._manage_auto_protections(sym, trade, mark, entry, sl_dist, progress, now, be_held, ms, tech)
 
     def _manage_auto_protections(self, sym, trade, mark, entry, sl_dist, progress, now, be_held, ms, tech):
-        """Lógica de Breakeven y Micro-Trailing elástico."""
+        """
+        Trailing Stop Escalonado en 3 niveles. El SL nunca retrocede.
+
+        Nivel 1 — BE:   PnL neto cubre fees → SL a fee_be_price (entry ± 0.25%).
+        Nivel 2 — 40%:  Precio llega al 40% del camino al TP → SL al 25% del profit.
+        Nivel 3 — 80%:  Precio llega al 80% del camino al TP → SL al 60% del profit.
+
+        Guard: SL siempre ≥ 0.1% de distancia al MarkPrice para evitar Error 10001.
+        """
         is_long = trade.request.side == "Buy"
-        req = trade.request
-
-        # ── Smart80 ──────────
-        if (
-            progress >= 0.80
-            and trade.state == TradeState.TRAILING
-            and trade.current_tp > 0
-            and sym not in self._pct80_analyzed
-            and sym not in self._tp_removed
-        ):
-            self._pct80_analyzed.add(sym)
-            cont80 = self._continuation_score(sym, trade, mark, ms, tech)
-            if cont80 >= 3:
-                log.info("Smart80: %s prog=%.0f%% cont=%d — señales fuertes, extendiendo TP",
-                         sym, progress * 100, cont80)
-                trade.current_tp = 0
-                self._tp_removed.add(sym)
-                atr80 = sl_dist / 1.5
-                if is_long:
-                    self._trail_high[sym] = mark
-                    new_sl80 = mark - atr80 * 0.8
-                else:
-                    self._trail_low[sym] = mark
-                    new_sl80 = mark + atr80 * 0.8
-                
-                if ((is_long  and new_sl80 > trade.current_sl) or
-                    (not is_long and new_sl80 < trade.current_sl)):
-                    trade.current_sl = new_sl80
-                    self._bridge.submit(self._clear_tp_and_trail(sym, new_sl80, req.side))
-                    self._last_sl_upd[sym] = now
-                else:
-                    self._bridge.submit(self._clear_tp(sym, req.side))
-                notifier.trailing_activated(sym, trade.current_sl)
-                self._notify()
-            elif cont80 <= 1:
-                log.info("Smart80: %s prog=%.0f%% cont=%d — señales débiles, asegurando ganancias",
-                         sym, progress * 100, cont80)
-        current_benefit = (mark - entry) if is_long else (entry - mark)
-        has_min_cushion = current_benefit >= (entry * 0.005)
-
-        # ── Profit Guard Continuo ──────────
-        fee_buffer   = entry * _BE_FEE_PCT
-        fee_be_price = (entry + fee_buffer) if is_long else (entry - fee_buffer)
-        atr          = sl_dist / 1.5
+        req     = trade.request
 
         _can_modify = (now - self._last_sl_upd.get(sym, 0)) >= 2.0
-        if _can_modify and trade.state in (TradeState.OPEN, TradeState.BREAKEVEN, TradeState.TRAILING):
+        if not _can_modify:
+            return
+        if trade.state not in (TradeState.OPEN, TradeState.BREAKEVEN, TradeState.TRAILING):
+            return
 
-            # ── Breakeven Dinámico ──────────
-            # Activa BE cuando el precio lleva be_hold_s segundos sobre el umbral.
-            # Usa fee_be_price (entry + 0.15%) como nuevo SL para cubrir fees.
-            # SIEMPRE envía el SL a Bybit vía _modify_sl_safe.
-            if progress >= settings.breakeven_pct / 100 and has_min_cushion:
-                if be_held and trade.state == TradeState.OPEN:
-                    new_sl = fee_be_price   # cubre fees de entrada y salida
-                    log.info("Profit Guard: %s SL → %.5g (Breakeven activado, fees cubiertos)", sym, new_sl)
-                    trade.current_sl = new_sl
-                    trade.state      = TradeState.TRAILING
-                    self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "breakeven"))
-                    self._last_sl_upd[sym] = now
-                    notifier.breakeven_activated(sym, new_sl)
-                    self._notify()
-                    return   # evitar doble-actualización en el mismo tick
+        fee_buffer   = entry * _BE_FEE_PCT
+        fee_be_price = (entry + fee_buffer) if is_long else (entry - fee_buffer)
 
-            # ── Trailing Elástico (Dynamic Trailing) ───────────────────────
-            # Profit Guard corre siempre que el trade no sea OPEN puro (estado ya
-            # protegido), o cuando price ya avanzó ≥10 % hacia el TP (pre-BE guard).
-            is_safe = trade.state != TradeState.OPEN or progress >= 0.10
+        tp_ref  = trade.request.tp_price if (trade.request and trade.request.tp_price > 0) else trade.current_tp
+        tp_dist = abs(tp_ref - entry) if tp_ref > 0 else 0.0
 
-            if is_safe:
-                # Si hay mucha fuerza (Tape Speed > 1.5), dejar respirar (1.0 ATR).
-                # Si hay poca fuerza (Tape Speed < 0.5), ceñir (0.4 ATR).
-                ts = ms.tape_speed
-                if ts > 1.5:
-                    trail_atr_mult = 1.0
-                elif ts < 0.5:
-                    trail_atr_mult = 0.4
-                else:
-                    trail_atr_mult = 0.7
+        current_benefit = (mark - entry) if is_long else (entry - mark)
 
-                t_mult = trail_atr_mult if progress < 1.0 else 0.4
+        # Determinar el mejor SL candidato según el nivel más avanzado
+        new_sl    = None
+        new_state = trade.state
+        reason    = ""
 
-                if is_long:
-                    self._trail_high[sym] = max(self._trail_high.get(sym, mark), mark)
-                    proposed_sl = self._trail_high[sym] - atr * t_mult
-                else:
-                    self._trail_low[sym] = min(self._trail_low.get(sym, mark), mark)
-                    proposed_sl = self._trail_low[sym] + atr * t_mult
+        # ── Nivel 1: BE — PnL positivo (cubre fees de entrada y salida) ──────
+        if current_benefit >= fee_buffer:
+            candidate = fee_be_price
+            if (is_long and candidate > trade.current_sl) or \
+               (not is_long and candidate < trade.current_sl):
+                new_sl    = candidate
+                new_state = TradeState.BREAKEVEN if trade.state == TradeState.OPEN else trade.state
+                reason    = "L1-BE"
 
-                # El SL nunca retrocede; fee_be_price es el suelo mínimo si es OPEN
-                floor_sl = (
-                    max(trade.current_sl, fee_be_price) if is_long
-                    else min(trade.current_sl, fee_be_price)
-                )
-                new_sl = max(floor_sl, proposed_sl) if is_long else min(floor_sl, proposed_sl)
+        # ── Nivel 2: 40% del camino al TP → SL al 25% del profit ─────────────
+        if tp_dist > 0 and progress >= 0.40:
+            profit_25 = (entry + tp_dist * 0.25) if is_long else (entry - tp_dist * 0.25)
+            floor     = new_sl if new_sl is not None else trade.current_sl
+            if (is_long and profit_25 > floor) or (not is_long and profit_25 < floor):
+                new_sl    = profit_25
+                new_state = TradeState.TRAILING
+                reason    = "L2-40%"
 
-                if is_long:
-                    is_meaningful = new_sl > trade.current_sl * (1 + TRAIL_MIN_MOVE_PCT)
-                else:
-                    is_meaningful = new_sl < trade.current_sl * (1 - TRAIL_MIN_MOVE_PCT)
+        # ── Nivel 3: 80% del camino al TP → SL al 60% del profit ─────────────
+        if tp_dist > 0 and progress >= 0.80:
+            profit_60 = (entry + tp_dist * 0.60) if is_long else (entry - tp_dist * 0.60)
+            floor     = new_sl if new_sl is not None else trade.current_sl
+            if (is_long and profit_60 > floor) or (not is_long and profit_60 < floor):
+                new_sl    = profit_60
+                new_state = TradeState.TRAILING
+                reason    = "L3-80%"
 
-                # Forzar primer movimiento de protección (state OPEN o BREAKEVEN)
-                if trade.state in (TradeState.OPEN, TradeState.BREAKEVEN) and new_sl != trade.current_sl:
-                    is_meaningful = True
+        if new_sl is None:
+            return
 
-                if is_meaningful:
-                    if trade.state == TradeState.OPEN:
-                        trade.state = TradeState.BREAKEVEN
-                        log.info("Profit Guard: %s SL → %.5g (Risk-Free asegurado)", sym, new_sl)
-                        notifier.breakeven_activated(sym, new_sl)
-                    else:
-                        log.info("Profit Guard: %s SL trailing → %.5g (momentum=%.1f)", sym, new_sl, ts)
-                        if trade.state != TradeState.TRAILING:
-                            trade.state = TradeState.TRAILING
-                            notifier.trailing_activated(sym, new_sl)
+        # ── Guard: distancia mínima al MarkPrice (previene Error 10001) ───────
+        # Para LONG: SL debe estar < MarkPrice; para SHORT: SL debe estar > MarkPrice.
+        _MIN_DIST = 0.001   # 0.1% mínimo de distancia al MarkPrice
+        if is_long:
+            max_allowed = mark * (1.0 - _MIN_DIST)
+            if new_sl > max_allowed:
+                log.debug("SL guard LONG %s: %.6g → %.6g (mark=%.6g -0.1%%)",
+                           sym, new_sl, max_allowed, mark)
+                new_sl = max_allowed
+                if new_sl <= trade.current_sl:
+                    return   # Clip eliminó la ganancia — no enviar
+        else:
+            min_allowed = mark * (1.0 + _MIN_DIST)
+            if new_sl < min_allowed:
+                log.debug("SL guard SHORT %s: %.6g → %.6g (mark=%.6g +0.1%%)",
+                           sym, new_sl, min_allowed, mark)
+                new_sl = min_allowed
+                if new_sl >= trade.current_sl:
+                    return   # Clip eliminó la ganancia — no enviar
 
-                    trade.current_sl = new_sl
-                    self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "profit-guard"))
-                    self._last_sl_upd[sym] = now
-                    self._notify()
+        # ── Aplicar ───────────────────────────────────────────────────────────
+        old_sl     = trade.current_sl
+        prev_state = trade.state
+        trade.current_sl = new_sl
+        trade.state      = new_state
+
+        log.info("TrailStop %s [%s]: SL %.6g → %.6g  prog=%.0f%%  mark=%.6g",
+                 sym, reason, old_sl, new_sl, progress * 100, mark)
+
+        if prev_state != new_state:
+            if new_state == TradeState.BREAKEVEN:
+                notifier.breakeven_activated(sym, new_sl)
+            elif new_state == TradeState.TRAILING:
+                notifier.trailing_activated(sym, new_sl)
+
+        self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, reason))
+        self._last_sl_upd[sym] = now
+        self._notify()
 
     # ── Métricas de señal ───────────────────────────────────────────────────
 
