@@ -140,14 +140,22 @@ class PaperWallet:
     # ── Actualizar SL/TP ──────────────────────────────────────────────────────
 
     def update_sl_tp(self, symbol: str, sl: float, tp: float) -> bool:
+        """
+        Actualiza SL y/o TP de la posición virtual.
+        tp=-1 → no tocar el TP actual (solo mover SL)
+        tp=0  → limpiar TP (para trailing sin objetivo)
+        tp>0  → establecer nuevo TP
+        """
         pp = self._positions.get(symbol)
         if pp is None:
             return False
         if sl > 0:
             pp.sl_price = sl
-        if tp == 0.0:          # clear_tp → remove TP for trailing
-            pp.tp_price = 0.0
-        elif tp > 0:
+        if tp < 0:
+            pass                   # Sentinel -1: no tocar el TP
+        elif tp == 0.0:
+            pp.tp_price = 0.0      # Limpiar TP (trailing sin objetivo)
+        else:
             pp.tp_price = tp
         return True
 
@@ -341,11 +349,17 @@ class PaperExecutor:
 
     async def set_sl_tp(
         self, symbol: str, sl: float = 0, tp: float = 0,
-        side: str = "Buy", clear_tp: bool = False,
+        side: str = "Buy", clear_tp: bool = False, trace_id: str = "",
     ) -> bool:
         if self._paper:
-            return self._wallet.update_sl_tp(symbol, sl, 0.0 if clear_tp else tp)
-        return await self._real.set_sl_tp(symbol, sl, tp, side, clear_tp)
+            if clear_tp:
+                tp_val = 0.0      # Limpiar TP explícitamente
+            elif tp > 0:
+                tp_val = tp       # Establecer nuevo TP
+            else:
+                tp_val = -1       # Solo mover SL, no tocar TP (-1 = sentinel)
+            return self._wallet.update_sl_tp(symbol, sl, tp_val)
+        return await self._real.set_sl_tp(symbol, sl, tp, side, clear_tp, trace_id)
 
     async def close_position(
         self, symbol: str, qty: float, side: str,
@@ -368,6 +382,23 @@ class PaperExecutor:
             pp = self._wallet._positions.get(symbol)
             return (pp.opened_at // 1000) if pp else 0
         return await self._real.get_position_open_time(symbol, since_ms)
+
+    async def wait_for_position(
+        self, symbol: str, side: str, timeout_s: float = 8.0
+    ) -> tuple:
+        if self._paper:
+            # En paper, la posición se crea sincrónicamente en place_market_bracket
+            pp = self._wallet._positions.get(symbol)
+            if pp:
+                return True, pp.entry_price
+            return False, 0.0
+        return await self._real.wait_for_position(symbol, side, timeout_s)
+
+    async def verify_sl_on_position(self, symbol: str) -> bool:
+        if self._paper:
+            pp = self._wallet._positions.get(symbol)
+            return pp is not None and pp.sl_price > 0
+        return await self._real.verify_sl_on_position(symbol)
 
     async def cancel_all_orders(self, symbol: str) -> bool:
         if self._paper:

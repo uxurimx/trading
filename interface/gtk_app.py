@@ -52,6 +52,7 @@ from interface.journal_view import JournalView
 from interface.settings_view import SettingsView
 from interface.session_view import SessionView
 from interface.extractor_view import ExtractorView
+from interface.analyst_view import AnalystView
 from streams.account import AccountStream, AccountState, Position, AccountBalance
 from streams.klines import KlineStream
 from streams.market import CandleCVD, MarketState, MarketStream
@@ -1490,6 +1491,16 @@ class MainWindow(Adw.ApplicationWindow):
             self._extractor_view, "extractor", "🤖 Extractor", "applications-science-symbolic"
         )
 
+        # ── Pestaña 6: Analista de Sistema ───────────────────────────────
+        self._analyst_view = AnalystView(self._bridge)
+        self._stack.add_titled_with_icon(
+            self._analyst_view, "analyst", "🔬 Analista", "system-search-symbolic"
+        )
+
+        # Estado para detectar cierre de sesión
+        self._last_seen_session_status: str = ""
+        self._last_seen_session_id:     str = ""
+
         # ── Timer de refresco (100ms = 10fps) ─────────────────
         GLib.timeout_add(100, self._refresh)
 
@@ -1559,6 +1570,19 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_paper_toggle(self, active: bool) -> None:
         """Activa/desactiva paper trading. Limpia posiciones activas del controller."""
+        if not active:
+            # Switching to REAL mode — validate API keys first
+            if not settings.bybit_api_key or not settings.bybit_api_secret:
+                import gi
+                gi.require_version("Adw", "1")
+                from gi.repository import Adw
+                dialog = Adw.AlertDialog(
+                    heading="API Keys no configuradas",
+                    body="No se puede activar el modo real sin BYBIT_API_KEY y BYBIT_API_SECRET en el .env.\n\nConfigúralas y reinicia la app.",
+                )
+                dialog.add_response("ok", "Entendido")
+                dialog.present(self)
+                return  # No switch to real mode
         settings.paper_trading = active
         # Limpiar trades activos del controller para evitar mezcla live/paper
         self.controller._active.clear()
@@ -1675,6 +1699,17 @@ class MainWindow(Adw.ApplicationWindow):
         self._session_view.refresh()
         if settings.paper_trading:
             self._settings_view.refresh_paper_stats()
+
+        # ── Detectar cierre de sesión TSAA → disparar analista ───────────────
+        sess = self.controller._session
+        if sess is None:
+            # Sesión recién cerrada: detectar por el ID que guardamos
+            if self._last_seen_session_status == "ACTIVE" and self._last_seen_session_id:
+                self._analyst_view.notify_session_closed(self._last_seen_session_id)
+                self._last_seen_session_status = "CLOSED"
+        else:
+            self._last_seen_session_id = sess.id
+            self._last_seen_session_status = sess.status.value if hasattr(sess.status, "value") else str(sess.status)
 
         # ── Escribir JSON para la extensión GNOME Shell (cada ~2 s) ────────
         self._status_writer.tick(

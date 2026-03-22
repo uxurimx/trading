@@ -105,11 +105,12 @@ class AccountBalance:
 
 @dataclass
 class AccountState:
-    positions:   Dict[str, Position]  = field(default_factory=dict)
-    balance:     AccountBalance       = field(default_factory=AccountBalance)
-    daily_pnl:   float                = 0.0   # PnL realizado acumulado hoy
-    connected:   bool                 = False
-    error:       str                  = ""
+    positions:        Dict[str, Position]  = field(default_factory=dict)
+    balance:          AccountBalance       = field(default_factory=AccountBalance)
+    daily_pnl:        float                = 0.0   # PnL realizado acumulado hoy (todos los símbolos)
+    symbol_pnl:       Dict[str, float]     = field(default_factory=dict)  # PnL por símbolo (hoy)
+    connected:        bool                 = False
+    error:            str                  = ""
 
     def get_position(self, symbol: str) -> Optional[Position]:
         """Busca la posición para un símbolo, probando claves directas y compuestas (Hedge)."""
@@ -256,11 +257,12 @@ class AccountStream:
         })
         if data.get("retCode") != 0:
             return
-        total = sum(
-            float(item.get("closedPnl", 0) or 0)
-            for item in data.get("result", {}).get("list", [])
-        )
-        self.state.daily_pnl += total
+        for item in data.get("result", {}).get("list", []):
+            sym = item.get("symbol", "")
+            pnl = float(item.get("closedPnl", 0) or 0)
+            self.state.daily_pnl += pnl
+            if sym:
+                self.state.symbol_pnl[sym] = self.state.symbol_pnl.get(sym, 0.0) + pnl
 
     # ── WebSocket privado ─────────────────────────────────────────────────────
 
@@ -342,9 +344,15 @@ class AccountStream:
             for item in data:
                 # execPnl = gross position PnL (sin fees)
                 # execFee = fee de esta ejecución (siempre positivo = costo)
+                sym      = item.get("symbol", "")
                 realized = float(item.get("execPnl", 0) or 0)
                 fee      = float(item.get("execFee",  0) or 0)
-                self.state.daily_pnl += realized - fee
+                net      = realized - fee
+                self.state.daily_pnl += net
+                if sym:
+                    self.state.symbol_pnl[sym] = self.state.symbol_pnl.get(sym, 0.0) + net
+                    log.debug("execution %s: execPnl=%.5g fee=%.5g net=%.5g daily=%.5g",
+                              sym, realized, fee, net, self.state.daily_pnl)
 
         elif topic == "wallet":
             for item in data:

@@ -105,6 +105,7 @@ class Settings(BaseSettings):
 
     # Base de datos
     db_path: str = "storage/trading.duckdb"
+    system_logging_enabled: bool = True
 
     # Inteligencia de mercado (Fase 1)
     candle_interval: int = 60   # segundos por vela de CVD (60 = 1 min)

@@ -32,6 +32,7 @@ from core.db import save_trade
 from core.session import SessionManager, SessionStatus
 from core.audit_agent import audit_agent
 import core.notifier as notifier
+from core.logger import executor_logger, controller_logger
 
 if TYPE_CHECKING:
     from streams.market import MarketState
@@ -115,6 +116,7 @@ class TradeController:
         self._exit_cooldown: Dict[str, tuple] = {}
         # historial reciente de resultados para detector de mercado choppy
         self._recent_results: List[str]       = []   # "win"/"loss" (últimos 10)
+        self._reconciled:    bool             = False  # reconciliación de inicio hecha
         # AI Strategy Agent — estado del scan asíncrono
         self._ai_scanning:   bool             = False  # hay una llamada a OpenAI en curso
         # SL más protector jamás enviado por trade — NUNCA retrocede
@@ -312,6 +314,11 @@ class TradeController:
             if self._session:
                 self._finalize_session_and_audit()
             return
+
+        # Reconciliación única al arrancar: recuperar posiciones huérfanas de Bybit
+        if not self._reconciled and account.connected and not settings.paper_trading:
+            self._reconcile_positions(account)
+            self._reconciled = True
 
         # Detectar trades cerrados externamente (o por SL/TP de Bybit)
         self._detect_closed_trades(states, account)
@@ -617,12 +624,22 @@ class TradeController:
 
         if req.symbol in self._active:
             return False, f"ya hay posición activa en {req.symbol}"
-        if req.symbol in account.positions:
-            return False, f"ya hay posición abierta en {req.symbol}"
-        # Sin límite de posiciones simultáneas
+        # Verificar contra todas las variantes de clave (paper: SYM, real one-way: SYM_0, hedge: SYM_1/SYM_2)
+        sym = req.symbol
+        if (sym in account.positions or
+                f"{sym}_0" in account.positions or
+                f"{sym}_1" in account.positions or
+                f"{sym}_2" in account.positions):
+            return False, f"ya hay posición abierta en {sym}"
+        # Margen disponible — mismo fallback que _run_scan (Bybit UNIFIED a veces reporta 0)
         avail = account.balance.available_balance
+        if avail <= 0:
+            if not account.open_positions():
+                avail = account.balance.wallet_balance
+            else:
+                avail = max(0.0, account.balance.total_equity - account.balance.used_margin)
         if avail > 0 and req.margin > avail * 0.95:
-            return False, f"margen requerido ${req.margin:.2f} > disponible ${avail:.2f}"
+            return False, f"margen ${req.margin:.2f} > disponible ${avail:.2f}"
         if req.qty <= 0:
             return False, "qty = 0"
         if req.rr_ratio < settings.min_rr:
@@ -655,6 +672,7 @@ class TradeController:
 
         trade = TradeRecord(
             symbol     = req.symbol,
+            trace_id   = req.trace_id,
             session_id = req.session_id,
             request    = req,
             state      = TradeState.SUBMITTED,
@@ -665,47 +683,95 @@ class TradeController:
         self._active[req.symbol] = trade
 
         async def _do() -> None:
+            import asyncio as _aio
             from core.order_model import OrderResult as _OR
-            result = _OR(success=False, error_msg="excepción inesperada")
+
+            async def _panic_exit(reason: str) -> _OR:
+                """Intenta cerrar la posición y devuelve el OrderResult apropiado."""
+                with controller_logger.context(req.trace_id):
+                    controller_logger.critical("PANIC_EXIT", reason, {
+                        "symbol": req.symbol, "side": req.side,
+                        "sl": req.sl_price, "tp": req.tp_price,
+                        "qty": req.qty, "hedge_mode": self._executor._hedge_mode,
+                    })
+                close_res = await self._executor.close_position(req.symbol, req.qty, req.side)
+                if close_res.success:
+                    return _OR(success=False, error_msg=f"Panic Exit: {reason}")
+                return _OR(success=False,
+                           error_msg=f"CRITICAL: Falló SL/TP y falló CLOSE ({close_res.error_msg})")
+
             try:
                 await self._executor.set_leverage(req.symbol, req.leverage)
-                result = await self._executor.place_market_bracket(req)
-                
-                # Gestión de SL/TP tras el Market Order
-                if result.success and (req.sl_price > 0 or req.tp_price > 0):
-                    import asyncio as _aio
-                    sl_confirmed = False
-                    max_retries = 3
-                    
-                    for attempt in range(1, max_retries + 1):
-                        # Esperar un poco a que el fill se asiente en Bybit antes de set_sl_tp
-                        await _aio.sleep(1.0 if attempt == 1 else 2.0)
-                        try:
-                            ok = await self._executor.set_sl_tp(
-                                req.symbol, sl=req.sl_price, tp=req.tp_price, side=req.side
-                            )
-                            if ok:
-                                sl_confirmed = True
-                                log.info("SL/TP confirmados: %s  SL=%s  TP=%s (intento %d)",
-                                         req.symbol, req.sl_price, req.tp_price, attempt)
-                                break
-                            else:
-                                log.warning("[RETRY %d/%d] set_sl_tp falló (retCode!=0) para %s", 
-                                            attempt, max_retries, req.symbol)
-                        except Exception as sl_exc:
-                            log.error("[RETRY %d/%d] set_sl_tp excepción para %s: %s",
-                                      attempt, max_retries, req.symbol, sl_exc)
-                    
-                    if not sl_confirmed:
-                        log.critical("🚨 [PANIC EXIT] Fallo crítico al colocar SL/TP tras %d intentos. Cerrando posición en %s.", 
-                                     max_retries, req.symbol)
-                        # Intentar cerrar la posición inmediatamente (protección de capital)
-                        close_res = await self._executor.close_position(req.symbol, req.qty, req.side)
-                        if close_res.success:
-                            result = _OR(success=False, error_msg="Panic Exit: Posición cerrada por falta de SL/TP")
-                        else:
-                            result = _OR(success=False, error_msg=f"CRITICAL: Falló SL/TP y falló CLOSE ({close_res.error_msg})")
-                        
+
+                # ── PASO 1: Enviar orden ──────────────────────────────────────
+                place = await self._executor.place_market_bracket(req)
+                if not place.success:
+                    GLib.idle_add(self._on_order_result, place, req)
+                    return
+                log.info("[EXEC 1/4] Orden enviada %s  id=%s", req.symbol, place.order_id)
+
+                # ── PASO 2: Confirmar posición abierta en Bybit ───────────────
+                filled, fill_price = await self._executor.wait_for_position(
+                    req.symbol, req.side, timeout_s=8.0
+                )
+                if not filled:
+                    log.critical("🚨 [EXEC 2/4] Posición %s NO confirmada en Bybit tras 8s", req.symbol)
+                    await self._executor.cancel_all_orders(req.symbol)
+                    GLib.idle_add(self._on_order_result,
+                                  _OR(success=False, error_msg="Posición no confirmada en Bybit tras 8s"), req)
+                    return
+                log.info("[EXEC 2/4] Posición confirmada %s @ %.5g", req.symbol, fill_price)
+
+                # Resultado base exitoso con precio real de fill
+                result = _OR(
+                    success=True, order_id=place.order_id,
+                    filled_price=fill_price, filled_qty=req.qty,
+                    timestamp=int(time.time() * 1000),
+                )
+
+                # ── PASO 3: Aplicar SL/TP (3 intentos) ───────────────────────
+                if req.sl_price > 0 or req.tp_price > 0:
+                    sl_ok = False
+                    for attempt in range(1, 4):
+                        await _aio.sleep(0.5 if attempt == 1 else 1.0)
+                        ok = await self._executor.set_sl_tp(
+                            req.symbol, sl=req.sl_price, tp=req.tp_price,
+                            side=req.side, trace_id=req.trace_id,
+                        )
+                        if ok:
+                            sl_ok = True
+                            log.info("[EXEC 3/4] SL/TP aplicado %s  SL=%.5g  TP=%.5g (intento %d)",
+                                     req.symbol, req.sl_price, req.tp_price, attempt)
+                            break
+                        log.warning("[EXEC 3/4] Intento %d/3 set_sl_tp falló para %s", attempt, req.symbol)
+
+                    if not sl_ok:
+                        log.critical("🚨 [EXEC 3/4] set_sl_tp agotó 3 intentos para %s", req.symbol)
+                        result = await _panic_exit("SL/TP no aplicado tras 3 intentos")
+                        GLib.idle_add(self._on_order_result, result, req)
+                        return
+
+                    # ── PASO 4: Verificar SL presente en posición Bybit ──────
+                    await _aio.sleep(0.5)
+                    sl_verified = await self._executor.verify_sl_on_position(req.symbol)
+                    if not sl_verified:
+                        log.critical("🚨 [EXEC 4/4] SL no presente en Bybit para %s — reintentando", req.symbol)
+                        await _aio.sleep(1.0)
+                        ok = await self._executor.set_sl_tp(
+                            req.symbol, sl=req.sl_price, tp=req.tp_price,
+                            side=req.side, trace_id=req.trace_id,
+                        )
+                        await _aio.sleep(0.5)
+                        sl_verified = await self._executor.verify_sl_on_position(req.symbol)
+
+                    if not sl_verified:
+                        log.critical("🚨 [EXEC 4/4] SL DEFINITIVAMENTE AUSENTE en Bybit para %s — PANIC EXIT", req.symbol)
+                        result = await _panic_exit("SL no verificado en posición Bybit")
+                        GLib.idle_add(self._on_order_result, result, req)
+                        return
+
+                    log.info("[EXEC 4/4] SL verificado en Bybit para %s — trade protegido", req.symbol)
+
             except Exception as exc:
                 log.error("Error crítico ejecutando orden %s: %s", req.symbol, exc)
                 result = _OR(success=False, error_msg=str(exc))
@@ -734,30 +800,105 @@ class TradeController:
         else:
             log.error("Orden falló: %s — %s", req.symbol, result.error_msg)
             notifier.order_failed(req.symbol, result.error_msg)
-            self._active.pop(req.symbol, None)
+            # Si el PANIC_EXIT falló al cerrar, la posición SIGUE ABIERTA en Bybit.
+            # Mantenerla en _active para que _detect_closed_trades la monitoree.
+            _panic_open = "Falló SL/TP y falló CLOSE" in result.error_msg
+            if _panic_open:
+                trade = self._active.get(req.symbol)
+                if trade:
+                    trade.state = TradeState.OPEN
+                    trade.opened_at = trade.opened_at or int(time.time())
+                    log.critical("🚨 [ORPHAN] %s abierta en Bybit SIN SL/TP — monitoreo activo, cierra manualmente",
+                                 req.symbol)
+            else:
+                self._active.pop(req.symbol, None)
 
         self._notify()
         return False
 
     # ── Monitoreo ─────────────────────────────────────────────────────────────
 
+    def _reconcile_positions(self, account: "AccountState") -> None:
+        """
+        Reconciliación de inicio: detecta posiciones abiertas en Bybit que
+        el controller no conoce (e.g. restart mientras había posición, o
+        PANIC_EXIT con close fallido antes de este fix).
+
+        Crea un TradeRecord mínimo en _active para que _detect_closed_trades
+        las monitoree y las finalice cuando Bybit las cierre.
+        """
+        from core.order_model import OrderRequest as _Req
+        for pos in account.open_positions():
+            sym = pos.symbol
+            # Ya conocida
+            if sym in self._active:
+                continue
+            # Crear registro mínimo para monitoreo
+            req = _Req(
+                symbol      = sym,
+                side        = pos.side,
+                qty         = pos.size,
+                entry_price = pos.entry_price,
+                sl_price    = pos.stop_loss,
+                tp_price    = pos.take_profit,
+                leverage    = int(pos.leverage) if pos.leverage else 1,
+            )
+            ct = pos.created_time
+            if ct > 1_000_000_000_000:
+                ct = ct // 1000
+            trade = TradeRecord(
+                symbol     = sym,
+                request    = req,
+                state      = TradeState.OPEN,
+                entry_price= pos.entry_price,
+                current_sl = pos.stop_loss,
+                current_tp = pos.take_profit,
+                opened_at  = ct or int(time.time()),
+            )
+            self._active[sym] = trade
+            log.warning("[RECONCILE] Posición huérfana recuperada: %s %s @ %.5g — monitoreo activo",
+                        pos.side, sym, pos.entry_price)
+            self._notify()
+
     def _detect_closed_trades(self, states: Dict[str, "MarketState"], account: "AccountState") -> None:
-        """Compara estado local con Bybit para detectar cierres externos (SL/TP/Manual)."""
+        """Compara estado local con Bybit para detectar cierres externos (SL/TP/Manual).
+
+        En paper trading el oráculo de verdad es el PaperWallet, no Bybit.
+        PaperWallet cierra posiciones directamente cuando alcanza SL/TP.
+        Si intentamos validar contra Bybit en paper mode, la posición no existe
+        ahí y el controller la finaliza prematuramente como 'bybit_close'.
+        """
+        if settings.paper_trading:
+            # Paper mode: comparar contra las posiciones del PaperWallet (no Bybit)
+            for symbol in list(self._active.keys()):
+                trade = self._active.get(symbol)
+                if not trade or not trade.is_active:
+                    continue
+                if symbol not in account.positions:
+                    # El PaperWallet ya cerró esta posición (SL/TP hit)
+                    vida_s = time.time() - trade.opened_at if trade.opened_at > 0 else 9999
+                    if vida_s < 3:
+                        continue  # Evitar falso cierre en el tick de apertura
+                    if symbol in self._pnl_captured:
+                        trade.pnl_usd = account.daily_pnl - trade.pnl_at_open
+                    log.info("[PAPER] Posición %s cerrada por SL/TP del wallet. Finalizando. PnL=$%.4f",
+                             symbol, trade.pnl_usd)
+                    self._finalize_trade(symbol, "paper_sl_tp")
+            return
+
         active_symbols = list(self._active.keys())
         for symbol in active_symbols:
             trade = self._active[symbol]
             if not trade.is_active:
                 continue
 
-            # Helper: determinar positionIdx (1=long/buy, 2=short/sell)
-            # En modo Hedge, Bybit reporta ambos. Aquí verificamos el que nos interesa.
-            idx = 1 if trade.request.side == "Buy" else 2
-            pos_key = f"{symbol}_{idx}"
-            
-            # Si el símbolo específico no aparece en account.positions, Bybit lo cerró.
-            if pos_key not in account.positions:
-                # Caso especial: Bybit tarda tiempo en reflejar la nueva posición.
-                # No considerar cerrado si el trade tiene menos de 10 segundos de vida.
+            # Usar get_position() que maneja One-way (sym_0), Hedge (sym_1/sym_2)
+            # y clave directa — no asumir modo hardcodeado
+            pos = account.get_position(symbol)
+
+            # Si la posición no aparece en Bybit (o size=0), fue cerrada externamente
+            if pos is None or pos.size == 0:
+                # Bybit tarda en reflejar la nueva posición: ignorar los primeros 10s
                 vida_s = time.time() - trade.opened_at if trade.opened_at > 0 else 0
                 if vida_s < 10:
                     continue
@@ -765,6 +906,17 @@ class TradeController:
                 # Confirmar con un contador de 50 ticks (~5s a 100ms de refresco)
                 self._close_confirm[symbol] = self._close_confirm.get(symbol, 0) + 1
                 if self._close_confirm[symbol] >= 50:
+                    # Calcular PnL real desde execution events acumulados por WebSocket.
+                    # account.daily_pnl se actualiza con execPnl - execFee de cada ejecución.
+                    # delta = PnL total (incluyendo fees de entrada y salida) desde apertura.
+                    if symbol in self._pnl_captured:
+                        real_pnl = account.daily_pnl - trade.pnl_at_open
+                        log.info(
+                            "[CONTROLLER] %s bybit_close — PnL real=$%.4f "
+                            "(daily=%.4f − base=%.4f)",
+                            symbol, real_pnl, account.daily_pnl, trade.pnl_at_open,
+                        )
+                        trade.pnl_usd = real_pnl
                     log.info("[CONTROLLER] Trade %s no detectado en Bybit tras 5s. Finalizando como bybit_close.", symbol)
                     self._finalize_trade(symbol, "bybit_close")
             else:
@@ -782,7 +934,7 @@ class TradeController:
             self._log.append(trade)
             save_trade(trade)
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
-            self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s)
+            self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s, trade.close_reason)
             self._pnl_captured.discard(symbol)
             self._last_upnl.pop(symbol, None)
             self._be_since.pop(symbol, None)
@@ -793,6 +945,14 @@ class TradeController:
             self._best_sl.pop(symbol, None)
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)
+
+            with executor_logger.context(trade.trace_id):
+                executor_logger.info("TRADE_FINALIZED", f"Trade finalizado: {symbol}", {
+                    "reason": reason,
+                    "pnl_usd": trade.pnl_usd,
+                    "duration_s": trade.duration_s
+                })
+
             self._notify()
 
     def _manage_active_trades(self, account: "AccountState", states: Dict[str, "MarketState"], techs: Dict[str, "TechSignal"]) -> None:
@@ -814,7 +974,13 @@ class TradeController:
         if not ms or not trade.request:
             return
 
+        # Bybit Hedge Mode usa claves "SYM_1" (Long) / "SYM_2" (Short) / "SYM_0" (One-way)
+        # Paper mode usa la clave plana "SYM"
         pos = account.positions.get(sym)
+        if pos is None and trade.request:
+            h_idx = 1 if trade.request.side == "Buy" else 2
+            pos = account.positions.get(f"{sym}_{h_idx}") or account.positions.get(f"{sym}_0")
+
         mark = ms.ticker.last_price
 
         # High/Low Water Mark para trailing
@@ -862,11 +1028,10 @@ class TradeController:
         be_held = (now - self._be_since.get(sym, now)) >= settings.effective_be_hold_s
         elapsed = int(time.time()) - trade.opened_at if trade.opened_at > 0 else 9999
         
-        # ── Umbral de Breakeven "Sin Miedo" (0.5% beneficio real) ────────────
-        # No basta el 20% del TP; debe haber al menos 0.5% de colchón neto.
-        be_dist = entry * 0.005
+        # Colchón mínimo: precio se movió ≥ fees (0.15% de entry).
+        # Proporcional al setup: cualquier trade con progress > 0 y ≥ fees cubiertos.
         current_benefit = (mark - entry) if is_long else (entry - mark)
-        has_min_cushion = current_benefit >= be_dist
+        has_min_cushion = current_benefit >= (entry * _BE_FEE_PCT)
 
         # ── Weak Exit ────────────────────────
         if (
@@ -920,9 +1085,14 @@ class TradeController:
                 return
 
         # ── Gestión Automática de Posición (Breakeven / Trailing) ───────────
-        # Determinar el modo efectivo
+        # Determinar el modo efectivo.
+        # Si el sistema está en FULL_AUTO, gestionar TODOS los trades activos
+        # (incluye los creados cuando el modo era otro, ej. AUTO_ENTRY).
+        # Solo se respeta el override MANUAL por-trade cuando el sistema global
+        # tampoco está en FULL_AUTO.
         effective = trade.auto_mode if trade.auto_mode != AutoMode.MANUAL else self.mode
-        if effective == AutoMode.FULL_AUTO:
+        runs_full = effective == AutoMode.FULL_AUTO or self.mode == AutoMode.FULL_AUTO
+        if runs_full:
             self._manage_auto_protections(sym, trade, mark, entry, sl_dist, progress, now, be_held, ms, tech)
 
     def _manage_auto_protections(self, sym, trade, mark, entry, sl_dist, progress, now, be_held, ms, tech):
@@ -969,58 +1139,70 @@ class TradeController:
         has_min_cushion = current_benefit >= (entry * 0.005)
 
         # ── Profit Guard Continuo ──────────
+        fee_buffer   = entry * _BE_FEE_PCT
+        fee_be_price = (entry + fee_buffer) if is_long else (entry - fee_buffer)
+        atr          = sl_dist / 1.5
+
         _can_modify = (now - self._last_sl_upd.get(sym, 0)) >= 2.0
         if _can_modify and trade.state in (TradeState.OPEN, TradeState.BREAKEVEN, TradeState.TRAILING):
+
             # ── Breakeven Dinámico ──────────
-            # Requiere progreso y el colchón mínimo de 0.5%
+            # Activa BE cuando el precio lleva be_hold_s segundos sobre el umbral.
+            # Usa fee_be_price (entry + 0.15%) como nuevo SL para cubrir fees.
+            # SIEMPRE envía el SL a Bybit vía _modify_sl_safe.
             if progress >= settings.breakeven_pct / 100 and has_min_cushion:
                 if be_held and trade.state == TradeState.OPEN:
-                    new_sl = entry + (entry * 0.0005) if is_long else entry - (entry * 0.0005) # pequeño lock
-                    trade.state = TradeState.TRAILING
-                    log.info("Profit Guard: %s SL → %.5g (Breakeven 0.5%% asegurado)", sym, new_sl)
+                    new_sl = fee_be_price   # cubre fees de entrada y salida
+                    log.info("Profit Guard: %s SL → %.5g (Breakeven activado, fees cubiertos)", sym, new_sl)
                     trade.current_sl = new_sl
+                    trade.state      = TradeState.TRAILING
+                    self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "breakeven"))
+                    self._last_sl_upd[sym] = now
                     notifier.breakeven_activated(sym, new_sl)
+                    self._notify()
+                    return   # evitar doble-actualización en el mismo tick
 
-            fee_buffer = entry * _BE_FEE_PCT
-            fee_be_price = (entry + fee_buffer) if is_long else (entry - fee_buffer)
-            atr = sl_dist / 1.5
-            
-            is_safe = trade.state != TradeState.OPEN or has_min_cushion
-            
+            # ── Trailing Elástico (Dynamic Trailing) ───────────────────────
+            # Profit Guard corre siempre que el trade no sea OPEN puro (estado ya
+            # protegido), o cuando price ya avanzó ≥10 % hacia el TP (pre-BE guard).
+            is_safe = trade.state != TradeState.OPEN or progress >= 0.10
+
             if is_safe:
-                # ── Trailing Elástico (Dynamic Trailing) ───────────────────────
                 # Si hay mucha fuerza (Tape Speed > 1.5), dejar respirar (1.0 ATR).
                 # Si hay poca fuerza (Tape Speed < 0.5), ceñir (0.4 ATR).
                 ts = ms.tape_speed
                 if ts > 1.5:
-                    trail_atr_mult = 1.0  # Amplio
+                    trail_atr_mult = 1.0
                 elif ts < 0.5:
-                    trail_atr_mult = 0.4  # Ceñido
+                    trail_atr_mult = 0.4
                 else:
-                    trail_atr_mult = 0.7  # Standard
-                
+                    trail_atr_mult = 0.7
+
                 t_mult = trail_atr_mult if progress < 1.0 else 0.4
-                
+
                 if is_long:
                     self._trail_high[sym] = max(self._trail_high.get(sym, mark), mark)
                     proposed_sl = self._trail_high[sym] - atr * t_mult
                 else:
                     self._trail_low[sym] = min(self._trail_low.get(sym, mark), mark)
                     proposed_sl = self._trail_low[sym] + atr * t_mult
-                
-                # El SL nunca retrocede y respeta el Break-Even como suelo
-                floor_sl = max(trade.current_sl, fee_be_price) if is_long else min(trade.current_sl, fee_be_price)
+
+                # El SL nunca retrocede; fee_be_price es el suelo mínimo si es OPEN
+                floor_sl = (
+                    max(trade.current_sl, fee_be_price) if is_long
+                    else min(trade.current_sl, fee_be_price)
+                )
                 new_sl = max(floor_sl, proposed_sl) if is_long else min(floor_sl, proposed_sl)
-                
+
                 if is_long:
                     is_meaningful = new_sl > trade.current_sl * (1 + TRAIL_MIN_MOVE_PCT)
                 else:
                     is_meaningful = new_sl < trade.current_sl * (1 - TRAIL_MIN_MOVE_PCT)
-                
-                # Forzar primer movimiento de protección
-                if trade.state == TradeState.OPEN and new_sl != trade.current_sl:
+
+                # Forzar primer movimiento de protección (state OPEN o BREAKEVEN)
+                if trade.state in (TradeState.OPEN, TradeState.BREAKEVEN) and new_sl != trade.current_sl:
                     is_meaningful = True
-                    
+
                 if is_meaningful:
                     if trade.state == TradeState.OPEN:
                         trade.state = TradeState.BREAKEVEN
@@ -1028,10 +1210,10 @@ class TradeController:
                         notifier.breakeven_activated(sym, new_sl)
                     else:
                         log.info("Profit Guard: %s SL trailing → %.5g (momentum=%.1f)", sym, new_sl, ts)
-                        if trade.state != TradeState.TRAILING: # evitar doble notify si ya es trailing
+                        if trade.state != TradeState.TRAILING:
                             trade.state = TradeState.TRAILING
                             notifier.trailing_activated(sym, new_sl)
-                    
+
                     trade.current_sl = new_sl
                     self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, "profit-guard"))
                     self._last_sl_upd[sym] = now
@@ -1102,16 +1284,35 @@ class TradeController:
         pass
 
     async def _modify_sl_safe(self, sym: str, sl: float, side: str, reason: str) -> None:
-        try:
-            await self._executor.set_sl_tp(sym, sl=sl, side=side)
-            # log.debug("SL modificado (%s): %s → %.5g", reason, sym, sl)
-        except Exception as e:
-            log.error("Error modificando SL %s: %s", sym, e)
+        import asyncio as _aio
+        trade    = self._active.get(sym)
+        trace_id = trade.trace_id if trade else None
+        for attempt in range(1, 3):   # 2 intentos
+            try:
+                with executor_logger.context(trace_id):
+                    executor_logger.info("PROTECTION_UPDATE",
+                                         f"Ajustando SL ({reason}) intento {attempt}: {sl}",
+                                         {"sl": sl, "reason": reason, "attempt": attempt})
+                ok = await self._executor.set_sl_tp(sym, sl=sl, side=side)
+                if ok:
+                    return
+                log.warning("[SL %s retry %d/2] set_sl_tp devolvió False para %s", reason, attempt, sym)
+            except Exception as e:
+                log.error("Error modificando SL %s (intento %d): %s", sym, attempt, e)
+                with executor_logger.context(trace_id):
+                    executor_logger.error("PROTECTION_ERROR",
+                                          f"Error modificando SL intento {attempt}: {e}")
+            if attempt < 2:
+                await _aio.sleep(0.5)
+        log.error("[SL %s] FALLÓ tras 2 intentos para %s — SL en riesgo", reason, sym)
 
     async def _clear_tp(self, sym: str, side: str) -> None:
+        trade = self._active.get(sym)
+        trace_id = trade.trace_id if trade else ""
         try:
-            await self._executor.set_sl_tp(sym, tp=0, side=side)
-            log.info("TP elminado: %s", sym)
+            # clear_tp=True envía takeProfit="0" a Bybit (tp=0 no lo elimina)
+            await self._executor.set_sl_tp(sym, clear_tp=True, side=side, trace_id=trace_id)
+            log.info("TP eliminado: %s", sym)
         except Exception as e:
             log.error("Error eliminando TP %s: %s", sym, e)
 
@@ -1119,17 +1320,26 @@ class TradeController:
         """Limpia el TP (Bybit tp=0) y ajusta el SL (trailing) con reintentos."""
         import asyncio
         max_retries = 3
+        trade = self._active.get(sym)
+        trace_id = trade.trace_id if trade else None
         for attempt in range(1, max_retries + 1):
             try:
-                # En Bybit, poner TP=0 lo elimina.
-                success = await self._executor.set_sl_tp(sym, sl=sl, tp=0, side=side)
-                if success:
-                    log.debug("SL Trail (TP=0) exitoso: %s → %.5g (intento %d)", sym, sl, attempt)
-                    return
-                else:
-                    log.warning("[TRAIL RETRY %d/%d] Falló set_sl_tp para %s", attempt, max_retries, sym)
+                with executor_logger.context(trace_id):
+                    executor_logger.info("TRAILING_UPDATE", f"Ajustando Trail SL (TP=0): {sl}", {"sl": sl, "attempt": attempt})
+                    # En Bybit, poner TP=0 lo elimina.
+                    # clear_tp=True elimina el TP existente; tp=0 solo lo ignora (no lo borra)
+                    success = await self._executor.set_sl_tp(sym, sl=sl, clear_tp=True, side=side, trace_id=trace_id)
+                    if success:
+                        log.debug("SL Trail (TP=0) exitoso: %s → %.5g (intento %d)", sym, sl, attempt)
+                        executor_logger.info("TRAILING_SUCCESS", "Trail SL aplicado correctamente")
+                        return
+                    else:
+                        log.warning("[TRAIL RETRY %d/%d] Falló set_sl_tp para %s", attempt, max_retries, sym)
+                        executor_logger.warning("TRAILING_FAILED", "Falló set_sl_tp", {"attempt": attempt})
             except Exception as e:
                 log.error("[TRAIL RETRY %d/%d] Excepción en trail %s: %s", attempt, max_retries, sym, e)
+                with executor_logger.context(trace_id):
+                    executor_logger.error("TRAILING_EXCEPTION", f"Excepción en trail: {e}")
             
             if attempt < max_retries:
                 await asyncio.sleep(0.5)
@@ -1143,19 +1353,42 @@ class TradeController:
         await self._do_close(sym, dummy_req, reason="panic_trail_fail")
 
     async def _do_close(self, symbol: str, req: OrderRequest, reason: str = "manual") -> None:
-        try:
-            result = await self._executor.close_position(symbol, req.qty, req.side)
-            if result.success:
-                GLib.idle_add(self._finalize_trade, symbol, reason)
-            else:
-                log.error("Cierre falló: %s — %s", symbol, result.error_msg)
-        except Exception as e:
-            log.error("Excepción al cerrar %s: %s", symbol, e)
+        import asyncio as _aio
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                with executor_logger.context(req.trace_id):
+                    executor_logger.info("CLOSING_POSITION", f"Cerrando posición {symbol} por {reason} (intento {attempt})", {"qty": req.qty, "side": req.side})
+                    result = await self._executor.close_position(symbol, req.qty, req.side)
+                    if result.success:
+                        executor_logger.info("CLOSE_SUCCESS", f"Posición {symbol} cerrada con éxito")
+                        GLib.idle_add(self._finalize_trade, symbol, reason)
+                        return
+                    else:
+                        log.error("[CLOSE %d/%d] Cierre falló: %s — %s", attempt, max_retries, symbol, result.error_msg)
+                        executor_logger.error("CLOSE_ERROR", f"Error al cerrar posición (intento {attempt}): {result.error_msg}")
+            except Exception as e:
+                log.error("[CLOSE %d/%d] Excepción al cerrar %s: %s", attempt, max_retries, symbol, e)
+                executor_logger.error("CLOSE_EXCEPTION", f"Excepción al cerrar posición (intento {attempt}): {e}")
+            if attempt < max_retries:
+                await _aio.sleep(1.5)
+        log.critical("🚨 [CLOSE FAILED] %s no se pudo cerrar tras %d intentos — intervención manual requerida", symbol, max_retries)
+        executor_logger.error("CLOSE_ALL_FAILED", f"Posición {symbol} NO cerrada tras {max_retries} intentos — revisar manualmente")
 
     # ── Auto-blacklist ────────────────────────
 
-    def _track_symbol_perf(self, sym: str, pnl_usd: float, duration_s: int = 0) -> None:
-        """Actualiza conteo de pérdidas consecutivas, auto-blacklist y SHPP."""
+    def _track_symbol_perf(self, sym: str, pnl_usd: float, duration_s: int = 0, close_reason: str = "") -> None:
+        """Actualiza conteo de pérdidas consecutivas, auto-blacklist y SHPP.
+
+        Cierres espurios (bybit_close en paper mode, panic_exit) NO penalizan
+        al símbolo — el problema fue del sistema, no del mercado.
+        """
+        # Cierres del sistema (no del mercado) no penalizan SHPP ni blacklist
+        _system_closes = {"bybit_close", "panic_trail_fail", "panic_exit"}
+        if close_reason in _system_closes:
+            log.debug("SHPP: %s ignorado — cierre de sistema (%s), sin penalización", sym, close_reason)
+            return
+
         # ── Historial reciente para detector de mercado choppy ────────────────
         self._recent_results.append("loss" if pnl_usd < 0 else "win")
         if len(self._recent_results) > 10:

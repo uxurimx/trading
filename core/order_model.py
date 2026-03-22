@@ -38,6 +38,7 @@ class OrderRequest:
     symbol:       str
     side:         str           # "Buy" | "Sell"
     qty:          float
+    trace_id:     str = ""
     session_id:   str = ""
     order_type:   str = "Market"   # "Market" | "Limit"
     price:        float = 0.0      # solo para Limit
@@ -102,6 +103,7 @@ class OrderResult:
 class TradeRecord:
     """Ciclo de vida completo de un trade gestionado por TradeController."""
     id:              str          = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    trace_id:        str          = ""
     session_id:      str          = ""
     symbol:          str          = ""
     request:         Optional[OrderRequest] = None

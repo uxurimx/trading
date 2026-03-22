@@ -20,6 +20,7 @@ import re
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from core.config import settings
+from core.logger import strategy_logger
 
 if TYPE_CHECKING:
     from streams.market import MarketState
@@ -201,7 +202,9 @@ def _build_account_snapshot(
     active_trades: List["TradeRecord"],
 ) -> str:
     bal   = account.balance
-    avail = getattr(bal, "available", 0.0)
+    avail = bal.available_balance
+    if avail <= 0:
+        avail = max(0.0, bal.total_equity - bal.used_margin) or bal.wallet_balance
     lines = [
         "=== CUENTA ===",
         f"Equity=${bal.total_equity:.2f}  PnL_diario=${account.daily_pnl:+.2f}  Disponible=${avail:.2f}",
@@ -302,43 +305,53 @@ class AIStrategyAgent:
                         getattr(settings, "ai_provider", "openai"))
             return None
 
-        self._last_call_ts = time.monotonic()
+        with strategy_logger.context() as trace_id:
+            self._last_call_ts = time.monotonic()
 
-        n_candidates = sum(
-            1 for s in symbols
-            if opps.get(s) and opps[s].score >= settings.ai_min_score
-        )
+            n_candidates = sum(
+                1 for s in symbols
+                if opps.get(s) and opps[s].score >= settings.ai_min_score
+            )
 
-        market_snapshot  = _build_market_snapshot(symbols, states, opps, techs)
-        account_snapshot = _build_account_snapshot(account, active_trades)
+            market_snapshot  = _build_market_snapshot(symbols, states, opps, techs)
+            account_snapshot = _build_account_snapshot(account, active_trades)
 
-        try:
-            client, model, use_json_fmt = self._make_client_and_model()
-        except Exception as e:
-            log.error("AI Strategy: error al crear cliente: %s", e)
-            return None
+            # Log del contexto enviado a la IA
+            strategy_logger.info("ANALYSIS_START", "Iniciando análisis de mercado con IA", {
+                "n_candidates": n_candidates,
+                "n_symbols": len(symbols),
+                "goal_usd": goal_usd,
+                "leverage": leverage
+            })
 
-        # Para Ollama: añadir instrucción JSON al final del prompt de usuario
-        json_reminder = "" if use_json_fmt else "\nIMPORTANTE: responde ÚNICAMENTE con el JSON, sin ningún texto adicional. No uses etiquetas <think>."
-        user_prompt = (
-            f"{account_snapshot}\n\n"
-            f"{market_snapshot}\n\n"
-            "=== INSTRUCCIONES ===\n"
-            f"Goal por trade: ${goal_usd:.2f} USD  |  Leverage: {leverage}x\n"
-            "Fees ya incluidas en rt_fees de cada candidato (0.11% round-trip).\n\n"
-            "Evalúa candidatos de mayor a menor score.\n"
-            "CVD LONG alineado: ≥ 3/5 bull.  CVD SHORT alineado: ≤ 2/5 bull (= ≥ 3/5 bear).\n"
-            "Para SL/TP: usa niveles S/R si están disponibles; si no, usa RefSL y RefTP del candidato.\n"
-            f"Si RefTP no da R:R ≥ {settings.min_rr}, busca el nivel S/R más lejano que sí lo dé.\n"
-            "Un score ≥ 60 con dirección coherente y CVD mayoritariamente alineado ES suficiente.\n"
-            f"Responde SOLO con el JSON.{json_reminder}"
-        )
+            try:
+                client, model, use_json_fmt = self._make_client_and_model()
+            except Exception as e:
+                log.error("AI Strategy: error al crear cliente: %s", e)
+                strategy_logger.error("CLIENT_ERROR", f"Error al crear cliente IA: {e}")
+                return None
 
-        log.info(
-            "AI Strategy: consultando %s (%s) — %d candidatos de %d símbolos",
-            self.provider_label(), model, n_candidates, len(symbols),
-        )
-        t0 = time.monotonic()
+            # Para Ollama: añadir instrucción JSON al final del prompt de usuario
+            json_reminder = "" if use_json_fmt else "\nIMPORTANTE: responde ÚNICAMENTE con el JSON, sin ningún texto adicional. No uses etiquetas <think>."
+            user_prompt = (
+                f"{account_snapshot}\n\n"
+                f"{market_snapshot}\n\n"
+                "=== INSTRUCCIONES ===\n"
+                f"Goal por trade: ${goal_usd:.2f} USD  |  Leverage: {leverage}x\n"
+                "Fees ya incluidas en rt_fees de cada candidato (0.11% round-trip).\n\n"
+                "Evalúa candidatos de mayor a menor score.\n"
+                "CVD LONG alineado: ≥ 3/5 bull.  CVD SHORT alineado: ≤ 2/5 bull (= ≥ 3/5 bear).\n"
+                "Para SL/TP: usa niveles S/R si están disponibles; si no, usa RefSL y RefTP del candidato.\n"
+                f"Si RefTP no da R:R ≥ {settings.min_rr}, busca el nivel S/R más lejano que sí lo dé.\n"
+                "Un score ≥ 60 con dirección coherente y CVD mayoritariamente alineado ES suficiente.\n"
+                f"Responde SOLO con el JSON.{json_reminder}"
+            )
+
+            log.info(
+                "AI Strategy: consultando %s (%s) — %d candidatos de %d símbolos",
+                self.provider_label(), model, n_candidates, len(symbols),
+            )
+            t0 = time.monotonic()
 
         create_kwargs: dict = dict(
             model    = model,
@@ -352,176 +365,236 @@ class AIStrategyAgent:
         if use_json_fmt:
             create_kwargs["response_format"] = {"type": "json_object"}
 
-        try:
-            response = await asyncio.wait_for(
-                client.chat.completions.create(**create_kwargs),
-                timeout=90.0,   # Timeout máximo del socket
+            try:
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(**create_kwargs),
+                    timeout=90.0,   # Timeout máximo del socket
+                )
+                elapsed = time.monotonic() - t0
+                raw     = response.choices[0].message.content or "{}"
+                usage   = response.usage
+                token_info = {
+                    "model":  model,
+                    "prompt": usage.prompt_tokens,
+                    "comp":   usage.completion_tokens
+                } if usage else {}
+
+                log.info("AI Strategy: respuesta en %.1fs (%d chars) | Tokens: %s", 
+                         elapsed, len(raw), usage.total_tokens if usage else "?")
+                
+                strategy_logger.info("RAW_RESPONSE", "Respuesta recibida del LLM", {
+                    "elapsed_s": elapsed,
+                    "raw_content": raw,
+                    "tokens": token_info
+                })
+
+                # --- [NUEVO] CONTROL DE OBSOLESCENCIA ---
+                if elapsed > settings.ai_max_latency_s:
+                    log.warning("AI Strategy: descartando propuesta por latencia alta (%.1fs > %.1fs). Precio desactualizado.", elapsed, settings.ai_max_latency_s)
+                    strategy_logger.warning("LATENCY_REJECT", f"Latencia excesiva: {elapsed:.1f}s", {"max_allowed": settings.ai_max_latency_s})
+                    return None
+
+            except asyncio.TimeoutError:
+                log.error("AI Strategy: timeout (90s) con %s", self.provider_label())
+                strategy_logger.error("TIMEOUT", f"Timeout de 90s con {self.provider_label()}")
+                return None
+            except Exception as e:
+                log.error("AI Strategy: error con %s: %s", self.provider_label(), e)
+                strategy_logger.error("LLM_ERROR", f"Error de comunicación con LLM: {e}")
+                return None
+
+            # ── Parsear [NUEVO: Extractor Regex Robusto] ──────────────────────────
+            try:
+                raw = raw.strip()
+                # Limpiar etiquetas <think> que meten modelos como DeepSeek-R1
+                raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+                
+                # Extraer solo lo que parezca un JSON (Ignora texto antes o después)
+                json_match = re.search(r'\{.*\}', raw, flags=re.DOTALL)
+                if json_match:
+                    raw_json = json_match.group(0)
+                else:
+                    raw_json = raw # Fallback por si la regex falla
+
+                data = json.loads(raw_json)
+            except json.JSONDecodeError as e:
+                log.error("AI Strategy: JSON inválido: %s\n%s", e, raw[:300])
+                strategy_logger.error("PARSE_ERROR", f"Error al parsear JSON: {e}", {"raw": raw})
+                return None
+
+            action    = data.get("action", "NO_TRADE")
+            reasoning = data.get("reasoning", "Sin razonamiento.")
+
+            if action != "TRADE":
+                log.info("AI Strategy: NO_TRADE — %s", reasoning[:200])
+                strategy_logger.info("NO_TRADE", "La IA decidió no operar", {"reasoning": reasoning})
+                return None, None, token_info
+
+            # ── Extraer y validar campos ───────────────────────────────────────────
+            symbol = str(data.get("symbol", "")).strip().upper()
+            side   = str(data.get("side",   "")).strip()
+            try:
+                entry = float(data.get("entry", 0) or 0)
+                sl    = float(data.get("sl",    0) or 0)
+                tp    = float(data.get("tp",    0) or 0)
+                conf  = int(data.get("confidence", 70) or 70)
+            except (TypeError, ValueError) as e:
+                log.error("AI Strategy: valores numéricos inválidos: %s", e)
+                strategy_logger.error("VALIDATION_ERROR", f"Valores numéricos inválidos: {e}", {"data": data})
+                return None
+
+            if not symbol or side not in ("Buy", "Sell") or entry <= 0 or sl <= 0 or tp <= 0:
+                log.error("AI Strategy: campos obligatorios faltantes: %s", data)
+                strategy_logger.error("VALIDATION_ERROR", "Campos obligatorios faltantes", {"data": data})
+                return None
+
+            # Normalizar símbolo: corregir typo *SDT → *USDT (ej. UAISDT → UAIUSDT)
+            if symbol not in symbols and symbol.endswith("SDT") and not symbol.endswith("USDT"):
+                symbol = symbol[:-3] + "USDT"
+
+            if symbol not in symbols:
+                sym_usdt = symbol + "USDT"
+                if sym_usdt in symbols:
+                    symbol = sym_usdt
+                else:
+                    log.error("AI Strategy: símbolo '%s' no monitoreado", symbol)
+                    strategy_logger.warning("SYMBOL_ERROR", f"Símbolo {symbol} no monitoreado")
+                    return None
+
+            # ── Validar dirección coherente ─────────────────────────────────────
+            opp = opps.get(symbol)
+            if opp and opp.trend_score >= 60:
+                if opp.trend_direction == "ALCISTA" and side == "Sell":
+                    log.warning("AI Strategy: propuesta SHORT en tendencia ALCISTA %d%% — rechazando", opp.trend_score)
+                    strategy_logger.warning("TREND_REJECT", "Propuesta contra tendencia fuerte", {"trend": opp.trend_direction, "side": side})
+                    return None
+                if opp.trend_direction == "BAJISTA" and side == "Buy":
+                    log.warning("AI Strategy: propuesta LONG en tendencia BAJISTA %d%% — rechazando", opp.trend_score)
+                    strategy_logger.warning("TREND_REJECT", "Propuesta contra tendencia fuerte", {"trend": opp.trend_direction, "side": side})
+                    return None
+
+            # ── Validar geometría SL/TP vs side ────────────────────────────────
+            if side == "Buy":
+                if sl >= entry:
+                    log.error("AI Strategy: LONG pero SL(%.5g) >= entry(%.5g)", sl, entry)
+                    strategy_logger.error("GEOMETRY_ERROR", "SL >= Entry en LONG", {"sl": sl, "entry": entry})
+                    return None
+                if tp <= entry:
+                    log.error("AI Strategy: LONG pero TP(%.5g) <= entry(%.5g)", tp, entry)
+                    strategy_logger.error("GEOMETRY_ERROR", "TP <= Entry en LONG", {"tp": tp, "entry": entry})
+                    return None
+            else:
+                if sl <= entry:
+                    log.error("AI Strategy: SHORT pero SL(%.5g) <= entry(%.5g)", sl, entry)
+                    strategy_logger.error("GEOMETRY_ERROR", "SL <= Entry en SHORT", {"sl": sl, "entry": entry})
+                    return None
+                if tp >= entry:
+                    log.error("AI Strategy: SHORT pero TP(%.5g) >= entry(%.5g)", tp, entry)
+                    strategy_logger.error("GEOMETRY_ERROR", "TP >= Entry en SHORT", {"tp": tp, "entry": entry})
+                    return None
+
+            # ── Validar R:R neto ≥ settings.min_rr ────────────────────────────────────────
+            sl_dist = abs(entry - sl)
+            tp_dist = abs(tp    - entry)
+            rt_fees = entry * TAKER_FEE_RATE * 2
+            net_tp  = tp_dist - rt_fees
+            net_sl  = sl_dist + rt_fees
+
+            if net_sl <= 0 or net_tp <= 0:
+                log.error("AI Strategy: distancias inválidas")
+                strategy_logger.error("RR_ERROR", "Diferencia de precio insuficiente para cubrir fees")
+                return None
+
+            rr = net_tp / net_sl
+            if rr < settings.min_rr:
+                log.warning("AI: %s rechazado por R:R insuficiente (%.2f < %.1f)", 
+                            symbol, rr, settings.min_rr)
+                strategy_logger.warning("RR_REJECT", f"R:R insuficiente: {rr:.2f}", {"min_required": settings.min_rr})
+                return None
+
+            # ── Sizing ─────────────────────────────────────────────────────────
+            net_tp_unit = tp_dist - rt_fees
+            qty = goal_usd / net_tp_unit
+
+            # Calcular balance disponible real (mismo fallback que _run_scan)
+            _bal   = account.balance
+            _avail = _bal.available_balance
+            if _avail <= 0:
+                _avail = max(0.0, _bal.total_equity - _bal.used_margin) or _bal.wallet_balance
+
+            # CAP: no usar más del 90% del disponible × apalancamiento
+            if _avail > 0:
+                max_notional = _avail * leverage * 0.90
+                max_qty_bal  = max_notional / entry if entry > 0 else qty
+                if qty > max_qty_bal:
+                    log.warning(
+                        "AI Sizing: qty %.2f → %.2f (cap por balance $%.2f × %dx)",
+                        qty, max_qty_bal, _avail, leverage,
+                    )
+                    qty = max_qty_bal
+
+            qty = executor.round_qty(symbol, qty)
+            if qty <= 0:
+                log.warning("AI Strategy: qty=0 tras redondear para %s (balance $%.2f)", symbol, _avail)
+                strategy_logger.warning("SIZE_ERROR", "Cantidad 0 — balance insuficiente para el mínimo",
+                                        {"available": _avail, "leverage": leverage})
+                return None
+
+            ok, reason = executor.validate_order(symbol, qty, entry)
+            if not ok:
+                log.warning("AI Strategy: orden inválida %s qty=%s: %s", symbol, qty, reason)
+                strategy_logger.warning("VALIDATION_REJECT", f"Filtros de Bybit: {reason}")
+                return None
+
+            risk_usd = qty * net_sl
+            notional  = qty * entry
+            margin    = notional / max(1, leverage)
+
+            # ── Construir OrderRequest ─────────────────────────────────────────
+            from core.order_model import OrderRequest
+            req = OrderRequest(
+                symbol       = symbol,
+                side         = side,
+                qty          = qty,
+                trace_id     = trace_id,
+                order_type   = "Market",
+                entry_price  = entry,
+                sl_price     = sl,
+                tp_price     = tp,
+                goal_usd     = goal_usd,
+                risk_usd     = round(risk_usd, 2),
+                rr_ratio     = round(rr, 2),
+                opp_score    = conf,
+                notional     = round(notional, 2),
+                margin       = round(margin, 2),
+                leverage     = leverage,
+                reasons      = [
+                    f"AI Agent ({model})",
+                    f"Confianza: {conf}%  |  R:R neto: {rr:.2f}:1",
+                    reasoning[:60] + ("…" if len(reasoning) > 60 else ""),
+                ],
+                strategy_tag = "ai_agent",
+                ai_reasoning = reasoning,
             )
-            elapsed = time.monotonic() - t0
-            raw     = response.choices[0].message.content or "{}"
-            usage   = response.usage
-            token_info = {
-                "model":  model,
-                "prompt": usage.prompt_tokens,
-                "comp":   usage.completion_tokens
-            } if usage else {}
 
-            log.info("AI Strategy: respuesta en %.1fs (%d chars) | Tokens: %s", 
-                     elapsed, len(raw), usage.total_tokens if usage else "?")
-            
-            # --- [NUEVO] CONTROL DE OBSOLESCENCIA ---
-            if elapsed > settings.ai_max_latency_s:
-                log.warning("AI Strategy: descartando propuesta por latencia alta (%.1fs > %.1fs). Precio desactualizado.", elapsed, settings.ai_max_latency_s)
-                return None
+            log.info(
+                "AI Strategy: TRADE %s %s  entry=%.5g  SL=%.5g  TP=%.5g  R:R=%.2f  conf=%d%%",
+                side, symbol, entry, sl, tp, rr, conf,
+            )
 
-        except asyncio.TimeoutError:
-            log.error("AI Strategy: timeout (90s) con %s", self.provider_label())
-            return None
-        except Exception as e:
-            log.error("AI Strategy: error con %s: %s", self.provider_label(), e)
-            return None
+            strategy_logger.info("PROPOSAL_READY", f"Propuesta generada para {symbol}", {
+                "symbol": symbol,
+                "side": side,
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "rr": rr,
+                "qty": qty,
+                "risk_usd": risk_usd,
+                "reasoning": reasoning
+            })
 
-        # ── Parsear [NUEVO: Extractor Regex Robusto] ──────────────────────────
-        try:
-            raw = raw.strip()
-            # Limpiar etiquetas <think> que meten modelos como DeepSeek-R1
-            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
-            
-            # Extraer solo lo que parezca un JSON (Ignora texto antes o después)
-            json_match = re.search(r'\{.*\}', raw, flags=re.DOTALL)
-            if json_match:
-                raw_json = json_match.group(0)
-            else:
-                raw_json = raw # Fallback por si la regex falla
-
-            data = json.loads(raw_json)
-        except json.JSONDecodeError as e:
-            log.error("AI Strategy: JSON inválido: %s\n%s", e, raw[:300])
-            return None
-
-        action    = data.get("action", "NO_TRADE")
-        reasoning = data.get("reasoning", "Sin razonamiento.")
-
-        if action != "TRADE":
-            log.info("AI Strategy: NO_TRADE — %s", reasoning[:200])
-            return None, None, token_info
-
-        # ── Extraer y validar campos ───────────────────────────────────────────
-        symbol = str(data.get("symbol", "")).strip().upper()
-        side   = str(data.get("side",   "")).strip()
-        try:
-            entry = float(data.get("entry", 0) or 0)
-            sl    = float(data.get("sl",    0) or 0)
-            tp    = float(data.get("tp",    0) or 0)
-            conf  = int(data.get("confidence", 70) or 70)
-        except (TypeError, ValueError) as e:
-            log.error("AI Strategy: valores numéricos inválidos: %s", e)
-            return None
-
-        if not symbol or side not in ("Buy", "Sell") or entry <= 0 or sl <= 0 or tp <= 0:
-            log.error("AI Strategy: campos obligatorios faltantes: %s", data)
-            return None
-
-        # Normalizar símbolo
-        if symbol not in symbols:
-            sym_usdt = symbol + "USDT"
-            if sym_usdt in symbols:
-                symbol = sym_usdt
-            else:
-                log.error("AI Strategy: símbolo '%s' no monitoreado", symbol)
-                return None
-
-        # ── Validar dirección coherente ─────────────────────────────────────
-        opp = opps.get(symbol)
-        if opp and opp.trend_score >= 60:
-            if opp.trend_direction == "ALCISTA" and side == "Sell":
-                log.warning("AI Strategy: propuesta SHORT en tendencia ALCISTA %d%% — rechazando", opp.trend_score)
-                return None
-            if opp.trend_direction == "BAJISTA" and side == "Buy":
-                log.warning("AI Strategy: propuesta LONG en tendencia BAJISTA %d%% — rechazando", opp.trend_score)
-                return None
-
-        # ── Validar geometría SL/TP vs side ────────────────────────────────
-        if side == "Buy":
-            if sl >= entry:
-                log.error("AI Strategy: LONG pero SL(%.5g) >= entry(%.5g)", sl, entry)
-                return None
-            if tp <= entry:
-                log.error("AI Strategy: LONG pero TP(%.5g) <= entry(%.5g)", tp, entry)
-                return None
-        else:
-            if sl <= entry:
-                log.error("AI Strategy: SHORT pero SL(%.5g) <= entry(%.5g)", sl, entry)
-                return None
-            if tp >= entry:
-                log.error("AI Strategy: SHORT pero TP(%.5g) >= entry(%.5g)", tp, entry)
-                return None
-
-        # ── Validar R:R neto ≥ settings.min_rr ────────────────────────────────────────
-        sl_dist = abs(entry - sl)
-        tp_dist = abs(tp    - entry)
-        rt_fees = entry * TAKER_FEE_RATE * 2
-        net_tp  = tp_dist - rt_fees
-        net_sl  = sl_dist + rt_fees
-
-        if net_sl <= 0 or net_tp <= 0:
-            log.error("AI Strategy: distancias inválidas")
-            return None
-
-        rr = net_tp / net_sl
-        if rr < settings.min_rr:
-            log.warning("AI: %s rechazado por R:R insuficiente (%.2f < %.1f)", 
-                        symbol, rr, settings.min_rr)
-            return None
-
-        # ── Sizing ─────────────────────────────────────────────────────────
-        net_tp_unit = tp_dist - rt_fees
-        qty = goal_usd / net_tp_unit
-        qty = executor.round_qty(symbol, qty)
-        if qty <= 0:
-            log.warning("AI Strategy: qty=0 tras redondear para %s", symbol)
-            return None
-
-        ok, reason = executor.validate_order(symbol, qty, entry)
-        if not ok:
-            log.warning("AI Strategy: orden inválida %s qty=%s: %s", symbol, qty, reason)
-            return None
-
-        risk_usd = qty * net_sl
-        notional  = qty * entry
-        margin    = notional / max(1, leverage)
-
-        # ── Construir OrderRequest ─────────────────────────────────────────
-        from core.order_model import OrderRequest
-        req = OrderRequest(
-            symbol       = symbol,
-            side         = side,
-            qty          = qty,
-            order_type   = "Market",
-            entry_price  = entry,
-            sl_price     = sl,
-            tp_price     = tp,
-            goal_usd     = goal_usd,
-            risk_usd     = round(risk_usd, 2),
-            rr_ratio     = round(rr, 2),
-            opp_score    = conf,
-            notional     = round(notional, 2),
-            margin       = round(margin, 2),
-            leverage     = leverage,
-            reasons      = [
-                f"AI Agent ({model})",
-                f"Confianza: {conf}%  |  R:R neto: {rr:.2f}:1",
-                reasoning[:60] + ("…" if len(reasoning) > 60 else ""),
-            ],
-            strategy_tag = "ai_agent",
-            ai_reasoning = reasoning,
-        )
-
-        log.info(
-            "AI Strategy: TRADE %s %s  entry=%.5g  SL=%.5g  TP=%.5g  R:R=%.2f  conf=%d%%",
-            side, symbol, entry, sl, tp, rr, conf,
-        )
-        return symbol, req, token_info
+            return symbol, req, token_info
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────

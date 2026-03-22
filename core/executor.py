@@ -19,12 +19,14 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from typing import Dict, Optional, Tuple
 
 import aiohttp
 
 from core.config import settings
+from core.logger import executor_logger
 from core.order_model import OrderRequest, OrderResult
 
 log = logging.getLogger("qts.executor")
@@ -298,32 +300,53 @@ class BybitExecutor:
             body["tpTriggerBy"] = "MarkPrice"
 
         try:
-            data = await self._post("/v5/order/create", body)
-            if data.get("retCode") == 0:
-                result = data.get("result", {})
-                log.info("Order placed: %s %s x%s  id=%s",
-                         req.side, req.symbol, req.qty, result.get("orderId"))
-                return OrderResult(
-                    success=True,
-                    order_id=result.get("orderId", ""),
-                )
-            # Auto-corrección: si positionIdx es incorrecto, cambiar modo y reintentar
-            if data.get("retCode") == 110025 or "position idx" in data.get("retMsg", "").lower():
-                self._hedge_mode = not self._hedge_mode
-                log.warning("positionIdx incorrecto — cambiando a %s y reintentando",
-                            "Hedge" if self._hedge_mode else "One-way")
-                body["positionIdx"] = self._pos_idx(req.side)
+            with executor_logger.context(req.trace_id):
+                executor_logger.info("ORDER_SENT", f"Enviando orden {req.side} {req.symbol}", {"body": body})
                 data = await self._post("/v5/order/create", body)
+                
                 if data.get("retCode") == 0:
                     result = data.get("result", {})
-                    log.info("Order placed (retry): %s %s x%s  id=%s",
+                    log.info("Order placed: %s %s x%s  id=%s",
                              req.side, req.symbol, req.qty, result.get("orderId"))
-                    return OrderResult(success=True, order_id=result.get("orderId", ""))
-            msg = data.get("retMsg", "unknown error")
-            log.warning("Order failed: %s — %s", req.symbol, msg)
-            return OrderResult(success=False, error_msg=msg)
+                    executor_logger.info("ORDER_SUCCESS", "Orden aceptada por Bybit", {"response": data})
+                    return OrderResult(
+                        success=True,
+                        order_id=result.get("orderId", ""),
+                    )
+                
+                # Auto-corrección positionIdx (misma lógica determinista que set_sl_tp)
+                _ret_msg_p = data.get("retMsg", "")
+                _is_idx_err_p = (
+                    data.get("retCode") == 110025 or
+                    "position idx" in _ret_msg_p.lower() or
+                    "positionidx" in _ret_msg_p.lower() or
+                    "position mode" in _ret_msg_p.lower()
+                )
+                if _is_idx_err_p:
+                    mode_match = re.search(r"position mode\((\d+)\)", _ret_msg_p, re.IGNORECASE)
+                    if mode_match:
+                        self._hedge_mode = (int(mode_match.group(1)) == 3)
+                    else:
+                        self._hedge_mode = not self._hedge_mode
+                    body["positionIdx"] = self._pos_idx(req.side)
+                    log.warning("positionIdx incorrecto — fijando a %s y reintentando",
+                                "Hedge" if self._hedge_mode else "One-way")
+                    executor_logger.warning("RETRY_POS_IDX", "Reintentando con nuevo positionIdx", {"hedge_mode": self._hedge_mode})
+                    data = await self._post("/v5/order/create", body)
+                    if data.get("retCode") == 0:
+                        result = data.get("result", {})
+                        log.info("Order placed (retry): %s %s x%s  id=%s",
+                                 req.side, req.symbol, req.qty, result.get("orderId"))
+                        executor_logger.info("ORDER_SUCCESS", "Orden aceptada tras reintento", {"response": data})
+                        return OrderResult(success=True, order_id=result.get("orderId", ""))
+                
+                msg = data.get("retMsg", "unknown error")
+                log.warning("Order failed: %s — %s", req.symbol, msg)
+                executor_logger.error("ORDER_ERROR", f"Orden rechazada: {msg}", {"response": data})
+                return OrderResult(success=False, error_msg=msg)
         except Exception as e:
             log.error("place_market_bracket exception: %s", e)
+            executor_logger.error("EXECUTION_EXCEPTION", f"Excepción en ejecución: {e}")
             return OrderResult(success=False, error_msg=str(e))
 
     async def place_limit_bracket(self, req: OrderRequest) -> OrderResult:
@@ -368,17 +391,25 @@ class BybitExecutor:
         tp:       float = 0.0,
         side:     str   = "Buy",
         clear_tp: bool  = False,
+        trace_id: str   = "",
     ) -> bool:
         """
         Modifica SL y/o TP de una posición abierta.
         POST /v5/position/trading-stop
         Pasar 0 en sl o tp para no modificarlo.
         clear_tp=True envía "0" para eliminar el TP activo (captura extendida).
+
+        Hedge Mode: positionIdx se calcula automáticamente desde _pos_idx(side).
+          · Buy  → positionIdx=1
+          · Sell → positionIdx=2
+        Si Bybit devuelve 34040 o 110025 (positionIdx incorrecto) se reintenta
+        con el modo invertido, igual que en place_market_bracket.
         """
+        pos_idx = self._pos_idx(side)
         body: dict = {
             "category":    "linear",
             "symbol":      symbol,
-            "positionIdx": self._pos_idx(side),
+            "positionIdx": pos_idx,
         }
         if sl > 0:
             body["stopLoss"]    = self.format_price(sl)
@@ -392,17 +423,120 @@ class BybitExecutor:
         if len(body) <= 3:
             return True  # nada que modificar
 
+        ctx = executor_logger.context(trace_id) if trace_id else executor_logger.context()
         try:
-            data = await self._post("/v5/position/trading-stop", body)
-            ret_code = data.get("retCode")
-            # 0 = éxito. 
-            # 3400099 = "not modified" (ya tiene ese SL/TP), a veces ocurre si el create_order ya lo puso.
-            ok = ret_code in (0, 3400099)
-            if not ok:
+            with ctx as tid:
+                executor_logger.debug("SET_SL_TP_SEND", f"Enviando trading-stop {symbol}", {
+                    "symbol": symbol, "side": side, "sl": sl, "tp": tp,
+                    "clear_tp": clear_tp, "positionIdx": pos_idx,
+                    "hedge_mode": self._hedge_mode,
+                })
+                data = await self._post("/v5/position/trading-stop", body)
+                ret_code = data.get("retCode")
+
+                # Éxito o "sin cambios" (ya tenía ese SL/TP desde place_order)
+                if ret_code in (0, 3400099):
+                    executor_logger.debug("SET_SL_TP_OK", f"SL/TP aplicado: {symbol}", {
+                        "retCode": ret_code, "positionIdx": pos_idx,
+                    })
+                    return True
+
+                _ret_msg = data.get("retMsg", "")
+                _ret_msg_lower = _ret_msg.lower()
+
+                # 34040 "not modified": CONFIRMAR con REST que el SL está realmente en la posición.
+                # "not modified" puede significar:
+                #   a) SL ya estaba en ese valor (OK) → stopLoss > 0 en position/list
+                #   b) positionIdx incorrecto y Bybit no encontró la posición (FALLO SILENCIOSO)
+                #      → stopLoss == 0 → tratar como error, reintentar con idx correcto
+                if ret_code == 34040 and "not modified" in _ret_msg_lower and "position mode" not in _ret_msg_lower:
+                    confirmed = await self.verify_sl_on_position(symbol)
+                    if confirmed:
+                        executor_logger.info("SET_SL_TP_OK", f"SL/TP confirmado en posición (not modified): {symbol}", {
+                            "retCode": ret_code, "positionIdx": pos_idx,
+                        })
+                        return True
+                    # SL no encontrado → "not modified" fue fallo silencioso
+                    # Intentar detectar el modo correcto y reintentar
+                    log.warning(
+                        "set_sl_tp: 'not modified' pero stopLoss=0 en %s (positionIdx=%d puede ser incorrecto) — reintentando",
+                        symbol, pos_idx,
+                    )
+                    self._hedge_mode = not self._hedge_mode  # flip como fallback
+                    new_idx = self._pos_idx(side)
+                    body["positionIdx"] = new_idx
+                    data = await self._post("/v5/position/trading-stop", body)
+                    ret_code = data.get("retCode")
+                    _ret_msg_r = data.get("retMsg", "")
+                    if ret_code in (0, 3400099):
+                        executor_logger.info("SET_SL_TP_RETRY_OK", f"SL/TP aplicado tras corrección idx: {symbol}", {
+                            "retCode": ret_code, "positionIdx": new_idx,
+                        })
+                        return True
+                    if ret_code == 34040 and "not modified" in _ret_msg_r.lower():
+                        confirmed2 = await self.verify_sl_on_position(symbol)
+                        if confirmed2:
+                            return True
+                    log.warning("set_sl_tp: falló incluso tras flip idx para %s (code=%s)", symbol, ret_code)
+                    return False
+
+                # Auto-corrección: positionIdx incorrecto
+                # Parsear "position mode(X)" del mensaje para fijar el modo de forma determinista
+                # (en lugar de hacer flip ciego que causa 34040↔10001 loop)
+                _is_idx_err = (
+                    ret_code == 110025 or
+                    "position idx" in _ret_msg_lower or
+                    "positionidx" in _ret_msg_lower or
+                    (ret_code in (34040, 10001) and "position mode" in _ret_msg_lower)
+                )
+                if _is_idx_err:
+                    mode_match = re.search(r"position mode\((\d+)\)", _ret_msg, re.IGNORECASE)
+                    if mode_match:
+                        actual_mode = int(mode_match.group(1))
+                        self._hedge_mode = (actual_mode == 3)   # 3=Hedge, 0=One-way
+                    else:
+                        self._hedge_mode = not self._hedge_mode  # fallback: flip
+                    new_idx = self._pos_idx(side)
+                    log.warning(
+                        "set_sl_tp positionIdx incorrecto (%s, code=%s) — "
+                        "fijando a %s (idx=%d) y reintentando",
+                        symbol, ret_code,
+                        "Hedge" if self._hedge_mode else "One-way", new_idx,
+                    )
+                    executor_logger.warning("SET_SL_TP_IDX_RETRY", "positionIdx incorrecto, reintentando", {
+                        "symbol": symbol, "retCode": ret_code, "retMsg": _ret_msg,
+                        "old_idx": pos_idx, "new_idx": new_idx, "hedge_mode": self._hedge_mode,
+                    })
+                    body["positionIdx"] = new_idx
+                    data = await self._post("/v5/position/trading-stop", body)
+                    ret_code = data.get("retCode")
+                    _ret_msg_r = data.get("retMsg", "")
+                    if ret_code in (0, 3400099):
+                        executor_logger.info("SET_SL_TP_RETRY_OK", f"SL/TP aplicado tras reintento: {symbol}", {
+                            "retCode": ret_code, "positionIdx": new_idx,
+                        })
+                        return True
+                    # "not modified" en el retry — verificar con REST también
+                    if ret_code == 34040 and "not modified" in _ret_msg_r.lower() and "position mode" not in _ret_msg_r.lower():
+                        confirmed_r = await self.verify_sl_on_position(symbol)
+                        if confirmed_r:
+                            executor_logger.info("SET_SL_TP_RETRY_OK", f"SL/TP confirmado tras reintento: {symbol}", {
+                                "retCode": ret_code, "positionIdx": new_idx,
+                            })
+                            return True
+
                 log.warning("set_sl_tp failed: %s — %s (code %s)", symbol, data.get("retMsg"), ret_code)
-            return ok
+                executor_logger.warning("SET_SL_TP_FAILED", f"Fallo al aplicar SL/TP: {symbol}", {
+                    "symbol": symbol, "side": side, "sl": sl, "tp": tp,
+                    "retCode": ret_code, "retMsg": data.get("retMsg"),
+                    "positionIdx": body.get("positionIdx"), "hedge_mode": self._hedge_mode,
+                })
+                return False
         except Exception as e:
             log.error("set_sl_tp exception: %s", e)
+            executor_logger.error("SET_SL_TP_EXCEPTION", f"Excepción en set_sl_tp: {e}", {
+                "symbol": symbol, "side": side, "sl": sl, "tp": tp,
+            })
             return False
 
     async def close_position(
@@ -428,14 +562,97 @@ class BybitExecutor:
         }
         try:
             data = await self._post("/v5/order/create", body)
-            if data.get("retCode") == 0:
+            ret_code = data.get("retCode")
+            if ret_code == 0:
                 result = data.get("result", {})
                 log.info("Position closed: %s x%s  id=%s", symbol, qty, result.get("orderId"))
                 return OrderResult(success=True, order_id=result.get("orderId", ""))
+
+            # Auto-corrección positionIdx (mismo mecanismo determinista que set_sl_tp)
+            _ret_msg = data.get("retMsg", "")
+            _ret_msg_lower = _ret_msg.lower()
+            _is_idx_err = (
+                ret_code == 110025 or
+                "position idx" in _ret_msg_lower or
+                "positionidx" in _ret_msg_lower or
+                (ret_code in (34040, 10001) and "position mode" in _ret_msg_lower)
+            )
+            if _is_idx_err:
+                mode_match = re.search(r"position mode\((\d+)\)", _ret_msg, re.IGNORECASE)
+                if mode_match:
+                    actual_mode = int(mode_match.group(1))
+                    self._hedge_mode = (actual_mode == 3)
+                else:
+                    self._hedge_mode = not self._hedge_mode
+                body["positionIdx"] = self._pos_idx(side)
+                log.warning("close_position positionIdx incorrecto (%s, code=%s) — fijando a %s y reintentando",
+                            symbol, ret_code, "Hedge" if self._hedge_mode else "One-way")
+                data = await self._post("/v5/order/create", body)
+                if data.get("retCode") == 0:
+                    result = data.get("result", {})
+                    log.info("Position closed (retry): %s x%s  id=%s", symbol, qty, result.get("orderId"))
+                    return OrderResult(success=True, order_id=result.get("orderId", ""))
+
             return OrderResult(success=False, error_msg=data.get("retMsg", "error"))
         except Exception as e:
             log.error("close_position exception: %s", e)
             return OrderResult(success=False, error_msg=str(e))
+
+    async def wait_for_position(
+        self, symbol: str, side: str, timeout_s: float = 8.0
+    ) -> Tuple[bool, float]:
+        """
+        Espera a que Bybit refleje la posición como abierta (poll /v5/position/list).
+        Market IOC llena en < 1s, pero la posición puede tardar 1-3s en aparecer.
+        Retorna (encontrada: bool, avg_entry_price: float).
+        """
+        deadline = time.time() + timeout_s
+        attempt  = 0
+        while time.time() < deadline:
+            await asyncio.sleep(0.4 if attempt == 0 else 0.6)
+            attempt += 1
+            try:
+                data = await self._get("/v5/position/list", {
+                    "category": "linear",
+                    "symbol":   symbol,
+                })
+                for p in data.get("result", {}).get("list", []):
+                    sz = float(p.get("size", 0))
+                    if sz <= 0:
+                        continue
+                    # Filtrar por side si la cuenta es hedge (puede tener long y short)
+                    if self._hedge_mode and p.get("side", "") != side:
+                        continue
+                    avg = float(p.get("avgPrice") or p.get("entryPrice") or 0)
+                    log.info("wait_for_position: %s %s @ %.5g (intento %d)", side, symbol, avg, attempt)
+                    return True, avg
+            except Exception as e:
+                log.warning("wait_for_position(%s) poll %d: %s", symbol, attempt, e)
+        log.error("wait_for_position: %s no apareció en Bybit tras %.0fs", symbol, timeout_s)
+        return False, 0.0
+
+    async def verify_sl_on_position(self, symbol: str) -> bool:
+        """
+        Verifica que la posición tenga stopLoss > 0 en Bybit.
+        Retorna True si el SL está activo, False si no hay SL o no hay posición.
+        Siempre loguea a INFO el valor real encontrado para diagnóstico.
+        """
+        try:
+            data = await self._get("/v5/position/list", {
+                "category": "linear",
+                "symbol":   symbol,
+            })
+            for p in data.get("result", {}).get("list", []):
+                if float(p.get("size", 0)) > 0:
+                    sl = float(p.get("stopLoss") or 0)
+                    tp = float(p.get("takeProfit") or 0)
+                    log.info("verify_sl_on_position %s: stopLoss=%.5g  takeProfit=%.5g  idx=%s",
+                             symbol, sl, tp, p.get("positionIdx"))
+                    return sl > 0
+            log.warning("verify_sl_on_position %s: no hay posición con size > 0", symbol)
+        except Exception as e:
+            log.warning("verify_sl_on_position(%s): %s", symbol, e)
+        return False
 
     async def get_position_open_time(self, symbol: str, since_ms: int = 0) -> int:
         """
