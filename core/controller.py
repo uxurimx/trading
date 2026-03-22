@@ -1060,22 +1060,42 @@ class TradeController:
 
         # ── Salida por Pérdida de Fuerza (Volume Drop / RSI) ───────────────
         if trade.state == TradeState.OPEN and progress > 0.15:
-            # 1. Caída de volumen > 50% vs media reciente
+            # Umbral mínimo de profit para permitir salida de emergencia:
+            # no cerrar si no cubrimos al menos el round-trip de fees (0.12% del notional).
+            # Sin ganancia real, es mejor aguantar hacia el TP o el SL original.
+            _notional    = trade.request.notional if trade.request else 0.0
+            _fee_thresh  = _notional * 0.0012       # 0.12% round-trip
+            _has_profit  = trade.pnl_usd > _fee_thresh
+
+            # 1. Caída de volumen > 50% vs media suavizada de 3 velas
             if ms.vol_drop_50:
-                log.warning("LossOfStrength: %s exit por caída súbita de volumen", sym)
-                self.close_symbol(sym, "vol_drop_50")
-                return
-            
+                if not _has_profit:
+                    log.debug("LossOfStrength: %s vol_drop_50 bloqueado — PnL $%.4f < fees $%.4f, esperando TP/SL",
+                              sym, trade.pnl_usd, _fee_thresh)
+                else:
+                    log.warning("LossOfStrength: %s exit por caída súbita de volumen (PnL $%.4f > fees $%.4f)",
+                                sym, trade.pnl_usd, _fee_thresh)
+                    self.close_symbol(sym, "vol_drop_50")
+                    return
+
             # 2. RSI 1m agotado (cruzando 70 abajo para LONG o 30 arriba para SHORT)
             rsi = ms.rsi_1m
             if is_long and rsi < 70 and getattr(trade, '_rsi_peak', 0) >= 70:
-                log.warning("LossOfStrength: %s exit por RSI 1m agotado (%.1f)", sym, rsi)
-                self.close_symbol(sym, "rsi_exhaustion")
-                return
+                if not _has_profit:
+                    log.debug("LossOfStrength: %s rsi_exhaustion bloqueado — PnL $%.4f < fees, esperando TP/SL",
+                              sym, trade.pnl_usd)
+                else:
+                    log.warning("LossOfStrength: %s exit por RSI 1m agotado (%.1f)", sym, rsi)
+                    self.close_symbol(sym, "rsi_exhaustion")
+                    return
             if not is_long and rsi > 30 and getattr(trade, '_rsi_bottom', 100) <= 30:
-                log.warning("LossOfStrength: %s exit por RSI 1m agotado (%.1f)", sym, rsi)
-                self.close_symbol(sym, "rsi_exhaustion")
-                return
+                if not _has_profit:
+                    log.debug("LossOfStrength: %s rsi_exhaustion bloqueado — PnL $%.4f < fees, esperando TP/SL",
+                              sym, trade.pnl_usd)
+                else:
+                    log.warning("LossOfStrength: %s exit por RSI 1m agotado (%.1f)", sym, rsi)
+                    self.close_symbol(sym, "rsi_exhaustion")
+                    return
             
             # Track RSI peaks
             if is_long: trade._rsi_peak = max(getattr(trade, '_rsi_peak', 0), rsi)

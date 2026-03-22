@@ -405,15 +405,23 @@ class MarketState:
 
     @property
     def vol_drop_50(self) -> bool:
-        """True si el volumen actual es < 50% de la media de los últimos 5 mins."""
-        if not self.cvd_candles or len(self.cvd_candles) < 2:
+        """True si el volumen promedio de las últimas 3 velas es < 50% de la media de las 5 anteriores.
+
+        Usa un promedio móvil de 3 velas como 'volumen actual' para evitar que una
+        sola vela lenta dispare la salida (ruido vs caída real de participación).
+        """
+        candles = list(self.cvd_candles)
+        if len(candles) < 5:
             return False
-        current_vol = self.cvd_candles[-1].total
-        prev_vols = [c.total for c in list(self.cvd_candles)[-6:-1]]
-        if not prev_vols:
+        # Promedio de las últimas 3 velas (señal suavizada)
+        recent   = candles[-3:]
+        avg_now  = sum(c.total for c in recent) / len(recent)
+        # Referencia: las 5 velas anteriores a esas 3
+        ref      = candles[-8:-3]
+        if not ref:
             return False
-        avg_prev = sum(prev_vols) / len(prev_vols)
-        return avg_prev > 0 and current_vol < (avg_prev * 0.5)
+        avg_prev = sum(c.total for c in ref) / len(ref)
+        return avg_prev > 0 and avg_now < (avg_prev * 0.5)
 
 
 # ─── MarketStream ─────────────────────────────────────────────────────────────
