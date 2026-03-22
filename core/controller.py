@@ -112,6 +112,7 @@ class TradeController:
         self._partial_lock_done: Set[str]      = set()  # trades con partial lock ya aplicado
         self._pct80_analyzed:    Set[str]      = set()  # trades con análisis de 80% ya ejecutado
         self._consec_losses: Dict[str, int]    = {}     # pérdidas consecutivas por símbolo
+        self._closing:       Set[str]          = set()  # symbols con cierre en curso (lock)
         # sym → (side, monotonic_expire): cooldown tras weak_exit/time_stop
         self._exit_cooldown: Dict[str, tuple] = {}
         # historial reciente de resultados para detector de mercado choppy
@@ -250,6 +251,9 @@ class TradeController:
     def close_symbol(self, symbol: str, reason: str = "manual") -> None:
         trade = self._active.get(symbol)
         if trade and trade.is_active:
+            if symbol in self._closing:
+                return   # cierre ya en curso — ignorar duplicados
+            self._closing.add(symbol)
             log.info("Cerrando %s (%s)", symbol, reason)
             self._bridge.submit(self._do_close(symbol, trade.request, reason))
 
@@ -323,11 +327,14 @@ class TradeController:
         # Detectar trades cerrados externamente (o por SL/TP de Bybit)
         self._detect_closed_trades(states, account)
 
-        # Capturar baseline de PnL al primer tick activo del trade
+        # Capturar baseline de PnL al primer tick activo del trade.
+        # Esperar 3s para que los execution events de entrada hayan llegado por WebSocket
+        # y actualizado account.daily_pnl antes de capturar la base.
         for sym, trade in self._active.items():
             if trade.is_active and sym not in self._pnl_captured:
-                trade.pnl_at_open = account.daily_pnl
-                self._pnl_captured.add(sym)
+                if trade.opened_at > 0 and int(time.time()) - trade.opened_at >= 3:
+                    trade.pnl_at_open = account.daily_pnl
+                    self._pnl_captured.add(sym)
 
         # Gestionar trades activos SIEMPRE (respeta el modo por-trade).
         # El modo global MANUAL solo bloquea nuevas entradas, no la gestión
@@ -945,6 +952,7 @@ class TradeController:
             self._best_sl.pop(symbol, None)
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)
+            self._closing.discard(symbol)   # liberar lock de cierre
 
             with executor_logger.context(trade.trace_id):
                 executor_logger.info("TRADE_FINALIZED", f"Trade finalizado: {symbol}", {
@@ -1354,26 +1362,40 @@ class TradeController:
 
     async def _do_close(self, symbol: str, req: OrderRequest, reason: str = "manual") -> None:
         import asyncio as _aio
+        _ALREADY_CLOSED = ("position is zero", "reduce-only", "cannot fix reduce")
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
                 with executor_logger.context(req.trace_id):
-                    executor_logger.info("CLOSING_POSITION", f"Cerrando posición {symbol} por {reason} (intento {attempt})", {"qty": req.qty, "side": req.side})
+                    executor_logger.info("CLOSING_POSITION",
+                                         f"Cerrando posición {symbol} por {reason} (intento {attempt})",
+                                         {"qty": req.qty, "side": req.side})
                     result = await self._executor.close_position(symbol, req.qty, req.side)
                     if result.success:
                         executor_logger.info("CLOSE_SUCCESS", f"Posición {symbol} cerrada con éxito")
                         GLib.idle_add(self._finalize_trade, symbol, reason)
                         return
                     else:
-                        log.error("[CLOSE %d/%d] Cierre falló: %s — %s", attempt, max_retries, symbol, result.error_msg)
-                        executor_logger.error("CLOSE_ERROR", f"Error al cerrar posición (intento {attempt}): {result.error_msg}")
+                        err = result.error_msg or ""
+                        # Posición ya en cero — otro coroutine cerró primero
+                        if any(k in err.lower() for k in _ALREADY_CLOSED):
+                            log.info("[CLOSE] %s ya cerrada (posición=0) — finalizando", symbol)
+                            GLib.idle_add(self._finalize_trade, symbol, reason)
+                            return
+                        log.error("[CLOSE %d/%d] Cierre falló: %s — %s",
+                                  attempt, max_retries, symbol, err)
+                        executor_logger.error("CLOSE_ERROR",
+                                              f"Error al cerrar posición (intento {attempt}): {err}")
             except Exception as e:
                 log.error("[CLOSE %d/%d] Excepción al cerrar %s: %s", attempt, max_retries, symbol, e)
-                executor_logger.error("CLOSE_EXCEPTION", f"Excepción al cerrar posición (intento {attempt}): {e}")
+                executor_logger.error("CLOSE_EXCEPTION",
+                                      f"Excepción al cerrar posición (intento {attempt}): {e}")
             if attempt < max_retries:
                 await _aio.sleep(1.5)
-        log.critical("🚨 [CLOSE FAILED] %s no se pudo cerrar tras %d intentos — intervención manual requerida", symbol, max_retries)
-        executor_logger.error("CLOSE_ALL_FAILED", f"Posición {symbol} NO cerrada tras {max_retries} intentos — revisar manualmente")
+        log.critical("🚨 [CLOSE FAILED] %s no se pudo cerrar tras %d intentos — intervención manual requerida",
+                     symbol, max_retries)
+        executor_logger.error("CLOSE_ALL_FAILED",
+                              f"Posición {symbol} NO cerrada tras {max_retries} intentos — revisar manualmente")
 
     # ── Auto-blacklist ────────────────────────
 

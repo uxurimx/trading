@@ -49,17 +49,27 @@ Tu trabajo es SELECCIONAR EL MEJOR TRADE del lote de candidatos, no buscar excus
   ▶ Tendencia fuerte = OPORTUNIDAD, NO razón para rechazar.
   ✗ Solo rechaza si la dirección del sistema va CONTRA la tendencia.
 
-═══ CVD — definición cuantitativa ═══
+  ⚠ OVEREXTENSION (trend_score > 85):
+  Cuando la tendencia está sobreextendida (trend_score > 85), el precio puede revertir bruscamente.
+  En estos casos exige CVD = 5/5 en la dirección de la tendencia para confirmar que AÚN hay fuerza.
+  Si CVD < 5/5 con trend_score > 85 → rechazar ese candidato (riesgo de agotamiento).
+
+═══ CVD — definición cuantitativa (REGLA ESTRICTA) ═══
   CVD=X/5bull significa que X de las últimas 5 velas tuvieron delta positivo.
-  • LONG alineado:  CVD ≥ 3/5 bull  (mayoría alcista)
-  • SHORT alineado: CVD ≤ 2/5 bull  (mayoría bajista = ≥ 3/5 bear)
-  • CVD=3/5 bull con dir=LONG → ALINEADO ✓
-  • CVD=2/5 bull con dir=SHORT → ALINEADO ✓  (= 3/5 bear)
-  ▶ No requieras unanimidad — basta con la mayoría.
+  • LONG alineado:  CVD ≥ 4/5 bull  (presión compradora clara)
+  • SHORT alineado: CVD ≤ 1/5 bull  (presión vendedora clara = ≥ 4/5 bear)
+  ▶ No basta con mayoría simple — se exige presión CLARA (4/5 mínimo).
+  ✗ CVD=3/5 bull con dir=LONG → NO ALINEADO (insuficiente).
+  ✗ CVD=2/5 bull con dir=SHORT → NO ALINEADO (insuficiente).
 
 ═══ SL / TP — cálculo ═══
   Fees round-trip = 0.11% × entry (ya provistos como rt_fees en cada candidato).
-  R:R neto = (TP_dist − rt_fees) / (SL_dist + rt_fees) ≥ {min_rr}
+  R:R neto base requerido = {min_rr}
+
+  ⚠ FILTRO DE REVERSIÓN cerca de S/R:
+  Si el precio está dentro de 1×ATR de la Resistencia (R) en un LONG,
+  o dentro de 1×ATR del Soporte (S) en un SHORT → exige R:R neto ≥ 3.0.
+  El precio en S/R adverso indica riesgo elevado de rebote.
 
   Orden de preferencia para SL/TP:
     1. Usa el nivel S (soporte) o R (resistencia) más cercano del candidato.
@@ -67,31 +77,29 @@ Tu trabajo es SELECCIONAR EL MEJOR TRADE del lote de candidatos, no buscar excus
        (Con ATR ≥ 0.4% esto garantiza R:R ≥ {min_rr} después de fees.)
 
   ▶ Siempre verifica la fórmula R:R antes de responder.
-  ▶ Si el nivel S/R más cercano no da R:R neto ≥ {min_rr}, usa 4×ATR como TP.
+  ▶ Si el nivel S/R más cercano no da R:R neto requerido, usa 4×ATR como TP.
 
 ═══ PROCESO obligatorio ═══
   1. Ordena los candidatos por score (mayor primero).
   2. Para cada uno (empezando por el top):
-     a. Confirma dirección vs tendencia.
-     b. Verifica CVD con la regla de mayoría.
-     c. Calcula SL y TP (usa S/R o ATR×multiplicador).
-     d. Calcula R:R neto. Si ≥ {min_rr} → TRADE. Detén el análisis.
-  3. Solo retorna NO_TRADE si TODOS los candidatos tienen R:R neto < {min_rr}
-     O si la dirección va contra la tendencia fuerte.
+     a. Confirma dirección vs tendencia. Si trend_score > 85, aplica regla overextension.
+     b. Verifica CVD con la regla estricta (4/5 mínimo).
+     c. Verifica si el precio está cerca de S/R adverso (aplica R:R ≥ 3.0 si aplica).
+     d. Calcula SL y TP (usa S/R o ATR×multiplicador).
+     e. Calcula R:R neto. Si ≥ umbral requerido → TRADE. Detén el análisis.
+  3. Solo retorna NO_TRADE si TODOS los candidatos fallan estos criterios.
 
-5. DINÁMICA DE VOLUMEN (CRUCIAL):
-- Entra en LONG solo si CVD es positivo y ascendente (confirmación de compra real).
+DINÁMICA DE VOLUMEN:
 - La 'Velocidad de Cinta' (Tape Speed) indica urgencia. Solo considera trades con Tape Speed > 0.5.
-- Ignora monedas con bajo volumen o 'ruido' donde el ATR sea puramente por falta de liquidez.
+- Ignora monedas con bajo volumen o ruido donde el ATR sea puramente por falta de liquidez.
 
-6. FORMATO DE RESPUESTA:
-solo JSON válido, sin texto, sin markdown ═══
+FORMATO DE RESPUESTA: solo JSON válido, sin texto, sin markdown.
 
 Si hay trade:
-{{"action":"TRADE","symbol":"SOLUSDT","side":"Buy","entry":145.50,"sl":143.80,"tp":150.90,"confidence":79,"reasoning":"SOL score=73, ALCISTA 68%, CVD=4/5 bull (alineado LONG), EMA↑. SL=1.5×ATR(1.13)=143.80, TP en resistencia 150.90. rt_fees=0.16. R:R=(5.40-0.16)/(1.70+0.16)=5.24/1.86=2.82"}}
+{{"action":"TRADE","symbol":"SOLUSDT","side":"Buy","entry":145.50,"sl":143.80,"tp":150.90,"confidence":79,"reasoning":"SOL score=73, ALCISTA 68%, CVD=4/5 bull (alineado LONG), EMA↑. SL=1.5×ATR(1.13)=143.80, TP en resistencia 150.90. rt_fees=0.16. R:R=(5.40-0.16)/(1.70+0.16)=2.82. Precio NO cerca de R adverso."}}
 
 Si ninguno califica:
-{{"action":"NO_TRADE","reasoning":"Candidato A: dir LONG vs tendencia BAJISTA fuerte. Candidato B: CVD=1/5 bull en LONG (no alineado). Candidato C: R:R neto=1.8 (insuficiente incluso con TP en resistencia R=X)."}}
+{{"action":"NO_TRADE","reasoning":"Candidato A: CVD=3/5 bull en LONG (insuficiente, exige 4/5). Candidato B: trend_score=88 overextended + CVD=4/5 (exige 5/5). Candidato C: R:R neto=1.8 insuficiente."}}
 """
 
 
@@ -308,10 +316,23 @@ class AIStrategyAgent:
         with strategy_logger.context() as trace_id:
             self._last_call_ts = time.monotonic()
 
-            n_candidates = sum(
-                1 for s in symbols
-                if opps.get(s) and opps[s].score >= settings.ai_min_score
-            )
+            # Contar candidatos que pasan TODOS los filtros (score + ATR)
+            n_candidates = 0
+            for s in symbols:
+                opp  = opps.get(s)
+                tech = techs.get(s)
+                ms   = states.get(s)
+                if not opp or opp.score < settings.ai_min_score:
+                    continue
+                if not tech or not ms or ms.ticker.last_price <= 0:
+                    continue
+                if tech.atr_15m / ms.ticker.last_price * 100 < settings.ai_min_atr_pct:
+                    continue
+                n_candidates += 1
+
+            if n_candidates == 0:
+                log.debug("AI Strategy: 0 candidatos viables — omitiendo llamada a API")
+                return None, None, {}
 
             market_snapshot  = _build_market_snapshot(symbols, states, opps, techs)
             account_snapshot = _build_account_snapshot(account, active_trades)
@@ -340,10 +361,12 @@ class AIStrategyAgent:
                 f"Goal por trade: ${goal_usd:.2f} USD  |  Leverage: {leverage}x\n"
                 "Fees ya incluidas en rt_fees de cada candidato (0.11% round-trip).\n\n"
                 "Evalúa candidatos de mayor a menor score.\n"
-                "CVD LONG alineado: ≥ 3/5 bull.  CVD SHORT alineado: ≤ 2/5 bull (= ≥ 3/5 bear).\n"
+                "CVD LONG alineado: ≥ 4/5 bull.  CVD SHORT alineado: ≤ 1/5 bull (= ≥ 4/5 bear).\n"
+                "Si trend_score > 85: exige CVD = 5/5 en la dirección (overextension guard).\n"
+                "Si precio dentro de 1×ATR de S/R adverso: exige R:R neto ≥ 3.0.\n"
                 "Para SL/TP: usa niveles S/R si están disponibles; si no, usa RefSL y RefTP del candidato.\n"
-                f"Si RefTP no da R:R ≥ {settings.min_rr}, busca el nivel S/R más lejano que sí lo dé.\n"
-                "Un score ≥ 60 con dirección coherente y CVD mayoritariamente alineado ES suficiente.\n"
+                f"Si RefTP no da R:R requerido, busca el nivel S/R más lejano que sí lo dé.\n"
+                "Un score ≥ 60 con dirección coherente y CVD ≥ 4/5 ES suficiente.\n"
                 f"Responde SOLO con el JSON.{json_reminder}"
             )
 
