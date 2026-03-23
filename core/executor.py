@@ -661,6 +661,25 @@ class BybitExecutor:
             log.warning("verify_sl_on_position(%s): %s", symbol, e)
         return False
 
+    async def get_position_sl_tp(self, symbol: str) -> tuple[float, float]:
+        """
+        Retorna (stopLoss, takeProfit) reales de la posición activa en Bybit.
+        Devuelve (0.0, 0.0) si no hay posición o falla la llamada.
+        """
+        try:
+            data = await self._get("/v5/position/list", {
+                "category": "linear",
+                "symbol":   symbol,
+            })
+            for p in data.get("result", {}).get("list", []):
+                if float(p.get("size", 0)) > 0:
+                    sl = float(p.get("stopLoss") or 0)
+                    tp = float(p.get("takeProfit") or 0)
+                    return sl, tp
+        except Exception as e:
+            log.warning("get_position_sl_tp(%s): %s", symbol, e)
+        return 0.0, 0.0
+
     async def get_position_open_time(self, symbol: str, since_ms: int = 0) -> int:
         """
         Recupera el timestamp real de apertura de la posición consultando el historial
