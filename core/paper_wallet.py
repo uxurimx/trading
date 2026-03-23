@@ -400,6 +400,14 @@ class PaperExecutor:
             return pp is not None and pp.sl_price > 0
         return await self._real.verify_sl_on_position(symbol)
 
+    async def get_position_sl_tp(self, symbol: str) -> tuple:
+        if self._paper:
+            pp = self._wallet._positions.get(symbol)
+            if pp:
+                return (pp.sl_price or 0.0, pp.tp_price or 0.0)
+            return (0.0, 0.0)
+        return await self._real.get_position_sl_tp(symbol)
+
     async def cancel_all_orders(self, symbol: str) -> bool:
         if self._paper:
             return True
