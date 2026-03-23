@@ -295,6 +295,53 @@ class TradeController:
         for sym in list(self._active.keys()):
             self.close_symbol(sym, reason)
 
+    def apply_trade_overrides(self, symbol: str, **kwargs) -> bool:
+        """
+        Aplica configuración específica a un trade activo.
+        kwargs: g1_pct, g2_pct, g3_pct, l1_pct, l2_pct, l3_pct (float o None para reset).
+        None restaura el valor global de settings.
+        """
+        trade = self._active.get(symbol)
+        if trade is None or not hasattr(trade, "overrides"):
+            return False
+        changed = {}
+        for key, value in kwargs.items():
+            if hasattr(trade.overrides, key):
+                setattr(trade.overrides, key, value)
+                if value is not None:
+                    changed[key] = value
+        if changed:
+            log.info("[OVERRIDE] %s: %s", symbol, changed)
+        return True
+
+    def adjust_sl_tp(self, symbol: str, new_sl: float = 0, new_tp: float = 0) -> None:
+        """
+        Ajusta manualmente SL y/o TP del trade activo y lo envía a Bybit.
+        Valores 0 = no cambiar ese campo.
+        """
+        trade = self._active.get(symbol)
+        if not trade or not trade.request:
+            return
+        side = trade.request.side
+        if new_sl > 0:
+            if side == "Buy":
+                self._best_sl[symbol] = max(self._best_sl.get(symbol, 0), new_sl)
+            else:
+                self._best_sl[symbol] = min(self._best_sl.get(symbol, float("inf")), new_sl)
+            trade.current_sl = new_sl
+            trade.request.sl_price = new_sl
+        if new_tp > 0:
+            trade.current_tp = new_tp
+            trade.request.tp_price = new_tp
+        log.info("[MANUAL SL/TP] %s → SL=%.6g  TP=%.6g", symbol, new_sl, new_tp)
+        self._bridge.submit(
+            self._executor.set_sl_tp(
+                symbol=symbol, sl=new_sl, tp=new_tp,
+                side=side, trace_id=trade.trace_id,
+            )
+        )
+        self._notify()
+
     def close_symbol(self, symbol: str, reason: str = "manual") -> None:
         trade = self._active.get(symbol)
         if trade and trade.is_active:
@@ -1403,38 +1450,53 @@ class TradeController:
                 new_state = next_state if next_state is not None else trade.state
                 reason    = new_reason
 
+        # Helper: leer umbral de trade.overrides o fallback a settings global
+        def _t(attr: str, global_val: float) -> float:
+            ov = getattr(trade, "overrides", None)
+            if ov is not None:
+                v = getattr(ov, attr, None)
+                if v is not None:
+                    return v / 100.0
+            return global_val / 100.0
+
         # ── Fase 1: Reducción gradual de riesgo ──────────────────────────────
         if tp_dist > 0 and orig_dist > 0:
-            # G1: 20% → SL reduce 35% del riesgo inicial (queda 65% de distancia)
-            if progress >= 0.20:
+            # G1 → SL queda a 65% del riesgo inicial
+            _g1 = _t("g1_pct", settings.g1_pct)
+            if progress >= _g1:
                 g1 = (entry - orig_dist * 0.65) if is_long else (entry + orig_dist * 0.65)
-                _update(g1, "G1-20%")
+                _update(g1, f"G1-{int(_g1*100)}%")
 
-            # G2: 40% → SL reduce 65% del riesgo inicial (queda 35%)
-            if progress >= 0.40:
+            # G2 → SL queda a 35% del riesgo inicial
+            _g2 = _t("g2_pct", settings.g2_pct)
+            if progress >= _g2:
                 g2 = (entry - orig_dist * 0.35) if is_long else (entry + orig_dist * 0.35)
-                _update(g2, "G2-40%")
+                _update(g2, f"G2-{int(_g2*100)}%")
 
-            # G3: 60% → SL reduce 90% del riesgo inicial (queda 10%)
-            if progress >= 0.60:
+            # G3 → SL queda a 10% del riesgo inicial
+            _g3 = _t("g3_pct", settings.g3_pct)
+            if progress >= _g3:
                 g3 = (entry - orig_dist * 0.10) if is_long else (entry + orig_dist * 0.10)
-                _update(g3, "G3-60%")
+                _update(g3, f"G3-{int(_g3*100)}%")
 
         # ── Fase 2: Territorio de ganancia ───────────────────────────────────
-        # L1-BE: 70% → SL en break-even (entry ± fees)
-        if progress >= 0.70:
-            _update(fee_be_price, "L1-BE",
+        # L1-BE → SL en break-even (entry ± fees)
+        _l1 = _t("l1_pct", settings.l1_pct)
+        if progress >= _l1:
+            _update(fee_be_price, f"L1-BE",
                     TradeState.BREAKEVEN if trade.state == TradeState.OPEN else None)
 
-        # L2: 80% → lock 25% del profit
-        if tp_dist > 0 and progress >= 0.80:
+        # L2 → lock 25% del profit
+        _l2 = _t("l2_pct", settings.l2_pct)
+        if tp_dist > 0 and progress >= _l2:
             profit_25 = (entry + tp_dist * 0.25) if is_long else (entry - tp_dist * 0.25)
-            _update(profit_25, "L2-80%", TradeState.TRAILING)
+            _update(profit_25, f"L2-{int(_l2*100)}%", TradeState.TRAILING)
 
-        # L3: 92% → lock 60% del profit
-        if tp_dist > 0 and progress >= 0.92:
+        # L3 → lock 60% del profit
+        _l3 = _t("l3_pct", settings.l3_pct)
+        if tp_dist > 0 and progress >= _l3:
             profit_60 = (entry + tp_dist * 0.60) if is_long else (entry - tp_dist * 0.60)
-            _update(profit_60, "L3-92%", TradeState.TRAILING)
+            _update(profit_60, f"L3-{int(_l3*100)}%", TradeState.TRAILING)
 
         if new_sl is None:
             return

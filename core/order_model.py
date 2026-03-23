@@ -97,6 +97,22 @@ class OrderResult:
     timestamp:    int   = field(default_factory=lambda: int(time.time() * 1000))
 
 
+# ─── Per-trade overrides ──────────────────────────────────────────────────────
+
+@dataclass
+class TradeOverrides:
+    """
+    Configuración específica por trade. None = usar el valor global de settings.
+    Permite ajustar G1-L3 y otros parámetros sin afectar al resto de trades.
+    """
+    g1_pct: Optional[float] = None   # % progreso para activar G1 (def: settings.g1_pct)
+    g2_pct: Optional[float] = None   # % progreso para activar G2
+    g3_pct: Optional[float] = None   # % progreso para activar G3
+    l1_pct: Optional[float] = None   # % progreso para activar L1-BE
+    l2_pct: Optional[float] = None   # % progreso para activar L2
+    l3_pct: Optional[float] = None   # % progreso para activar L3
+
+
 # ─── Trade record ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -131,6 +147,9 @@ class TradeRecord:
 
     # Razonamiento del agente IA (copiado de request.ai_reasoning al abrir el trade)
     ai_reasoning: str = ""
+
+    # Configuración por trade (sobreescribe globals cuando no es None)
+    overrides: TradeOverrides = field(default_factory=TradeOverrides)
 
     @property
     def is_active(self) -> bool:

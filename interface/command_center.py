@@ -672,6 +672,13 @@ class TradeCard(Gtk.Box):
         expand_btn.connect("clicked", self._on_toggle)
         self._expand_btn = expand_btn
 
+        config_btn = Gtk.Button(label="⚙")
+        config_btn.add_css_class("flat")
+        config_btn.set_tooltip_text("Ajustar SL/TP y niveles de trail por este trade")
+        config_btn.connect("clicked", self._on_config)
+        self._config_btn = config_btn
+        self._config_popover: "Optional[Gtk.Popover]" = None
+
         summary.append(self._sym_lbl)
         summary.append(self._state_lbl)
         summary.append(self._pnl_lbl)
@@ -679,6 +686,7 @@ class TradeCard(Gtk.Box):
         summary.append(self._signal_health_lbl)
         summary.append(self._auto_lbl)
         summary.append(self._mode_btn)
+        summary.append(config_btn)
         summary.append(expand_btn)
         summary.append(close_btn)
         self.append(summary)
@@ -782,6 +790,177 @@ class TradeCard(Gtk.Box):
                 self._mode_btn.set_tooltip_text(
                     "Click para activar gestión automática (breakeven + trailing)"
                 )
+
+    # ── Popover de configuración por trade ───────────────────────────────────
+
+    def _on_config(self, btn) -> None:
+        if self._config_popover is None:
+            self._config_popover = self._build_config_popover()
+            self._config_popover.set_parent(btn)
+        self._refresh_config_popover()
+        self._config_popover.popup()
+
+    def _build_config_popover(self) -> "Gtk.Popover":
+        pop = Gtk.Popover()
+        pop.set_has_arrow(True)
+        pop.set_autohide(True)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        vbox.set_margin_start(12); vbox.set_margin_end(12)
+        vbox.set_margin_top(10);   vbox.set_margin_bottom(10)
+        vbox.set_size_request(300, -1)
+
+        title = Gtk.Label()
+        title.set_markup("<b>Ajustar trade</b>")
+        title.set_xalign(0)
+        title.set_margin_bottom(4)
+        vbox.append(title)
+
+        # ── SL / TP ──────────────────────────────────────────────────────
+        sltp_grid = Gtk.Grid()
+        sltp_grid.set_column_spacing(6)
+        sltp_grid.set_row_spacing(4)
+
+        for col, lbl_txt in enumerate(("SL", "TP")):
+            lbl = Gtk.Label(label=lbl_txt)
+            lbl.set_xalign(0)
+            sltp_grid.attach(lbl, col * 2, 0, 1, 1)
+
+        self._pop_sl = Gtk.SpinButton()
+        self._pop_sl.set_digits(6)
+        self._pop_sl.set_size_request(115, -1)
+        self._pop_tp = Gtk.SpinButton()
+        self._pop_tp.set_digits(6)
+        self._pop_tp.set_size_request(115, -1)
+        sltp_grid.attach(self._pop_sl, 1, 0, 1, 1)
+        sltp_grid.attach(self._pop_tp, 3, 0, 1, 1)
+
+        apply_sltp_btn = Gtk.Button(label="▶ Aplicar SL/TP")
+        apply_sltp_btn.add_css_class("suggested-action")
+        apply_sltp_btn.set_margin_top(4)
+        apply_sltp_btn.connect("clicked", self._on_apply_sltp)
+
+        vbox.append(sltp_grid)
+        vbox.append(apply_sltp_btn)
+
+        sep1 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sep1.set_margin_top(8); sep1.set_margin_bottom(2)
+        vbox.append(sep1)
+
+        # ── Niveles de trail ─────────────────────────────────────────────
+        lvl_title = Gtk.Label()
+        lvl_title.set_markup('<span size="small" weight="bold">Niveles de trail (%)</span>')
+        lvl_title.set_xalign(0)
+        vbox.append(lvl_title)
+
+        self._pop_sliders: dict = {}
+        self._pop_val_lbls: dict = {}
+
+        level_defs = [
+            ("g1_pct", "G1",  5,  35,  "settings.g1_pct"),
+            ("g2_pct", "G2", 15,  55,  "settings.g2_pct"),
+            ("g3_pct", "G3", 30,  75,  "settings.g3_pct"),
+            ("l1_pct", "L1", 50,  90,  "settings.l1_pct"),
+            ("l2_pct", "L2", 60,  95,  "settings.l2_pct"),
+            ("l3_pct", "L3", 70,  99,  "settings.l3_pct"),
+        ]
+        for attr, label, lo, hi, _ in level_defs:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            lbl = Gtk.Label(label=label)
+            lbl.set_xalign(0)
+            lbl.set_size_request(28, -1)
+            lbl.add_css_class("dim-label")
+
+            scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL)
+            scale.set_range(lo, hi)
+            scale.set_increments(5, 5)
+            scale.set_draw_value(False)
+            scale.set_hexpand(True)
+            scale.set_size_request(160, 28)
+
+            val_lbl = Gtk.Label()
+            val_lbl.set_size_request(36, -1)
+            val_lbl.set_xalign(1.0)
+
+            scale.connect("value-changed", self._on_level_changed, attr, val_lbl)
+
+            row.append(lbl)
+            row.append(scale)
+            row.append(val_lbl)
+            vbox.append(row)
+            self._pop_sliders[attr] = scale
+            self._pop_val_lbls[attr] = val_lbl
+
+        sep2 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sep2.set_margin_top(6); sep2.set_margin_bottom(2)
+        vbox.append(sep2)
+
+        reset_btn = Gtk.Button(label="↺ Restaurar defaults globales")
+        reset_btn.add_css_class("flat")
+        reset_btn.connect("clicked", self._on_reset_overrides)
+        vbox.append(reset_btn)
+
+        pop.set_child(vbox)
+        return pop
+
+    def _refresh_config_popover(self) -> None:
+        """Actualiza los valores del popover con el estado actual del trade."""
+        if not self._symbol:
+            return
+        trade = self._controller._active.get(self._symbol)
+        if not trade or not trade.request:
+            return
+
+        # SL / TP spinbuttons
+        sl = trade.current_sl or trade.request.sl_price or 1.0
+        tp = trade.current_tp or trade.request.tp_price or 1.0
+        step = max(1e-8, sl * 0.0005)
+        digits = 8 if sl < 0.001 else 7 if sl < 0.01 else 6 if sl < 0.1 else 5 if sl < 1 else 4
+
+        for sp, ref in ((self._pop_sl, sl), (self._pop_tp, tp)):
+            sp.set_adjustment(Gtk.Adjustment(
+                value=ref, lower=ref * 0.3, upper=ref * 3.0,
+                step_increment=step, page_increment=step * 10,
+            ))
+            sp.set_digits(digits)
+
+        # Sliders — usar override por trade si existe, sino global
+        ov = getattr(trade, "overrides", None)
+        from core.config import settings as _s
+        defaults = {
+            "g1_pct": _s.g1_pct, "g2_pct": _s.g2_pct, "g3_pct": _s.g3_pct,
+            "l1_pct": _s.l1_pct, "l2_pct": _s.l2_pct, "l3_pct": _s.l3_pct,
+        }
+        for attr, scale in self._pop_sliders.items():
+            val = (getattr(ov, attr, None) if ov else None) or defaults[attr]
+            # block signal to avoid triggering overrides during refresh
+            scale.handler_block_by_func(self._on_level_changed)
+            scale.set_value(val)
+            self._pop_val_lbls[attr].set_text(f"{int(val)}%")
+            scale.handler_unblock_by_func(self._on_level_changed)
+
+    def _on_apply_sltp(self, _btn) -> None:
+        if not self._symbol:
+            return
+        new_sl = self._pop_sl.get_value()
+        new_tp = self._pop_tp.get_value()
+        self._controller.adjust_sl_tp(self._symbol, new_sl=new_sl, new_tp=new_tp)
+
+    def _on_level_changed(self, scale: "Gtk.Scale", attr: str, val_lbl: "Gtk.Label") -> None:
+        val = int(scale.get_value())
+        val_lbl.set_text(f"{val}%")
+        if self._symbol:
+            self._controller.apply_trade_overrides(self._symbol, **{attr: float(val)})
+
+    def _on_reset_overrides(self, _btn) -> None:
+        if not self._symbol:
+            return
+        self._controller.apply_trade_overrides(
+            self._symbol,
+            g1_pct=None, g2_pct=None, g3_pct=None,
+            l1_pct=None, l2_pct=None, l3_pct=None,
+        )
+        self._refresh_config_popover()
 
     def show_trade(self, trade: "TradeRecord", mark: float, upnl: float,
                    klines: list = None, market_state=None) -> None:

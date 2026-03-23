@@ -225,6 +225,25 @@ class SettingsView(Gtk.ScrolledWindow):
                         self._hold_sp,
                         "El precio debe mantenerse N segundos antes de mover SL"))
 
+        # ── Niveles de trail escalado (G1-L3) ──────────────────────────
+        box.append(_section("  Niveles de trail (% progreso al TP)"))
+
+        _trail_defs = [
+            ("g1_pct", "G1 — reduce riesgo 35%",   5,  35, 5, "SL queda a 65% del riesgo inicial"),
+            ("g2_pct", "G2 — reduce riesgo 65%",  15,  55, 5, "SL queda a 35% del riesgo inicial"),
+            ("g3_pct", "G3 — reduce riesgo 90%",  30,  75, 5, "SL queda a 10% del riesgo inicial"),
+            ("l1_pct", "L1-BE — break-even",       50,  90, 5, "SL se mueve a entry ± fees"),
+            ("l2_pct", "L2 — lock 25% profit",     60,  95, 5, "Activa TradeState.TRAILING"),
+            ("l3_pct", "L3 — lock 60% profit",     70,  99, 5, ""),
+        ]
+        self._trail_spins: dict = {}
+        for attr, label, lo, hi, step, hint in _trail_defs:
+            sp = _spin(lo, hi, getattr(settings, attr), step, 0)
+            sp.connect("value-changed",
+                       lambda sp2, a=attr: setattr(settings, a, sp2.get_value()))
+            box.append(_row(f"  {label} (%)", sp, hint))
+            self._trail_spins[attr] = sp
+
         box.append(_sep())
 
         # ── Salidas de protección ─────────────────────────────────────────────

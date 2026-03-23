@@ -157,6 +157,16 @@ class Settings(BaseSettings):
     partial_lock_at_pct:  float = 50.0  # % de progreso al TP para activar
     partial_lock_frac:    float = 0.55  # SL = entry ± sl_dist × frac (bloquea 55% del riesgo)
 
+    # Niveles de trail escalado — progreso al TP (%) para activar cada nivel
+    # G1-G3: reducción gradual de riesgo (precio aún por debajo del BE)
+    # L1-L3: territorio de ganancia (precio por encima del BE)
+    g1_pct: float = 20.0   # G1: SL queda a 65% del riesgo inicial
+    g2_pct: float = 40.0   # G2: SL queda a 35% del riesgo inicial
+    g3_pct: float = 60.0   # G3: SL queda a 10% del riesgo inicial
+    l1_pct: float = 70.0   # L1-BE: SL en break-even (entry ± fees)
+    l2_pct: float = 80.0   # L2: lock 25% del profit
+    l3_pct: float = 92.0   # L3: lock 60% del profit
+
     # Flag interno para evitar guardar durante la carga inicial de Pydantic
     _initialized: bool = False
 
