@@ -92,6 +92,26 @@ a:hover { text-decoration: underline; }
 }
 .theme-btn:hover { background: var(--bg); border-color: var(--accent); }
 
+/* ─── Top Nav Tabs ────────────────────────────────────────────────────────── */
+.top-nav {
+  max-width: 1100px; margin: 0 auto;
+  padding: 0 24px;
+  display: flex; gap: 4px; border-bottom: 1px solid var(--border2);
+}
+.nav-tab {
+  padding: 10px 18px; font-size: 13px; font-weight: 500;
+  color: var(--text-sub); border: none; background: none;
+  cursor: pointer; border-bottom: 2px solid transparent;
+  transition: color var(--trans), border-color var(--trans);
+  white-space: nowrap;
+}
+.nav-tab:hover { color: var(--text); }
+.nav-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* ─── Tab Panels ─────────────────────────────────────────────────────────── */
+.tab-panel { display: block; }
+.tab-panel.hidden { display: none; }
+
 /* ─── Layout ─────────────────────────────────────────────────────────────── */
 .main-layout {
   max-width: 1100px; margin: 0 auto; padding: 32px 24px;
@@ -225,6 +245,7 @@ a:hover { text-decoration: underline; }
   padding: 12px 14px;
   display: flex; gap: 12px; align-items: flex-start;
   transition: border-color var(--trans), background var(--trans), transform var(--trans);
+  cursor: pointer;
 }
 .commit-card:hover {
   border-color: var(--border);
@@ -357,6 +378,263 @@ footer strong { color: var(--text-sub); }
   display: flex; align-items: center; justify-content: center;
 }
 .scroll-top.visible { opacity: 1; pointer-events: all; }
+
+/* ─── Modal ──────────────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.7);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(4px);
+}
+.modal-overlay.hidden { display: none; }
+.modal-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 680px; width: 100%;
+  max-height: 85vh; overflow-y: auto;
+  box-shadow: 0 20px 60px #0009;
+  animation: modalIn .18s ease;
+}
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(.96) translateY(8px); }
+  to   { opacity: 1; transform: scale(1)  translateY(0); }
+}
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid var(--border2);
+}
+.modal-close {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 18px; cursor: pointer; padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color var(--trans), background var(--trans);
+}
+.modal-close:hover { color: var(--text); background: var(--bg-card2); }
+.modal-box h2 {
+  font-size: 15px; font-weight: 600; padding: 16px 20px 8px;
+  line-height: 1.4; color: var(--text);
+}
+.modal-meta {
+  padding: 0 20px 12px;
+  display: flex; flex-wrap: wrap; gap: 10px;
+  font-size: 12px; color: var(--text-sub);
+  border-bottom: 1px solid var(--border2);
+}
+.modal-meta code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  background: var(--bg-card2); padding: 1px 6px;
+  border-radius: 4px; border: 1px solid var(--border2);
+  color: var(--accent2); font-size: 11px;
+}
+.modal-section {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border2);
+}
+.modal-section:last-child { border-bottom: none; }
+.modal-section h4 {
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: .5px; margin-bottom: 10px;
+}
+.modal-body-pre {
+  font-size: 13px; color: var(--text-sub);
+  white-space: pre-wrap; word-break: break-word; line-height: 1.6;
+}
+.modal-notes-area {
+  width: 100%; background: var(--bg-card2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: 10px 12px; font-size: 13px;
+  resize: vertical; min-height: 80px; line-height: 1.5;
+  margin-bottom: 8px;
+}
+.modal-notes-area:focus { outline: none; border-color: var(--accent); }
+.btn-save-notes {
+  font-size: 12px; padding: 6px 14px;
+  background: var(--accent); color: #fff; border: none;
+  border-radius: var(--radius-sm); cursor: pointer;
+  transition: opacity var(--trans);
+}
+.btn-save-notes:hover { opacity: .85; }
+
+/* ─── File change rows (modal) ───────────────────────────────────────────── */
+.file-change-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 0; font-size: 12px;
+  border-bottom: 1px solid var(--border2);
+}
+.file-change-row:last-child { border-bottom: none; }
+.file-change-name {
+  flex: 1; font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--text-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-change-ins { color: var(--green); font-family: monospace; font-size: 11px; white-space: nowrap; }
+.file-change-del { color: var(--red);   font-family: monospace; font-size: 11px; white-space: nowrap; }
+
+/* ─── Tasks Panel ────────────────────────────────────────────────────────── */
+#panel-tasks {
+  max-width: 1100px; margin: 0 auto; padding: 32px 24px;
+}
+.tasks-header {
+  margin-bottom: 24px;
+}
+.tasks-header h2 {
+  font-size: 20px; font-weight: 700; margin-bottom: 14px;
+}
+.task-add-row {
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
+.task-add-row select, .task-add-row input {
+  background: var(--bg-card); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--radius-sm);
+  padding: 8px 12px; font-size: 13px;
+  transition: border-color var(--trans);
+}
+.task-add-row select { min-width: 130px; }
+.task-add-row input { flex: 1; min-width: 200px; }
+.task-add-row select:focus, .task-add-row input:focus {
+  outline: none; border-color: var(--accent);
+}
+.task-add-row button {
+  background: var(--accent); color: #fff; border: none;
+  border-radius: var(--radius-sm); padding: 8px 18px;
+  font-size: 13px; cursor: pointer; font-weight: 600;
+  transition: opacity var(--trans);
+}
+.task-add-row button:hover { opacity: .85; }
+
+.tasks-group { margin-bottom: 28px; }
+.tasks-group-title {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .6px; color: var(--text-muted); margin-bottom: 10px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border2);
+}
+
+.task-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-bottom: 8px;
+  transition: border-color var(--trans);
+}
+.task-item:hover { border-color: var(--border); }
+.task-done { opacity: .5; }
+.task-done .task-text { text-decoration: line-through; }
+
+.type-task      { border-left-color: #3b82f6; }
+.type-objective { border-left-color: #f59e0b; }
+.type-note      { border-left-color: #8b5cf6; }
+.type-bug       { border-left-color: #f85149; }
+
+.task-check {
+  margin-top: 2px; flex-shrink: 0;
+  width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);
+}
+.task-text { flex: 1; font-size: 13px; line-height: 1.5; }
+.task-meta { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+.task-del {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 14px; cursor: pointer; padding: 2px 4px;
+  border-radius: 4px; line-height: 1;
+  transition: color var(--trans), background var(--trans);
+}
+.task-del:hover { color: var(--red); background: #f8514918; }
+
+/* ─── Commit Panel ───────────────────────────────────────────────────────── */
+#panel-commit {
+  max-width: 800px; margin: 0 auto; padding: 32px 24px;
+}
+.commit-panel h2 {
+  font-size: 20px; font-weight: 700; margin-bottom: 20px;
+}
+.server-status {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 4px 12px;
+  border-radius: 20px; margin-bottom: 20px;
+  border: 1px solid;
+}
+.server-status.ok    { color: var(--green); border-color: #3fb95033; background: #3fb95011; }
+.server-status.error { color: var(--red);   border-color: #f8514933; background: #f8514911; }
+.server-status.checking { color: var(--yellow); border-color: #e3b34133; background: #e3b34111; }
+
+#commit-form input, #commit-form textarea {
+  width: 100%; background: var(--bg-card);
+  border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius-sm); padding: 10px 14px;
+  font-size: 13px; margin-bottom: 12px;
+  transition: border-color var(--trans);
+  font-family: inherit;
+}
+#commit-form input:focus, #commit-form textarea:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px #7c5cbf22;
+}
+#commit-form textarea { resize: vertical; line-height: 1.5; }
+
+.staged-file {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; font-size: 12px;
+  border-bottom: 1px solid var(--border2);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--text-sub);
+}
+.staged-file:last-child { border-bottom: none; }
+.staged-file-status {
+  font-size: 10px; font-weight: 700; padding: 1px 5px;
+  border-radius: 3px; text-transform: uppercase;
+}
+.staged-M { color: #e3b341; background: #e3b34120; }
+.staged-A { color: var(--green); background: #3fb95020; }
+.staged-D { color: var(--red); background: #f8514920; }
+.staged-R { color: var(--accent2); background: #58a6ff20; }
+
+#staged-files-list {
+  background: var(--bg-card2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 14px;
+  margin-bottom: 14px; min-height: 48px;
+}
+.staged-empty { font-size: 13px; color: var(--text-muted); text-align: center; padding: 8px 0; }
+
+.commit-actions {
+  display: flex; gap: 10px; margin-bottom: 12px;
+}
+.btn-primary {
+  background: var(--accent); color: #fff; border: none;
+  border-radius: var(--radius-sm); padding: 9px 20px;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: opacity var(--trans);
+}
+.btn-primary:hover { opacity: .85; }
+.btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+.btn-secondary {
+  background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 9px 16px;
+  font-size: 13px; cursor: pointer;
+  transition: border-color var(--trans);
+}
+.btn-secondary:hover { border-color: var(--accent); }
+
+#commit-result {
+  font-size: 13px; padding: 10px 14px;
+  border-radius: var(--radius-sm); margin-top: 8px;
+}
+#commit-result.ok    { background: #3fb95018; color: var(--green); border: 1px solid #3fb95033; }
+#commit-result.error { background: #f8514918; color: var(--red);   border: 1px solid #f8514933; }
+
+#no-server-msg {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 24px; text-align: center;
+}
+#no-server-msg p { color: var(--text-sub); margin-bottom: 12px; font-size: 14px; }
+#no-server-msg code {
+  display: block; background: var(--bg-card2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 16px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--accent2); font-size: 13px;
+}
 </style>
 </head>
 <body>
@@ -370,20 +648,26 @@ footer strong { color: var(--text-sub); }
       <p>Development Changelog · Bybit Perpetuals · AI-Powered</p>
     </div>
     <div class="header-actions">
-      <span class="gen-date">Generated 2026-03-23 02:00</span>
+      <span class="gen-date">Generated 2026-03-23 03:54</span>
       <button class="theme-btn" id="themeBtn" title="Toggle theme">🌙</button>
     </div>
   </div>
+  <nav class="top-nav">
+    <button class="nav-tab active" data-panel="changelog" onclick="switchTab(this)">📋 Changelog</button>
+    <button class="nav-tab" data-panel="tasks" onclick="switchTab(this)">📋 Tareas</button>
+    <button class="nav-tab" data-panel="commit" onclick="switchTab(this)">💾 Commit</button>
+  </nav>
 </header>
 
-<!-- MAIN -->
+<!-- CHANGELOG PANEL -->
+<div id="panel-changelog" class="tab-panel">
 <div class="main-layout">
 
   <!-- STATS BAR -->
   <div class="stats-bar">
     <div class="stat-card">
       <div class="stat-icon">📦</div>
-      <div class="stat-value">61</div>
+      <div class="stat-value">62</div>
       <div class="stat-label">Total Commits</div>
     </div>
     <div class="stat-card">
@@ -393,17 +677,17 @@ footer strong { color: var(--text-sub); }
     </div>
     <div class="stat-card">
       <div class="stat-icon">📝</div>
-      <div class="stat-value">269</div>
+      <div class="stat-value">271</div>
       <div class="stat-label">Archivos Tocados</div>
     </div>
     <div class="stat-card">
       <div class="stat-icon">➕</div>
-      <div class="stat-value" style="color:var(--green)">30,168</div>
+      <div class="stat-value" style="color:var(--green)">30,217</div>
       <div class="stat-label">Líneas Añadidas</div>
     </div>
     <div class="stat-card">
       <div class="stat-icon">➖</div>
-      <div class="stat-value" style="color:var(--red)">4,550</div>
+      <div class="stat-value" style="color:var(--red)">4,575</div>
       <div class="stat-label">Líneas Eliminadas</div>
     </div>
     <div class="stat-card">
@@ -420,7 +704,7 @@ footer strong { color: var(--text-sub); }
       <input type="text" id="search" placeholder="Buscar commits…" autocomplete="off">
     </div>
     <div class="filter-pills" id="filterPills">
-      <button class="filter-pill active" data-cat="all">All</button><button class="filter-pill" data-cat="feat" style="--pill-color:#6366f1">✨ Feature <sup>6</sup></button><button class="filter-pill" data-cat="fix" style="--pill-color:#f59e0b">🐛 Fix <sup>17</sup></button><button class="filter-pill" data-cat="risk" style="--pill-color:#22c55e">🛡️ Risk/SL <sup>6</sup></button><button class="filter-pill" data-cat="ai" style="--pill-color:#8b5cf6">🤖 AI/IA <sup>4</sup></button><button class="filter-pill" data-cat="session" style="--pill-color:#06b6d4">📊 Sesión <sup>2</sup></button><button class="filter-pill" data-cat="perf" style="--pill-color:#eab308">⚡ Perf <sup>1</sup></button><button class="filter-pill" data-cat="ui" style="--pill-color:#ec4899">🎨 UI <sup>1</sup></button><button class="filter-pill" data-cat="other" style="--pill-color:#94a3b8">📝 Misc <sup>24</sup></button>
+      <button class="filter-pill active" data-cat="all">All</button><button class="filter-pill" data-cat="feat" style="--pill-color:#6366f1">✨ Feature <sup>6</sup></button><button class="filter-pill" data-cat="fix" style="--pill-color:#f59e0b">🐛 Fix <sup>18</sup></button><button class="filter-pill" data-cat="risk" style="--pill-color:#22c55e">🛡️ Risk/SL <sup>6</sup></button><button class="filter-pill" data-cat="ai" style="--pill-color:#8b5cf6">🤖 AI/IA <sup>4</sup></button><button class="filter-pill" data-cat="session" style="--pill-color:#06b6d4">📊 Sesión <sup>2</sup></button><button class="filter-pill" data-cat="perf" style="--pill-color:#eab308">⚡ Perf <sup>1</sup></button><button class="filter-pill" data-cat="ui" style="--pill-color:#ec4899">🎨 UI <sup>1</sup></button><button class="filter-pill" data-cat="other" style="--pill-color:#94a3b8">📝 Misc <sup>24</sup></button>
     </div>
   </div>
 
@@ -432,11 +716,27 @@ footer strong { color: var(--text-sub); }
     <div class="day-header">
       <div class="day-dot"></div>
       <span class="day-label">Monday 23 March 2026</span>
-      <span class="day-count">4 commits</span>
+      <span class="day-count">5 commits</span>
     </div>
     <div class="day-commits">
 
-    <div class="commit-card" data-cat="fix" data-msg="fix de tiempo en trades despues de reinciar sistema">
+    <div class="commit-card" data-cat="fix" data-msg="fix error de check slytp con paper trading" data-hash="0038dddfe6a8f5c87ae3a22624930d446a63d8f7" onclick="showCommitDetail(this)">
+      <div class="commit-left">
+        <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
+              title="Fix">🐛 Fix</span>
+      </div>
+      <div class="commit-body">
+        <div class="commit-msg">Fix error de check SLyTP con paper trading</div>
+        <div class="commit-meta">
+          <code class="hash-chip">0038ddd</code>
+          <span class="meta-author">👤 uxuridevmx</span>
+          <span class="meta-time">🕐 02:14</span>
+          <span class="stat-chip files">2 files</span><span class="stat-chip ins">+49</span><span class="stat-chip del">−25</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="commit-card" data-cat="fix" data-msg="fix de tiempo en trades despues de reinciar sistema" data-hash="9e60561d06d21eb1800ad640461c5148b5afd9af" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -452,7 +752,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="se agrego historial  de pares">
+    <div class="commit-card" data-cat="other" data-msg="se agrego historial  de pares" data-hash="0b49131ea27c52b20fcd08a05c1732f637bf75f5" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -468,7 +768,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="se agrego html para cambios y log, y fix de tp=0 con watchdog, cuando no asigna al incio.">
+    <div class="commit-card" data-cat="fix" data-msg="se agrego html para cambios y log, y fix de tp=0 con watchdog, cuando no asigna al incio." data-hash="b1cc73409587df810b256c3940f8732e4c88e259" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -484,7 +784,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="session" data-msg="drop off, low  volumen on trade after 3 mins and session manager">
+    <div class="commit-card" data-cat="session" data-msg="drop off, low  volumen on trade after 3 mins and session manager" data-hash="a416c360f751d22f02658c709a58a6fec808b83a" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#06b6d422;color:#06b6d4;border-color:#06b6d444"
               title="Sesión">📊 Sesión</span>
@@ -510,7 +810,7 @@ footer strong { color: var(--text-sub); }
     </div>
     <div class="day-commits">
 
-    <div class="commit-card" data-cat="risk" data-msg="g1-g2-g3">
+    <div class="commit-card" data-cat="risk" data-msg="g1-g2-g3" data-hash="c40757a369fe317f1ec2c95e2d6c200978f6952f" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#22c55e22;color:#22c55e;border-color:#22c55e44"
               title="Risk/SL">🛡️ Risk/SL</span>
@@ -526,7 +826,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="risk" data-msg="watchdog">
+    <div class="commit-card" data-cat="risk" data-msg="watchdog" data-hash="0a447db4ed331d63bd7ce2732fc8eaddcbe31d4c" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#22c55e22;color:#22c55e;border-color:#22c55e44"
               title="Risk/SL">🛡️ Risk/SL</span>
@@ -542,7 +842,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="risk" data-msg="slippage">
+    <div class="commit-card" data-cat="risk" data-msg="slippage" data-hash="06aedd1760732c18436dc97c11be999ba693eb01" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#22c55e22;color:#22c55e;border-color:#22c55e44"
               title="Risk/SL">🛡️ Risk/SL</span>
@@ -558,7 +858,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="fixes de volumen">
+    <div class="commit-card" data-cat="fix" data-msg="fixes de volumen" data-hash="aa15a28f09f61becb1243af816e859ee4d7f652b" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -574,7 +874,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="span,cierre pero no avisa">
+    <div class="commit-card" data-cat="other" data-msg="span,cierre pero no avisa" data-hash="20c91d2b348263fa36f42624080afc242dfd03ef" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -590,7 +890,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="fixed sl sync with bybit">
+    <div class="commit-card" data-cat="fix" data-msg="fixed sl sync with bybit" data-hash="017986d9be1e07f694b528ca7e18510239e6fe39" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -616,7 +916,7 @@ footer strong { color: var(--text-sub); }
     </div>
     <div class="day-commits">
 
-    <div class="commit-card" data-cat="fix" data-msg="fix sl retry and problems on bybit">
+    <div class="commit-card" data-cat="fix" data-msg="fix sl retry and problems on bybit" data-hash="1965f1e38f9a90e1e4850d2f2609ed4fd8f4e9cf" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -642,7 +942,7 @@ footer strong { color: var(--text-sub); }
     </div>
     <div class="day-commits">
 
-    <div class="commit-card" data-cat="session" data-msg="se agrego sesiones y control de apis con la ia">
+    <div class="commit-card" data-cat="session" data-msg="se agrego sesiones y control de apis con la ia" data-hash="eade127f492cdb2b2287c791e1675da78203842d" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#06b6d422;color:#06b6d4;border-color:#06b6d444"
               title="Sesión">📊 Sesión</span>
@@ -658,7 +958,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="filtros y limites,journal csv">
+    <div class="commit-card" data-cat="other" data-msg="filtros y limites,journal csv" data-hash="c3cc96c4643ce644a1354d201a9cbbb045d957a6" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -684,7 +984,7 @@ footer strong { color: var(--text-sub); }
     </div>
     <div class="day-commits">
 
-    <div class="commit-card" data-cat="other" data-msg="working after caos">
+    <div class="commit-card" data-cat="other" data-msg="working after caos" data-hash="5348966ba9a70a3976a7f6b86bab2b12da1f147c" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -700,7 +1000,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="minor fixes">
+    <div class="commit-card" data-cat="fix" data-msg="minor fixes" data-hash="bde270dc21879dd58d55fa982dedfc594a414277" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -716,7 +1016,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="api key y variables">
+    <div class="commit-card" data-cat="other" data-msg="api key y variables" data-hash="c214f2e8727bba24c124fd4ec8509623b6273c24" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -732,7 +1032,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="risk" data-msg="better  trailing, check removed tp">
+    <div class="commit-card" data-cat="risk" data-msg="better  trailing, check removed tp" data-hash="198b5e58f40935741306e99e1dce4bac055501f9" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#22c55e22;color:#22c55e;border-color:#22c55e44"
               title="Risk/SL">🛡️ Risk/SL</span>
@@ -748,7 +1048,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="trailing stop fix">
+    <div class="commit-card" data-cat="fix" data-msg="trailing stop fix" data-hash="1ef15202d965bddfb4fabb12c1e448c9633d1cac" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -764,7 +1064,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="risk" data-msg="be y trailing, better">
+    <div class="commit-card" data-cat="risk" data-msg="be y trailing, better" data-hash="673b681475c7bcaacfeb6db8a81fa20ca7b6a153" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#22c55e22;color:#22c55e;border-color:#22c55e44"
               title="Risk/SL">🛡️ Risk/SL</span>
@@ -780,7 +1080,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="ai" data-msg="modelos de ia cambios">
+    <div class="commit-card" data-cat="ai" data-msg="modelos de ia cambios" data-hash="c7b4366de54b18921355282f1fddb3c2969a00ed" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#8b5cf622;color:#8b5cf6;border-color:#8b5cf644"
               title="AI/IA">🤖 AI/IA</span>
@@ -796,7 +1096,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="fixed lock  profit and smart guard">
+    <div class="commit-card" data-cat="fix" data-msg="fixed lock  profit and smart guard" data-hash="e48b1a8ed80edf13c0e422794dc792f4f3c086f7" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -812,7 +1112,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="ai" data-msg="changes on selection strategy">
+    <div class="commit-card" data-cat="ai" data-msg="changes on selection strategy" data-hash="ed7a6af4c9cc8d87857223802d69050525e3075b" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#8b5cf622;color:#8b5cf6;border-color:#8b5cf644"
               title="AI/IA">🤖 AI/IA</span>
@@ -828,7 +1128,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="ai" data-msg="ia model estrategy">
+    <div class="commit-card" data-cat="ai" data-msg="ia model estrategy" data-hash="38008471d1244eebb25b4dabc0d6c388a04e877f" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#8b5cf622;color:#8b5cf6;border-color:#8b5cf644"
               title="AI/IA">🤖 AI/IA</span>
@@ -844,7 +1144,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="risk" data-msg="tp, sl and r:r changes">
+    <div class="commit-card" data-cat="risk" data-msg="tp, sl and r:r changes" data-hash="e70aefec77543e1dfa54a3f734985097b2a9a54d" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#22c55e22;color:#22c55e;border-color:#22c55e44"
               title="Risk/SL">🛡️ Risk/SL</span>
@@ -860,7 +1160,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="feat" data-msg="logo">
+    <div class="commit-card" data-cat="feat" data-msg="logo" data-hash="7185602084abbd39ec3227b4224a4e6fdc76317b" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#6366f122;color:#6366f1;border-color:#6366f144"
               title="Feature">✨ Feature</span>
@@ -876,7 +1176,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="fix?">
+    <div class="commit-card" data-cat="fix" data-msg="fix?" data-hash="ca890cbe30ebba76e9e9a452ec2300a55b019671" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -902,7 +1202,7 @@ footer strong { color: var(--text-sub); }
     </div>
     <div class="day-commits">
 
-    <div class="commit-card" data-cat="fix" data-msg="fixed commerce">
+    <div class="commit-card" data-cat="fix" data-msg="fixed commerce" data-hash="52ed7cedc08b657e64c274f699179d049dbabe1d" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -918,7 +1218,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="more profit fixes fase 1">
+    <div class="commit-card" data-cat="fix" data-msg="more profit fixes fase 1" data-hash="ce1601b642f0518e8bbc5f0fc48654075a07aa82" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -934,7 +1234,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="perf" data-msg="fastline">
+    <div class="commit-card" data-cat="perf" data-msg="fastline" data-hash="a477a74e15c5156d2ec035333e442a526bea6f0c" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#eab30822;color:#eab308;border-color:#eab30844"
               title="Perf">⚡ Perf</span>
@@ -950,7 +1250,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="pricefix">
+    <div class="commit-card" data-cat="fix" data-msg="pricefix" data-hash="5f83e41e927ab1588e3c68ca953e55d9ebc7ab25" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -966,7 +1266,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="feat" data-msg="indicadores avanzados">
+    <div class="commit-card" data-cat="feat" data-msg="indicadores avanzados" data-hash="33a4a8ae5730218d7bf2aafeb689342ab59741aa" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#6366f122;color:#6366f1;border-color:#6366f144"
               title="Feature">✨ Feature</span>
@@ -982,7 +1282,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="feat" data-msg="zona de liq">
+    <div class="commit-card" data-cat="feat" data-msg="zona de liq" data-hash="7d11522d947eb10073314e2d01b11e9ae3340627" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#6366f122;color:#6366f1;border-color:#6366f144"
               title="Feature">✨ Feature</span>
@@ -998,7 +1298,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="feat" data-msg="bar indicators">
+    <div class="commit-card" data-cat="feat" data-msg="bar indicators" data-hash="8900abec6d36cea449abd892e898c3dc48487943" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#6366f122;color:#6366f1;border-color:#6366f144"
               title="Feature">✨ Feature</span>
@@ -1014,7 +1314,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="feat" data-msg="bar">
+    <div class="commit-card" data-cat="feat" data-msg="bar" data-hash="4bacb50b7cf557dfee194b42ac997abc98b00532" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#6366f122;color:#6366f1;border-color:#6366f144"
               title="Feature">✨ Feature</span>
@@ -1030,7 +1330,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="feat" data-msg="indicadores">
+    <div class="commit-card" data-cat="feat" data-msg="indicadores" data-hash="59cc32211d4263bd25a9751fa5b2f19675db965a" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#6366f122;color:#6366f1;border-color:#6366f144"
               title="Feature">✨ Feature</span>
@@ -1056,7 +1356,7 @@ footer strong { color: var(--text-sub); }
     </div>
     <div class="day-commits">
 
-    <div class="commit-card" data-cat="ai" data-msg="journal details">
+    <div class="commit-card" data-cat="ai" data-msg="journal details" data-hash="6f199b17f1241f2e74f229968d587059f5813aff" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#8b5cf622;color:#8b5cf6;border-color:#8b5cf644"
               title="AI/IA">🤖 AI/IA</span>
@@ -1072,7 +1372,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="fix save capital">
+    <div class="commit-card" data-cat="fix" data-msg="fix save capital" data-hash="a0fe280e6fd8d755a715d24eb83a0f824d7cb9de" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -1088,7 +1388,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="auto working">
+    <div class="commit-card" data-cat="other" data-msg="auto working" data-hash="60971bd872e088a79764a9ae9e696c24e433c529" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1104,7 +1404,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="fullauto">
+    <div class="commit-card" data-cat="other" data-msg="fullauto" data-hash="bef27ab565b6875a70cea9ed2cfb17ae33b69e6d" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1120,7 +1420,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="full working semi">
+    <div class="commit-card" data-cat="other" data-msg="full working semi" data-hash="eecf0c3880c077f4c1942ac60441376436b0c6ae" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1136,7 +1436,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="closed order">
+    <div class="commit-card" data-cat="other" data-msg="closed order" data-hash="b15382c465134285b104b403dc74fffd6c9e9cac" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1152,7 +1452,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="fix time bug,  closes active">
+    <div class="commit-card" data-cat="fix" data-msg="fix time bug,  closes active" data-hash="95b77b7af21a4acb5abfc71e1e2a75891b8c1978" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -1168,7 +1468,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="critical bug, stops active">
+    <div class="commit-card" data-cat="fix" data-msg="critical bug, stops active" data-hash="16e7b893b386ce0b4ea7621cd2b425b9b4ae9bbc" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -1184,7 +1484,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="fixed windows">
+    <div class="commit-card" data-cat="fix" data-msg="fixed windows" data-hash="62dabf8a00d28e19f836662955125e2c5340728c" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -1200,7 +1500,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="detallesenactivos">
+    <div class="commit-card" data-cat="other" data-msg="detallesenactivos" data-hash="c2e62ba10951997f40b4153c0493e234ff455bc0" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1216,7 +1516,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="fix" data-msg="auto fix">
+    <div class="commit-card" data-cat="fix" data-msg="auto fix" data-hash="92f289b24e74aa2ad0bd32fd776f9d35ad8d36d5" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#f59e0b22;color:#f59e0b;border-color:#f59e0b44"
               title="Fix">🐛 Fix</span>
@@ -1232,7 +1532,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="manual-auto">
+    <div class="commit-card" data-cat="other" data-msg="manual-auto" data-hash="a655c72d9f21b61e88be9f23a0cd273b2ae2bd18" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1248,7 +1548,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="semi auto working">
+    <div class="commit-card" data-cat="other" data-msg="semi auto working" data-hash="134e488299f7756360e16369d96a237a8bf04a7f" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1264,7 +1564,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="working">
+    <div class="commit-card" data-cat="other" data-msg="working" data-hash="b4c85bb1ef7015bd22e93a51e176cd8625e503c2" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1280,7 +1580,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="tp">
+    <div class="commit-card" data-cat="other" data-msg="tp" data-hash="742136bcdf53850ccec0af4758e9cfbc43569fec" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1296,7 +1596,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="semiauto">
+    <div class="commit-card" data-cat="other" data-msg="semiauto" data-hash="c22a63cc60823382b13ddd0d302857a98d600c0f" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1312,7 +1612,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="final revisar">
+    <div class="commit-card" data-cat="other" data-msg="final revisar" data-hash="501afc1ad8b21cfd86c86c6b2a35f2b5a04c05ba" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1328,7 +1628,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="connected">
+    <div class="commit-card" data-cat="other" data-msg="connected" data-hash="ec119626232bfaedc2218fae24b9a04907bdae2d" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1344,7 +1644,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="fase  4/7">
+    <div class="commit-card" data-cat="other" data-msg="fase  4/7" data-hash="a404a8c999889c3b8d9387760ef4c13853907406" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1360,7 +1660,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="style">
+    <div class="commit-card" data-cat="other" data-msg="style" data-hash="92f8d6b2177e2daedcb530541845c72475362308" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1376,7 +1676,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="tendencia">
+    <div class="commit-card" data-cat="other" data-msg="tendencia" data-hash="a02774051467e518295cf8bbceaa302fc014e1c5" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1392,7 +1692,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="absorcion">
+    <div class="commit-card" data-cat="other" data-msg="absorcion" data-hash="2738f759e7813f0bb9597f0dc638a269973c1f59" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1408,7 +1708,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="ui" data-msg="gtk4">
+    <div class="commit-card" data-cat="ui" data-msg="gtk4" data-hash="dedc1cb6757eaeb84376aa57fbd422e9341e4f70" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#ec489922;color:#ec4899;border-color:#ec489944"
               title="UI">🎨 UI</span>
@@ -1424,7 +1724,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="fase  0">
+    <div class="commit-card" data-cat="other" data-msg="fase  0" data-hash="d65dfa8545d9d865c4159e7d7a294a59a5aacfb0" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1450,7 +1750,7 @@ footer strong { color: var(--text-sub); }
     </div>
     <div class="day-commits">
 
-    <div class="commit-card" data-cat="other" data-msg="3 tools">
+    <div class="commit-card" data-cat="other" data-msg="3 tools" data-hash="f1524fcdb954be0b4406adab176cec100ddb53d5" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1466,7 +1766,7 @@ footer strong { color: var(--text-sub); }
       </div>
     </div>
 
-    <div class="commit-card" data-cat="other" data-msg="basic functional">
+    <div class="commit-card" data-cat="other" data-msg="basic functional" data-hash="340d93974b44d2d55783baffaa2ee098da35498d" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:#94a3b822;color:#94a3b8;border-color:#94a3b844"
               title="Misc">📝 Misc</span>
@@ -1581,42 +1881,42 @@ footer strong { color: var(--text-sub); }
         <div class="cat-bar-row">
           <span class="cat-bar-label">📝 Misc</span>
           <div class="cat-bar-track">
-            <div class="cat-bar-fill" style="width:39.3%;background:#94a3b8"></div>
+            <div class="cat-bar-fill" style="width:38.7%;background:#94a3b8"></div>
           </div>
           <span class="cat-bar-count">24</span>
         </div>
         <div class="cat-bar-row">
           <span class="cat-bar-label">🐛 Fix</span>
           <div class="cat-bar-track">
-            <div class="cat-bar-fill" style="width:27.9%;background:#f59e0b"></div>
+            <div class="cat-bar-fill" style="width:29.0%;background:#f59e0b"></div>
           </div>
-          <span class="cat-bar-count">17</span>
+          <span class="cat-bar-count">18</span>
         </div>
         <div class="cat-bar-row">
           <span class="cat-bar-label">🛡️ Risk/SL</span>
           <div class="cat-bar-track">
-            <div class="cat-bar-fill" style="width:9.8%;background:#22c55e"></div>
+            <div class="cat-bar-fill" style="width:9.7%;background:#22c55e"></div>
           </div>
           <span class="cat-bar-count">6</span>
         </div>
         <div class="cat-bar-row">
           <span class="cat-bar-label">✨ Feature</span>
           <div class="cat-bar-track">
-            <div class="cat-bar-fill" style="width:9.8%;background:#6366f1"></div>
+            <div class="cat-bar-fill" style="width:9.7%;background:#6366f1"></div>
           </div>
           <span class="cat-bar-count">6</span>
         </div>
         <div class="cat-bar-row">
           <span class="cat-bar-label">🤖 AI/IA</span>
           <div class="cat-bar-track">
-            <div class="cat-bar-fill" style="width:6.6%;background:#8b5cf6"></div>
+            <div class="cat-bar-fill" style="width:6.5%;background:#8b5cf6"></div>
           </div>
           <span class="cat-bar-count">4</span>
         </div>
         <div class="cat-bar-row">
           <span class="cat-bar-label">📊 Sesión</span>
           <div class="cat-bar-track">
-            <div class="cat-bar-fill" style="width:3.3%;background:#06b6d4"></div>
+            <div class="cat-bar-fill" style="width:3.2%;background:#06b6d4"></div>
           </div>
           <span class="cat-bar-count">2</span>
         </div>
@@ -1642,7 +1942,7 @@ footer strong { color: var(--text-sub); }
       <div class="section-head">📂 Actividad por Módulo</div>
       <div class="section-body">
         <div class="modules-grid">
-          <div class="mod-pill" style="border-color:#6366f144;color:#6366f1">core/ <strong>131</strong> <small>(48%)</small></div><div class="mod-pill" style="border-color:#ec489944;color:#ec4899">interface/ <strong>76</strong> <small>(28%)</small></div><div class="mod-pill" style="border-color:#06b6d444;color:#06b6d4">streams/ <strong>14</strong> <small>(5%)</small></div><div class="mod-pill" style="border-color:#94a3b844;color:#94a3b8">memory/ <strong>6</strong> <small>(2%)</small></div><div class="mod-pill" style="border-color:#94a3b844;color:#94a3b8">index.html/ <strong>5</strong> <small>(1%)</small></div><div class="mod-pill" style="border-color:#94a3b844;color:#94a3b8">main.py/ <strong>5</strong> <small>(1%)</small></div>
+          <div class="mod-pill" style="border-color:#6366f144;color:#6366f1">core/ <strong>132</strong> <small>(48%)</small></div><div class="mod-pill" style="border-color:#ec489944;color:#ec4899">interface/ <strong>76</strong> <small>(28%)</small></div><div class="mod-pill" style="border-color:#06b6d444;color:#06b6d4">streams/ <strong>14</strong> <small>(5%)</small></div><div class="mod-pill" style="border-color:#94a3b844;color:#94a3b8">index.html/ <strong>6</strong> <small>(2%)</small></div><div class="mod-pill" style="border-color:#94a3b844;color:#94a3b8">memory/ <strong>6</strong> <small>(2%)</small></div><div class="mod-pill" style="border-color:#94a3b844;color:#94a3b8">main.py/ <strong>5</strong> <small>(1%)</small></div>
         </div>
       </div>
     </div>
@@ -1670,16 +1970,91 @@ footer strong { color: var(--text-sub); }
   </aside>
 
 </div>
+</div>
+
+<!-- TASKS PANEL -->
+<div id="panel-tasks" class="tab-panel hidden">
+  <div class="tasks-header">
+    <h2>Tareas & Objetivos</h2>
+    <div class="task-add-row">
+      <select id="task-type">
+        <option value="task">✅ Tarea</option>
+        <option value="objective">🎯 Objetivo</option>
+        <option value="note">📝 Nota</option>
+        <option value="bug">🐛 Bug</option>
+      </select>
+      <input id="task-input" placeholder="Descripción..." onkeydown="if(event.key==='Enter') addTask()" />
+      <button onclick="addTask()">Agregar</button>
+    </div>
+  </div>
+  <div id="tasks-list"></div>
+</div>
+
+<!-- COMMIT PANEL -->
+<div id="panel-commit" class="tab-panel hidden">
+  <div class="commit-panel">
+    <h2>💾 Hacer Commit</h2>
+    <div class="server-status checking" id="server-status">⚡ Verificando servidor...</div>
+    <div id="commit-form" class="hidden">
+      <div id="staged-files-list"><div class="staged-empty">Cargando archivos...</div></div>
+      <input id="commit-title" placeholder="Título del commit (requerido)" />
+      <textarea id="commit-body" placeholder="Descripción detallada (opcional)&#10;&#10;Qué cambió y por qué..." rows="6"></textarea>
+      <div class="commit-actions">
+        <button onclick="loadGitStatus()" class="btn-secondary">↻ Actualizar</button>
+        <button onclick="doCommit()" class="btn-primary" id="btn-commit">💾 Hacer Commit</button>
+      </div>
+      <div id="commit-result"></div>
+    </div>
+    <div id="no-server-msg" class="hidden">
+      <p>Servidor no disponible. Ejecuta:</p>
+      <code>python3 tools/changelog_server.py</code>
+    </div>
+  </div>
+</div>
+
+<!-- COMMIT DETAIL MODAL -->
+<div id="commit-modal" class="modal-overlay hidden" onclick="closeModal(event)">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span id="modal-cat-pill"></span>
+      <button class="modal-close" onclick="document.getElementById('commit-modal').classList.add('hidden')">✕</button>
+    </div>
+    <h2 id="modal-title"></h2>
+    <div class="modal-meta" id="modal-meta"></div>
+    <div class="modal-section" id="modal-body-section">
+      <h4>📋 Descripción</h4>
+      <div id="modal-body-text"></div>
+    </div>
+    <div class="modal-section" id="modal-files-section">
+      <h4>📁 Archivos cambiados</h4>
+      <div id="modal-files-list"></div>
+    </div>
+  </div>
+</div>
 
 <footer>
   Auto-generated by <strong>QTS Changelog Generator</strong> ·
-  <strong>61</strong> commits ·
+  <strong>62</strong> commits ·
   <strong>2026-03-23</strong>
 </footer>
 
 <button class="scroll-top" id="scrollTop" title="Volver arriba">↑</button>
 
 <script>
+// ─── Commits data (embedded) ────────────────────────────────────────────────
+window.COMMITS_DATA = {"0038dddfe6a8f5c87ae3a22624930d446a63d8f7": {"message": "Fix error de check SLyTP con paper trading", "body": "Se agrego una funcion paraverificar que elSLyTP estuvieran seguros pero el wrapper del paper trading no la conocia", "author": "uxuridevmx", "date": "2026-03-23 02:14", "files_list": [{"file": "core/paper_wallet.py", "ins": 8, "del": 0}, {"file": "index.html", "ins": 41, "del": 25}], "ins": 49, "del": 25, "cat": "fix", "version": "", "short": "0038ddd"}, "9e60561d06d21eb1800ad640461c5148b5afd9af": {"message": "fix de tiempo en trades despues de reinciar sistema", "body": "", "author": "uxuridevmx", "date": "2026-03-23 02:00", "files_list": [{"file": "core/controller.py", "ins": 32, "del": 4}, {"file": "index.html", "ins": 45, "del": 29}], "ins": 77, "del": 33, "cat": "fix", "version": "", "short": "9e60561"}, "0b49131ea27c52b20fcd08a05c1732f637bf75f5": {"message": "Se agrego historial  de pares", "body": "Para llevar control y mejores estadisticas para el sistema", "author": "uxuridevmx", "date": "2026-03-23 01:41", "files_list": [{"file": "core/config.py", "ins": 1, "del": 0}, {"file": "core/controller.py", "ins": 16, "del": 4}, {"file": "core/db.py", "ins": 303, "del": 0}, {"file": "core/order_model.py", "ins": 2, "del": 0}, {"file": "index.html", "ins": 1713, "del": 0}, {"file": "main.py", "ins": 10, "del": 1}, {"file": "main_terminal.py", "ins": 8, "del": 1}], "ins": 2053, "del": 6, "cat": "other", "version": "", "short": "0b49131"}, "b1cc73409587df810b256c3940f8732e4c88e259": {"message": "se agrego html para cambios y log, y fix de TP=0 con watchdog, cuando no asigna al incio.", "body": "", "author": "uxuridevmx", "date": "2026-03-23 01:00", "files_list": [{"file": "core/controller.py", "ins": 75, "del": 38}, {"file": "core/executor.py", "ins": 19, "del": 0}, {"file": "docs/index.html", "ins": 1697, "del": 0}, {"file": "index.html", "ins": 0, "del": 584}, {"file": "tools/generate_changelog.py", "ins": 945, "del": 0}], "ins": 2736, "del": 622, "cat": "fix", "version": "", "short": "b1cc734"}, "a416c360f751d22f02658c709a58a6fec808b83a": {"message": "drop off, low  volumen on trade after 3 mins and session manager", "body": "", "author": "uxuridevmx", "date": "2026-03-23 00:10", "files_list": [{"file": "core/controller.py", "ins": 202, "del": 20}, {"file": "core/db.py", "ins": 67, "del": 4}, {"file": "core/session.py", "ins": 61, "del": 13}, {"file": "interface/gtk_app.py", "ins": 36, "del": 1}, {"file": "interface/session_view.py", "ins": 299, "del": 65}], "ins": 665, "del": 103, "cat": "session", "version": "v0.5", "short": "a416c36"}, "c40757a369fe317f1ec2c95e2d6c200978f6952f": {"message": "g1-g2-g3", "body": "", "author": "uxuridevmx", "date": "2026-03-22 23:42", "files_list": [{"file": "core/controller.py", "ins": 60, "del": 37}], "ins": 60, "del": 37, "cat": "risk", "version": "", "short": "c40757a"}, "0a447db4ed331d63bd7ce2732fc8eaddcbe31d4c": {"message": "watchdog", "body": "", "author": "uxuridevmx", "date": "2026-03-22 22:24", "files_list": [{"file": "core/ai_strategy.py", "ins": 19, "del": 10}, {"file": "core/controller.py", "ins": 143, "del": 27}, {"file": "core/db.py", "ins": 49, "del": 1}, {"file": "core/executor.py", "ins": 19, "del": 12}, {"file": "interface/gtk_app.py", "ins": 48, "del": 12}, {"file": "main_terminal.py", "ins": 35, "del": 5}], "ins": 313, "del": 67, "cat": "risk", "version": "v0.4", "short": "0a447db"}, "06aedd1760732c18436dc97c11be999ba693eb01": {"message": "slippage", "body": "", "author": "uxuridevmx", "date": "2026-03-22 05:04", "files_list": [{"file": "core/ai_strategy.py", "ins": 14, "del": 2}, {"file": "core/controller.py", "ins": 141, "del": 139}], "ins": 155, "del": 141, "cat": "risk", "version": "v0.3", "short": "06aedd1"}, "aa15a28f09f61becb1243af816e859ee4d7f652b": {"message": "fixes de volumen", "body": "", "author": "uxuridevmx", "date": "2026-03-22 04:04", "files_list": [{"file": "core/controller.py", "ins": 31, "del": 11}, {"file": "streams/market.py", "ins": 15, "del": 7}], "ins": 46, "del": 18, "cat": "fix", "version": "", "short": "aa15a28"}, "20c91d2b348263fa36f42624080afc242dfd03ef": {"message": "span,cierre pero no avisa", "body": "", "author": "uxuridevmx", "date": "2026-03-22 03:52", "files_list": [{"file": "core/ai_strategy.py", "ins": 52, "del": 29}, {"file": "core/controller.py", "ins": 31, "del": 9}], "ins": 83, "del": 38, "cat": "other", "version": "", "short": "20c91d2"}, "017986d9be1e07f694b528ca7e18510239e6fe39": {"message": "fixed sl sync with bybit", "body": "", "author": "uxuridevmx", "date": "2026-03-22 03:14", "files_list": [{"file": "AUTO_FIX.md", "ins": 341, "del": 0}, {"file": "CLAUDE.md", "ins": 134, "del": 0}, {"file": "FIX_ERROR_34040.md", "ins": 116, "del": 0}, {"file": "OBSERVABILITY.md", "ins": 305, "del": 0}, {"file": "core/ai_strategy.py", "ins": 262, "del": 189}, {"file": "core/config.py", "ins": 1, "del": 0}, {"file": "core/controller.py", "ins": 343, "del": 110}, {"file": "core/db.py", "ins": 228, "del": 19}, {"file": "core/executor.py", "ins": 246, "del": 29}, {"file": "core/log_analyst.py", "ins": 399, "del": 0}, {"file": "core/logger.py", "ins": 141, "del": 0}, {"file": "core/order_model.py", "ins": 2, "del": 0}, {"file": "core/paper_wallet.py", "ins": 37, "del": 6}, {"file": "interface/analyst_view.py", "ins": 448, "del": 0}, {"file": "interface/gtk_app.py", "ins": 35, "del": 0}, {"file": "memory/MEMORY.md", "ins": 3, "del": 0}, {"file": "memory/project_bybit_hedge_mode.md", "ins": 10, "del": 0}, {"file": "memory/project_clear_tp_bug.md", "ins": 10, "del": 0}, {"file": "memory/project_observability.md", "ins": 13, "del": 0}, {"file": "streams/account.py", "ins": 19, "del": 11}, {"file": "tools/auto_fix.py", "ins": 129, "del": 0}, {"file": "tools/log_viewer.py", "ins": 297, "del": 0}, {"file": "tools/verify_observability.py", "ins": 76, "del": 0}], "ins": 3595, "del": 364, "cat": "fix", "version": "", "short": "017986d"}, "1965f1e38f9a90e1e4850d2f2609ed4fd8f4e9cf": {"message": "fix SL retry and problems on bybit", "body": "", "author": "uxuridevmx", "date": "2026-03-21 02:57", "files_list": [{"file": "core/ai_strategy.py", "ins": 12, "del": 4}, {"file": "core/config.py", "ins": 2, "del": 0}, {"file": "core/controller.py", "ins": 125, "del": 33}, {"file": "core/db.py", "ins": 55, "del": 3}, {"file": "core/executor.py", "ins": 5, "del": 2}, {"file": "core/session.py", "ins": 41, "del": 3}, {"file": "interface/command_center.py", "ins": 1, "del": 1}, {"file": "interface/gtk_app.py", "ins": 8, "del": 0}, {"file": "interface/journal_view.py", "ins": 4, "del": 1}, {"file": "interface/order_panel.py", "ins": 1, "del": 1}, {"file": "interface/session_view.py", "ins": 174, "del": 0}, {"file": "interface/settings_view.py", "ins": 32, "del": 0}, {"file": "streams/account.py", "ins": 62, "del": 23}], "ins": 522, "del": 71, "cat": "fix", "version": "v0.2", "short": "1965f1e"}, "eade127f492cdb2b2287c791e1675da78203842d": {"message": "se agrego sesiones y control de apis con la ia", "body": "", "author": "uxuridevmx", "date": "2026-03-20 16:54", "files_list": [{"file": "core/audit_agent.py", "ins": 106, "del": 0}, {"file": "core/config.py", "ins": 6, "del": 0}, {"file": "core/controller.py", "ins": 98, "del": 0}, {"file": "core/db.py", "ins": 65, "del": 7}, {"file": "core/notifier.py", "ins": 7, "del": 0}, {"file": "core/order_model.py", "ins": 2, "del": 0}, {"file": "core/session.py", "ins": 126, "del": 0}, {"file": "interface/command_center.py", "ins": 117, "del": 0}], "ins": 527, "del": 7, "cat": "session", "version": "", "short": "eade127"}, "c3cc96c4643ce644a1354d201a9cbbb045d957a6": {"message": "filtros y limites,journal csv", "body": "", "author": "uxuridevmx", "date": "2026-03-20 04:02", "files_list": [{"file": "core/paper_wallet.py", "ins": 1, "del": 1}, {"file": "interface/journal_view.py", "ins": 73, "del": 4}, {"file": "interface/settings_view.py", "ins": 1, "del": 1}], "ins": 75, "del": 6, "cat": "other", "version": "", "short": "c3cc96c"}, "5348966ba9a70a3976a7f6b86bab2b12da1f147c": {"message": "working after caos", "body": "", "author": "uxuridevmx", "date": "2026-03-19 23:50", "files_list": [{"file": "core/ai_strategy.py", "ins": 8, "del": 2}, {"file": "core/controller.py", "ins": 65, "del": 16}, {"file": "streams/market.py", "ins": 70, "del": 1}], "ins": 143, "del": 19, "cat": "other", "version": "v0.1", "short": "5348966"}, "bde270dc21879dd58d55fa982dedfc594a414277": {"message": "minor fixes", "body": "", "author": "uxuridevmx", "date": "2026-03-19 22:45", "files_list": [{"file": "core/ai_strategy.py", "ins": 16, "del": 19}, {"file": "core/config.py", "ins": 65, "del": 0}, {"file": "core/controller.py", "ins": 282, "del": 729}], "ins": 363, "del": 748, "cat": "fix", "version": "", "short": "bde270d"}, "c214f2e8727bba24c124fd4ec8509623b6273c24": {"message": "api key y variables", "body": "", "author": "uxuridevmx", "date": "2026-03-19 21:31", "files_list": [{"file": "core/ai_strategy.py", "ins": 10, "del": 14}, {"file": "core/config.py", "ins": 7, "del": 0}, {"file": "core/controller.py", "ins": 5, "del": 2}, {"file": "interface/settings_view.py", "ins": 36, "del": 0}], "ins": 58, "del": 16, "cat": "other", "version": "", "short": "c214f2e"}, "198b5e58f40935741306e99e1dce4bac055501f9": {"message": "better  trailing, check removed tp", "body": "", "author": "uxuridevmx", "date": "2026-03-19 20:50", "files_list": [{"file": "core/ai_strategy.py", "ins": 1, "del": 1}, {"file": "core/config.py", "ins": 3, "del": 3}, {"file": "core/controller.py", "ins": 46, "del": 21}, {"file": "core/strategy.py", "ins": 22, "del": 9}, {"file": "interface/settings_view.py", "ins": 6, "del": 0}], "ins": 78, "del": 34, "cat": "risk", "version": "", "short": "198b5e5"}, "1ef15202d965bddfb4fabb12c1e448c9633d1cac": {"message": "trailing stop fix", "body": "", "author": "uxuridevmx", "date": "2026-03-19 20:01", "files_list": [{"file": "core/controller.py", "ins": 8, "del": 3}], "ins": 8, "del": 3, "cat": "fix", "version": "", "short": "1ef1520"}, "673b681475c7bcaacfeb6db8a81fa20ca7b6a153": {"message": "be y trailing, better", "body": "", "author": "uxuridevmx", "date": "2026-03-19 19:20", "files_list": [{"file": "core/controller.py", "ins": 64, "del": 134}, {"file": "interface/settings_view.py", "ins": 10, "del": 3}], "ins": 74, "del": 137, "cat": "risk", "version": "", "short": "673b681"}, "c7b4366de54b18921355282f1fddb3c2969a00ed": {"message": "modelos de ia cambios", "body": "", "author": "uxuridevmx", "date": "2026-03-19 18:54", "files_list": [{"file": "core/ai_strategy.py", "ins": 102, "del": 28}, {"file": "core/config.py", "ins": 13, "del": 2}, {"file": "interface/settings_view.py", "ins": 165, "del": 24}], "ins": 280, "del": 54, "cat": "ai", "version": "", "short": "c7b4366"}, "e48b1a8ed80edf13c0e422794dc792f4f3c086f7": {"message": "fixed lock  profit and smart guard", "body": "", "author": "uxuridevmx", "date": "2026-03-19 17:31", "files_list": [{"file": "core/controller.py", "ins": 31, "del": 13}], "ins": 31, "del": 13, "cat": "fix", "version": "", "short": "e48b1a8"}, "ed7a6af4c9cc8d87857223802d69050525e3075b": {"message": "changes on selection strategy", "body": "", "author": "uxuridevmx", "date": "2026-03-19 17:16", "files_list": [{"file": "core/ai_strategy.py", "ins": 97, "del": 74}], "ins": 97, "del": 74, "cat": "ai", "version": "", "short": "ed7a6af"}, "38008471d1244eebb25b4dabc0d6c388a04e877f": {"message": "ia model estrategy", "body": "", "author": "uxuridevmx", "date": "2026-03-19 16:56", "files_list": [{"file": ".gitignore", "ins": 1, "del": 0}, {"file": "=1.0.0", "ins": 0, "del": 0}, {"file": "core/ai_strategy.py", "ins": 424, "del": 0}, {"file": "core/config.py", "ins": 7, "del": 0}, {"file": "core/controller.py", "ins": 76, "del": 0}, {"file": "core/db.py", "ins": 13, "del": 7}, {"file": "core/order_model.py", "ins": 7, "del": 1}, {"file": "interface/order_panel.py", "ins": 50, "del": 1}, {"file": "interface/settings_view.py", "ins": 144, "del": 0}, {"file": "requirements.txt", "ins": 3, "del": 0}], "ins": 725, "del": 9, "cat": "ai", "version": "", "short": "3800847"}, "e70aefec77543e1dfa54a3f734985097b2a9a54d": {"message": "tp, sl and r:R changes", "body": "", "author": "uxuridevmx", "date": "2026-03-19 15:22", "files_list": [{"file": "core/controller.py", "ins": 8, "del": 8}, {"file": "core/strategy.py", "ins": 32, "del": 10}], "ins": 40, "del": 18, "cat": "risk", "version": "", "short": "e70aefe"}, "7185602084abbd39ec3227b4224a4e6fdc76317b": {"message": "logo", "body": "", "author": "uxuridevmx", "date": "2026-03-19 08:06", "files_list": [{"file": "assets/logo.jpg", "ins": 0, "del": 0}, {"file": "assets/logo.png", "ins": 0, "del": 0}, {"file": "main.py", "ins": 1, "del": 0}], "ins": 1, "del": 0, "cat": "feat", "version": "", "short": "7185602"}, "ca890cbe30ebba76e9e9a452ec2300a55b019671": {"message": "fix?", "body": "", "author": "uxuridevmx", "date": "2026-03-19 00:15", "files_list": [{"file": "core/config.py", "ins": 12, "del": 2}, {"file": "core/controller.py", "ins": 54, "del": 0}, {"file": "core/db.py", "ins": 14, "del": 6}, {"file": "core/order_model.py", "ins": 3, "del": 0}, {"file": "core/paper_wallet.py", "ins": 6, "del": 4}, {"file": "core/regime.py", "ins": 8, "del": 0}, {"file": "core/strategy.py", "ins": 149, "del": 48}, {"file": "interface/journal_view.py", "ins": 114, "del": 13}, {"file": "interface/settings_view.py", "ins": 2, "del": 2}], "ins": 362, "del": 75, "cat": "fix", "version": "", "short": "ca890cb"}, "52ed7cedc08b657e64c274f699179d049dbabe1d": {"message": "fixed commerce", "body": "", "author": "uxuridevmx", "date": "2026-03-18 22:26", "files_list": [{"file": "core/config.py", "ins": 39, "del": 22}, {"file": "core/controller.py", "ins": 130, "del": 21}, {"file": "core/executor.py", "ins": 36, "del": 0}, {"file": "interface/command_center.py", "ins": 5, "del": 2}, {"file": "interface/gtk_app.py", "ins": 15, "del": 0}, {"file": "interface/settings_view.py", "ins": 123, "del": 1}], "ins": 348, "del": 46, "cat": "fix", "version": "", "short": "52ed7ce"}, "ce1601b642f0518e8bbc5f0fc48654075a07aa82": {"message": "more profit fixes fase 1", "body": "", "author": "uxuridevmx", "date": "2026-03-18 19:25", "files_list": [{"file": "core/config.py", "ins": 26, "del": 1}, {"file": "core/controller.py", "ins": 108, "del": 26}, {"file": "core/strategy.py", "ins": 12, "del": 9}, {"file": "interface/command_center.py", "ins": 14, "del": 8}, {"file": "interface/settings_view.py", "ins": 68, "del": 0}], "ins": 228, "del": 44, "cat": "fix", "version": "", "short": "ce1601b"}, "a477a74e15c5156d2ec035333e442a526bea6f0c": {"message": "fastline", "body": "", "author": "uxuridevmx", "date": "2026-03-18 02:59", "files_list": [{"file": "core/config.py", "ins": 45, "del": 1}, {"file": "core/controller.py", "ins": 13, "del": 5}, {"file": "core/order_model.py", "ins": 3, "del": 0}, {"file": "core/paper_wallet.py", "ins": 3, "del": 0}, {"file": "core/trend.py", "ins": 34, "del": 14}, {"file": "interface/command_center.py", "ins": 39, "del": 10}, {"file": "interface/gtk_app.py", "ins": 4, "del": 4}, {"file": "interface/settings_view.py", "ins": 58, "del": 1}, {"file": "mcp_server.py", "ins": 4, "del": 3}, {"file": "streams/klines.py", "ins": 9, "del": 6}], "ins": 212, "del": 44, "cat": "perf", "version": "", "short": "a477a74"}, "5f83e41e927ab1588e3c68ca953e55d9ebc7ab25": {"message": "pricefix", "body": "", "author": "uxuridevmx", "date": "2026-03-18 02:21", "files_list": [{"file": "mcp_server.py", "ins": 6, "del": 0}], "ins": 6, "del": 0, "cat": "fix", "version": "", "short": "5f83e41"}, "33a4a8ae5730218d7bf2aafeb689342ab59741aa": {"message": "indicadores avanzados", "body": "", "author": "uxuridevmx", "date": "2026-03-18 01:41", "files_list": [{"file": "core/config.py", "ins": 4, "del": 0}, {"file": "core/controller.py", "ins": 2, "del": 0}, {"file": "core/paper_wallet.py", "ins": 379, "del": 0}, {"file": "interface/command_center.py", "ins": 14, "del": 20}, {"file": "interface/extractor_view.py", "ins": 40, "del": 10}, {"file": "interface/gtk_app.py", "ins": 66, "del": 38}, {"file": "interface/settings_view.py", "ins": 117, "del": 1}], "ins": 622, "del": 69, "cat": "feat", "version": "", "short": "33a4a8a"}, "7d11522d947eb10073314e2d01b11e9ae3340627": {"message": "zona de liq", "body": "", "author": "uxuridevmx", "date": "2026-03-18 00:53", "files_list": [{"file": "interface/command_center.py", "ins": 79, "del": 15}], "ins": 79, "del": 15, "cat": "feat", "version": "", "short": "7d11522"}, "8900abec6d36cea449abd892e898c3dc48487943": {"message": "bar indicators", "body": "", "author": "uxuridevmx", "date": "2026-03-18 00:38", "files_list": [{"file": "interface/command_center.py", "ins": 95, "del": 51}], "ins": 95, "del": 51, "cat": "feat", "version": "", "short": "8900abe"}, "4bacb50b7cf557dfee194b42ac997abc98b00532": {"message": "bar", "body": "", "author": "uxuridevmx", "date": "2026-03-18 00:31", "files_list": [{"file": "interface/command_center.py", "ins": 27, "del": 0}, {"file": "interface/gtk_app.py", "ins": 7, "del": 0}, {"file": "streams/account.py", "ins": 12, "del": 1}, {"file": "streams/market.py", "ins": 26, "del": 5}], "ins": 72, "del": 6, "cat": "feat", "version": "", "short": "4bacb50"}, "59cc32211d4263bd25a9751fa5b2f19675db965a": {"message": "indicadores", "body": "", "author": "uxuridevmx", "date": "2026-03-18 00:22", "files_list": [{"file": "core/controller.py", "ins": 8, "del": 9}, {"file": "core/executor.py", "ins": 10, "del": 6}, {"file": "interface/command_center.py", "ins": 196, "del": 45}, {"file": "interface/gtk_app.py", "ins": 2, "del": 1}], "ins": 216, "del": 61, "cat": "feat", "version": "", "short": "59cc322"}, "6f199b17f1241f2e74f229968d587059f5813aff": {"message": "journal details", "body": "", "author": "uxuridevmx", "date": "2026-03-17 23:43", "files_list": [{"file": "core/controller.py", "ins": 69, "del": 12}, {"file": "interface/journal_view.py", "ins": 147, "del": 57}, {"file": "streams/account.py", "ins": 4, "del": 3}], "ins": 220, "del": 72, "cat": "ai", "version": "", "short": "6f199b1"}, "a0fe280e6fd8d755a715d24eb83a0f824d7cb9de": {"message": "fix save capital", "body": "", "author": "uxuridevmx", "date": "2026-03-17 22:22", "files_list": [{"file": "core/controller.py", "ins": 113, "del": 1}], "ins": 113, "del": 1, "cat": "fix", "version": "", "short": "a0fe280"}, "60971bd872e088a79764a9ae9e696c24e433c529": {"message": "auto working", "body": "", "author": "uxuridevmx", "date": "2026-03-17 21:41", "files_list": [{"file": "interface/extractor_view.py", "ins": 525, "del": 0}, {"file": "interface/gtk_app.py", "ins": 8, "del": 0}, {"file": "mcp_server.py", "ins": 59, "del": 1}], "ins": 592, "del": 1, "cat": "other", "version": "", "short": "60971bd"}, "bef27ab565b6875a70cea9ed2cfb17ae33b69e6d": {"message": "fullauto", "body": "", "author": "uxuridevmx", "date": "2026-03-17 21:05", "files_list": [{"file": ".mcp.json", "ins": 8, "del": 0}, {"file": "mcp_server.py", "ins": 701, "del": 0}], "ins": 709, "del": 0, "cat": "other", "version": "", "short": "bef27ab"}, "eecf0c3880c077f4c1942ac60441376436b0c6ae": {"message": "full working semi", "body": "", "author": "uxuridevmx", "date": "2026-03-17 20:32", "files_list": [{"file": "core/controller.py", "ins": 170, "del": 12}, {"file": "core/executor.py", "ins": 34, "del": 4}, {"file": "core/regime.py", "ins": 76, "del": 4}, {"file": "core/strategy.py", "ins": 131, "del": 27}, {"file": "interface/command_center.py", "ins": 93, "del": 50}], "ins": 504, "del": 97, "cat": "other", "version": "", "short": "eecf0c3"}, "b15382c465134285b104b403dc74fffd6c9e9cac": {"message": "closed order", "body": "", "author": "uxuridevmx", "date": "2026-03-17 16:52", "files_list": [{"file": "core/config.py", "ins": 7, "del": 1}, {"file": "core/controller.py", "ins": 50, "del": 14}, {"file": "interface/command_center.py", "ins": 95, "del": 3}], "ins": 152, "del": 18, "cat": "other", "version": "", "short": "b15382c"}, "95b77b7af21a4acb5abfc71e1e2a75891b8c1978": {"message": "fix time bug,  closes active", "body": "", "author": "uxuridevmx", "date": "2026-03-17 16:33", "files_list": [{"file": "core/config.py", "ins": 13, "del": 2}, {"file": "core/controller.py", "ins": 66, "del": 19}, {"file": "core/order_model.py", "ins": 1, "del": 0}, {"file": "core/risk.py", "ins": 1, "del": 1}, {"file": "core/strategy.py", "ins": 1, "del": 1}, {"file": "interface/command_center.py", "ins": 38, "del": 4}, {"file": "interface/gtk_app.py", "ins": 7, "del": 0}, {"file": "interface/settings_view.py", "ins": 231, "del": 0}], "ins": 358, "del": 27, "cat": "fix", "version": "", "short": "95b77b7"}, "16e7b893b386ce0b4ea7621cd2b425b9b4ae9bbc": {"message": "critical bug, stops active", "body": "", "author": "uxuridevmx", "date": "2026-03-17 15:57", "files_list": [{"file": "core/controller.py", "ins": 90, "del": 22}, {"file": "core/db.py", "ins": 61, "del": 0}, {"file": "interface/command_center.py", "ins": 25, "del": 4}, {"file": "interface/gtk_app.py", "ins": 8, "del": 0}, {"file": "interface/journal_view.py", "ins": 325, "del": 0}], "ins": 509, "del": 26, "cat": "fix", "version": "", "short": "16e7b89"}, "62dabf8a00d28e19f836662955125e2c5340728c": {"message": "fixed windows", "body": "", "author": "uxuridevmx", "date": "2026-03-17 15:14", "files_list": [{"file": "interface/command_center.py", "ins": 2, "del": 0}, {"file": "interface/gtk_app.py", "ins": 14, "del": 2}], "ins": 16, "del": 2, "cat": "fix", "version": "", "short": "62dabf8"}, "c2e62ba10951997f40b4153c0493e234ff455bc0": {"message": "detallesenactivos", "body": "", "author": "uxuridevmx", "date": "2026-03-17 15:04", "files_list": [{"file": "interface/command_center.py", "ins": 57, "del": 22}, {"file": "interface/gtk_app.py", "ins": 8, "del": 11}], "ins": 65, "del": 33, "cat": "other", "version": "", "short": "c2e62ba"}, "92f289b24e74aa2ad0bd32fd776f9d35ad8d36d5": {"message": "auto fix", "body": "", "author": "uxuridevmx", "date": "2026-03-17 14:35", "files_list": [{"file": "core/controller.py", "ins": 37, "del": 12}, {"file": "core/db.py", "ins": 27, "del": 0}, {"file": "interface/command_center.py", "ins": 420, "del": 181}, {"file": "interface/gtk_app.py", "ins": 80, "del": 40}], "ins": 564, "del": 233, "cat": "fix", "version": "", "short": "92f289b"}, "a655c72d9f21b61e88be9f23a0cd273b2ae2bd18": {"message": "manual-auto", "body": "", "author": "uxuridevmx", "date": "2026-03-17 06:24", "files_list": [{"file": "core/config.py", "ins": 5, "del": 1}, {"file": "core/controller.py", "ins": 16, "del": 10}, {"file": "core/order_model.py", "ins": 1, "del": 1}, {"file": "interface/command_center.py", "ins": 48, "del": 20}], "ins": 70, "del": 32, "cat": "other", "version": "", "short": "a655c72"}, "134e488299f7756360e16369d96a237a8bf04a7f": {"message": "semi auto working", "body": "", "author": "uxuridevmx", "date": "2026-03-17 06:08", "files_list": [{"file": "core/controller.py", "ins": 69, "del": 1}, {"file": "interface/command_center.py", "ins": 926, "del": 0}, {"file": "interface/gtk_app.py", "ins": 37, "del": 10}], "ins": 1032, "del": 11, "cat": "other", "version": "", "short": "134e488"}, "b4c85bb1ef7015bd22e93a51e176cd8625e503c2": {"message": "working", "body": "", "author": "uxuridevmx", "date": "2026-03-17 05:39", "files_list": [{"file": "core/controller.py", "ins": 210, "del": 196}, {"file": "core/db.py", "ins": 121, "del": 1}, {"file": "core/notifier.py", "ins": 81, "del": 0}, {"file": "core/order_model.py", "ins": 13, "del": 9}, {"file": "interface/gtk_app.py", "ins": 2, "del": 5}, {"file": "interface/order_panel.py", "ins": 226, "del": 250}], "ins": 653, "del": 461, "cat": "other", "version": "", "short": "b4c85bb"}, "742136bcdf53850ccec0af4758e9cfbc43569fec": {"message": "tp", "body": "", "author": "uxuridevmx", "date": "2026-03-17 05:17", "files_list": [{"file": "core/controller.py", "ins": 13, "del": 2}], "ins": 13, "del": 2, "cat": "other", "version": "", "short": "742136b"}, "c22a63cc60823382b13ddd0d302857a98d600c0f": {"message": "semiauto", "body": "", "author": "uxuridevmx", "date": "2026-03-17 05:07", "files_list": [{"file": "core/controller.py", "ins": 509, "del": 0}, {"file": "core/executor.py", "ins": 420, "del": 0}, {"file": "core/order_model.py", "ins": 149, "del": 0}, {"file": "core/strategy.py", "ins": 438, "del": 0}, {"file": "interface/gtk_app.py", "ins": 124, "del": 18}, {"file": "interface/order_panel.py", "ins": 603, "del": 0}, {"file": "main.py", "ins": 7, "del": 0}], "ins": 2250, "del": 18, "cat": "other", "version": "", "short": "c22a63c"}, "501afc1ad8b21cfd86c86c6b2a35f2b5a04c05ba": {"message": "final revisar", "body": "", "author": "uxuridevmx", "date": "2026-03-17 03:05", "files_list": [{"file": "core/status_writer.py", "ins": 133, "del": 0}, {"file": "core/technicals.py", "ins": 254, "del": 0}, {"file": "gnome-extension/extension.js", "ins": 370, "del": 0}, {"file": "gnome-extension/install.sh", "ins": 51, "del": 0}, {"file": "gnome-extension/metadata.json", "ins": 8, "del": 0}, {"file": "gnome-extension/stylesheet.css", "ins": 11, "del": 0}, {"file": "interface/gtk_app.py", "ins": 157, "del": 3}, {"file": "streams/klines.py", "ins": 124, "del": 0}, {"file": "tools/analyze_trade.py", "ins": 531, "del": 0}], "ins": 1639, "del": 3, "cat": "other", "version": "", "short": "501afc1"}, "ec119626232bfaedc2218fae24b9a04907bdae2d": {"message": "connected", "body": "", "author": "uxuridevmx", "date": "2026-03-17 02:25", "files_list": [{"file": "core/risk.py", "ins": 168, "del": 0}, {"file": "interface/gtk_app.py", "ins": 166, "del": 3}, {"file": "interface/gtk_style.css", "ins": 9, "del": 0}, {"file": "streams/account.py", "ins": 351, "del": 0}], "ins": 694, "del": 3, "cat": "other", "version": "", "short": "ec11962"}, "a404a8c999889c3b8d9387760ef4c13853907406": {"message": "fase  4/7", "body": "", "author": "uxuridevmx", "date": "2026-03-17 02:16", "files_list": [{"file": "core/regime.py", "ins": 312, "del": 0}, {"file": "interface/gtk_app.py", "ins": 72, "del": 28}], "ins": 384, "del": 28, "cat": "other", "version": "", "short": "a404a8c"}, "92f8d6b2177e2daedcb530541845c72475362308": {"message": "style", "body": "", "author": "uxuridevmx", "date": "2026-03-17 02:06", "files_list": [{"file": "interface/gtk_app.py", "ins": 9, "del": 1}], "ins": 9, "del": 1, "cat": "other", "version": "", "short": "92f8d6b"}, "a02774051467e518295cf8bbceaa302fc014e1c5": {"message": "tendencia", "body": "", "author": "uxuridevmx", "date": "2026-03-17 01:52", "files_list": [{"file": "core/liquidity.py", "ins": 403, "del": 0}, {"file": "core/trend.py", "ins": 190, "del": 0}, {"file": "interface/gtk_app.py", "ins": 214, "del": 7}, {"file": "interface/gtk_style.css", "ins": 9, "del": 0}, {"file": "streams/market.py", "ins": 20, "del": 1}], "ins": 836, "del": 8, "cat": "other", "version": "", "short": "a027740"}, "2738f759e7813f0bb9597f0dc638a269973c1f59": {"message": "absorcion", "body": "", "author": "uxuridevmx", "date": "2026-03-17 01:10", "files_list": [{"file": "core/absorption.py", "ins": 336, "del": 0}, {"file": "interface/gtk_app.py", "ins": 123, "del": 6}], "ins": 459, "del": 6, "cat": "other", "version": "", "short": "2738f75"}, "dedc1cb6757eaeb84376aa57fbd422e9341e4f70": {"message": "gtk4", "body": "", "author": "uxuridevmx", "date": "2026-03-17 00:54", "files_list": [{"file": "interface/gtk_app.py", "ins": 852, "del": 0}, {"file": "interface/gtk_style.css", "ins": 129, "del": 0}, {"file": "main.py", "ins": 17, "del": 6}, {"file": "main_terminal.py", "ins": 20, "del": 0}, {"file": "setup.sh", "ins": 11, "del": 3}, {"file": "streams/market.py", "ins": 67, "del": 17}], "ins": 1096, "del": 26, "cat": "ui", "version": "", "short": "dedc1cb"}, "d65dfa8545d9d865c4159e7d7a294a59a5aacfb0": {"message": "fase  0", "body": "", "author": "uxuridevmx", "date": "2026-03-17 00:17", "files_list": [{"file": ".env.example", "ins": 21, "del": 0}, {"file": ".gitignore", "ins": 9, "del": 0}, {"file": "core/__init__.py", "ins": 0, "del": 0}, {"file": "core/config.py", "ins": 43, "del": 0}, {"file": "core/db.py", "ins": 56, "del": 0}, {"file": "interface/__init__.py", "ins": 0, "del": 0}, {"file": "interface/terminal.py", "ins": 466, "del": 0}, {"file": "main.py", "ins": 20, "del": 0}, {"file": "memory/MEMORY.md", "ins": 13, "del": 0}, {"file": "memory/project_phase1.md", "ins": 21, "del": 0}, {"file": "requirements.txt", "ins": 17, "del": 0}, {"file": "setup.sh", "ins": 52, "del": 0}, {"file": "streams/__init__.py", "ins": 0, "del": 0}, {"file": "streams/market.py", "ins": 492, "del": 0}], "ins": 1210, "del": 0, "cat": "other", "version": "", "short": "d65dfa8"}, "f1524fcdb954be0b4406adab176cec100ddb53d5": {"message": "3 tools", "body": "", "author": "Jesus torres", "date": "2026-01-05 12:44", "files_list": [{"file": "index.html", "ins": 351, "del": 392}], "ins": 351, "del": 392, "cat": "other", "version": "", "short": "f1524fc"}, "340d93974b44d2d55783baffaa2ee098da35498d": {"message": "basic functional", "body": "", "author": "Jesus torres", "date": "2026-01-05 12:17", "files_list": [{"file": "index.html", "ins": 625, "del": 0}], "ins": 625, "del": 0, "cat": "other", "version": "", "short": "340d939"}};
+
+// ─── Tab switching ──────────────────────────────────────────────────────────
+function switchTab(btn) {
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  const panel = btn.dataset.panel;
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+  document.getElementById('panel-' + panel).classList.remove('hidden');
+  if (panel === 'commit') initCommitPanel();
+  if (panel === 'tasks') renderTasks();
+}
+
 // ─── Theme toggle ──────────────────────────────────────────────────────────
 const root    = document.documentElement;
 const themeBtn= document.getElementById('themeBtn');
@@ -1740,6 +2115,286 @@ window.addEventListener('scroll', () => {
   scrollBtn.classList.toggle('visible', window.scrollY > 400);
 });
 scrollBtn.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+
+// ─── Commit Detail Modal ───────────────────────────────────────────────────
+const CATEGORIES_META = {"feat": ["\u2728", "Feature", "#6366f1"], "fix": ["\ud83d\udc1b", "Fix", "#f59e0b"], "risk": ["\ud83d\udee1\ufe0f", "Risk/SL", "#22c55e"], "ai": ["\ud83e\udd16", "AI/IA", "#8b5cf6"], "session": ["\ud83d\udcca", "Sesi\u00f3n", "#06b6d4"], "market": ["\ud83d\udcc8", "Mercado", "#3b82f6"], "perf": ["\u26a1", "Perf", "#eab308"], "ui": ["\ud83c\udfa8", "UI", "#ec4899"], "refactor": ["\ud83d\udd27", "Refactor", "#64748b"], "other": ["\ud83d\udcdd", "Misc", "#94a3b8"]};
+
+function showCommitDetail(card) {
+  const hash = card.dataset.hash;
+  const data = window.COMMITS_DATA[hash];
+  if (!data) return;
+
+  const [emoji, label, color] = CATEGORIES_META[data.cat] || ['📝', 'Misc', '#94a3b8'];
+
+  // Category pill
+  const pill = document.getElementById('modal-cat-pill');
+  pill.textContent = emoji + ' ' + label;
+  pill.style.cssText = 'font-size:11px;font-weight:600;padding:3px 10px;border-radius:10px;border:1px solid;' +
+    'background:' + color + '22;color:' + color + ';border-color:' + color + '44';
+
+  // Title
+  document.getElementById('modal-title').textContent = data.message;
+
+  // Meta
+  document.getElementById('modal-meta').innerHTML =
+    '<code>' + data.short + '</code>' +
+    '<span>👤 ' + escHtml(data.author) + '</span>' +
+    '<span>📅 ' + escHtml(data.date) + '</span>' +
+    (data.version ? '<span class="version-badge">' + escHtml(data.version) + '</span>' : '') +
+    '<span class="stat-chip ins">+' + data.ins + '</span>' +
+    '<span class="stat-chip del">−' + data.del + '</span>';
+
+  // Body / notes
+  const bodySection = document.getElementById('modal-body-section');
+  const bodyText    = document.getElementById('modal-body-text');
+  if (data.body && data.body.trim()) {
+    bodyText.innerHTML = '<div class="modal-body-pre">' + escHtml(data.body) + '</div>';
+    bodySection.style.display = '';
+  } else {
+    // Editable notes area — saves to server if available
+    bodyText.innerHTML =
+      '<textarea class="modal-notes-area" id="notes-area-' + escHtml(hash) + '" ' +
+      'placeholder="Agregar descripción/notas para este commit..."></textarea>' +
+      '<button class="btn-save-notes" onclick="saveNotes('' + escHtml(hash) + '')">Guardar nota</button>' +
+      '<span id="notes-save-msg-' + escHtml(hash) + '" style="font-size:11px;color:var(--text-muted);margin-left:8px"></span>';
+    // Pre-fill from localStorage
+    const stored = localStorage.getItem('qts-note-' + hash);
+    if (stored) document.getElementById('notes-area-' + hash).value = stored;
+    bodySection.style.display = '';
+  }
+
+  // Files changed
+  const filesSection = document.getElementById('modal-files-section');
+  const filesList    = document.getElementById('modal-files-list');
+  if (data.files_list && data.files_list.length > 0) {
+    filesList.innerHTML = data.files_list.map(f =>
+      '<div class="file-change-row">' +
+      '<span class="file-change-name">' + escHtml(f.file) + '</span>' +
+      '<span class="file-change-ins">+' + f.ins + '</span>' +
+      '<span class="file-change-del">-' + f.del + '</span>' +
+      '</div>'
+    ).join('');
+    filesSection.style.display = '';
+  } else {
+    filesSection.style.display = 'none';
+  }
+
+  document.getElementById('commit-modal').classList.remove('hidden');
+}
+
+function closeModal(event) {
+  const box = document.querySelector('.modal-box');
+  if (!box.contains(event.target)) {
+    document.getElementById('commit-modal').classList.add('hidden');
+  }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    document.getElementById('commit-modal').classList.add('hidden');
+  }
+});
+
+function saveNotes(hash) {
+  const area = document.getElementById('notes-area-' + hash);
+  if (!area) return;
+  const text = area.value.trim();
+  localStorage.setItem('qts-note-' + hash, text);
+  const msg = document.getElementById('notes-save-msg-' + hash);
+  if (msg) { msg.textContent = '✓ Guardado'; setTimeout(() => { msg.textContent = ''; }, 2000); }
+  // Also try server
+  fetch('http://localhost:7000/api/commit-notes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hash, note: text })
+  }).catch(() => {});
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ─── Tasks (localStorage) ──────────────────────────────────────────────────
+const TYPE_ICONS = { task: '✅', objective: '🎯', note: '📝', bug: '🐛' };
+const TYPE_LABELS = { task: 'Tareas', objective: 'Objetivos', note: 'Notas', bug: 'Bugs' };
+
+function loadTasks() {
+  try {
+    return JSON.parse(localStorage.getItem('qts_tasks') || '[]');
+  } catch(e) { return []; }
+}
+
+function saveTasks(tasks) {
+  localStorage.setItem('qts_tasks', JSON.stringify(tasks));
+}
+
+function addTask() {
+  const typeEl = document.getElementById('task-type');
+  const inputEl = document.getElementById('task-input');
+  const text = inputEl.value.trim();
+  if (!text) { inputEl.focus(); return; }
+  const tasks = loadTasks();
+  tasks.unshift({
+    id: Date.now(),
+    type: typeEl.value,
+    text,
+    done: false,
+    created: new Date().toLocaleString()
+  });
+  saveTasks(tasks);
+  inputEl.value = '';
+  renderTasks();
+}
+
+function toggleTask(id) {
+  const tasks = loadTasks();
+  const t = tasks.find(t => t.id === id);
+  if (t) { t.done = !t.done; saveTasks(tasks); renderTasks(); }
+}
+
+function deleteTask(id) {
+  const tasks = loadTasks().filter(t => t.id !== id);
+  saveTasks(tasks);
+  renderTasks();
+}
+
+function renderTasks() {
+  const tasks = loadTasks();
+  const container = document.getElementById('tasks-list');
+  if (!container) return;
+
+  if (tasks.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:40px 0;font-size:14px">No hay tareas aún. ¡Agrega una arriba!</p>';
+    return;
+  }
+
+  const byType = {};
+  tasks.forEach(t => {
+    if (!byType[t.type]) byType[t.type] = [];
+    byType[t.type].push(t);
+  });
+
+  const order = ['bug', 'objective', 'task', 'note'];
+  let html = '';
+  order.forEach(type => {
+    const group = byType[type];
+    if (!group || group.length === 0) return;
+    html += '<div class="tasks-group">';
+    html += '<div class="tasks-group-title">' + TYPE_ICONS[type] + ' ' + TYPE_LABELS[type] + ' (' + group.length + ')</div>';
+    group.forEach(t => {
+      html += '<div class="task-item type-' + t.type + (t.done ? ' task-done' : '') + '">' +
+        '<input type="checkbox" class="task-check" ' + (t.done ? 'checked' : '') +
+        ' onchange="toggleTask(' + t.id + ')" title="Marcar como ' + (t.done ? 'pendiente' : 'hecho') + '">' +
+        '<div style="flex:1">' +
+        '<div class="task-text">' + escHtml(t.text) + '</div>' +
+        '<div class="task-meta">' + escHtml(t.created) + '</div>' +
+        '</div>' +
+        '<button class="task-del" onclick="deleteTask(' + t.id + ')" title="Eliminar">✕</button>' +
+        '</div>';
+    });
+    html += '</div>';
+  });
+  container.innerHTML = html;
+}
+
+// ─── Commit Panel ──────────────────────────────────────────────────────────
+let serverAvailable = false;
+
+async function initCommitPanel() {
+  const statusEl = document.getElementById('server-status');
+  const formEl   = document.getElementById('commit-form');
+  const noSrvEl  = document.getElementById('no-server-msg');
+  statusEl.className = 'server-status checking';
+  statusEl.textContent = '⚡ Verificando servidor...';
+  try {
+    const r = await fetch('http://localhost:7000/api/ping', { signal: AbortSignal.timeout(2000) });
+    const d = await r.json();
+    if (d.ok) {
+      serverAvailable = true;
+      statusEl.className = 'server-status ok';
+      statusEl.textContent = '● Servidor conectado en localhost:7000';
+      formEl.classList.remove('hidden');
+      noSrvEl.classList.add('hidden');
+      loadGitStatus();
+      return;
+    }
+  } catch(e) {}
+  serverAvailable = false;
+  statusEl.className = 'server-status error';
+  statusEl.textContent = '● Servidor no disponible';
+  formEl.classList.add('hidden');
+  noSrvEl.classList.remove('hidden');
+}
+
+async function loadGitStatus() {
+  if (!serverAvailable) return;
+  const listEl = document.getElementById('staged-files-list');
+  try {
+    const r = await fetch('http://localhost:7000/api/status');
+    const d = await r.json();
+    const all = [
+      ...(d.staged   || []).map(f => ({ ...f, area: 'staged' })),
+      ...(d.unstaged || []).map(f => ({ ...f, area: 'unstaged' })),
+    ];
+    if (all.length === 0) {
+      listEl.innerHTML = '<div class="staged-empty">Sin cambios detectados.</div>';
+      return;
+    }
+    listEl.innerHTML = all.map(f =>
+      '<div class="staged-file">' +
+      '<span class="staged-file-status staged-' + f.status + '">' + f.status + '</span>' +
+      '<span style="flex:1">' + escHtml(f.file) + '</span>' +
+      (f.area === 'staged'
+        ? '<span style="font-size:10px;color:var(--green)">staged</span>'
+        : '<span style="font-size:10px;color:var(--yellow)">unstaged</span>') +
+      '</div>'
+    ).join('');
+  } catch(e) {
+    listEl.innerHTML = '<div class="staged-empty" style="color:var(--red)">Error al obtener estado git.</div>';
+  }
+}
+
+async function doCommit() {
+  if (!serverAvailable) return;
+  const title  = document.getElementById('commit-title').value.trim();
+  const body   = document.getElementById('commit-body').value.trim();
+  const btn    = document.getElementById('btn-commit');
+  const result = document.getElementById('commit-result');
+  if (!title) {
+    document.getElementById('commit-title').focus();
+    result.className = 'error';
+    result.textContent = 'El título del commit es requerido.';
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '⏳ Haciendo commit...';
+  result.className = '';
+  result.textContent = '';
+  try {
+    const r = await fetch('http://localhost:7000/api/commit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, body })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      result.className = 'ok';
+      result.textContent = '✓ Commit realizado: ' + (d.output || '').split('\n')[0];
+      document.getElementById('commit-title').value = '';
+      document.getElementById('commit-body').value = '';
+      setTimeout(() => { location.reload(); }, 2000);
+    } else {
+      result.className = 'error';
+      result.textContent = 'Error: ' + (d.error || 'Desconocido');
+    }
+  } catch(e) {
+    result.className = 'error';
+    result.textContent = 'Error de red: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = '💾 Hacer Commit';
+  loadGitStatus();
+}
 </script>
 </body>
 </html>

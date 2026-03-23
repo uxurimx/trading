@@ -641,7 +641,9 @@ class TradeController:
             if self.mode == AutoMode.SUGGEST:
                 notifier.proposal_ready(symbol, proposal.side, proposal.opp_score, self.goal_usd)
         else:
-            self._scan_log = "🤖 AI: sin setup válido en este momento"
+            from core.ai_strategy import ai_agent
+            reason = ai_agent.last_scan_reason
+            self._scan_log = f"🤖 AI: {reason}" if reason else "🤖 AI: sin setup válido en este momento"
             log.info("AI Strategy: sin propuesta")
         self._notify()
         return False   # no repetir idle_add
@@ -1062,6 +1064,20 @@ class TradeController:
             save_symbol_trade_detail(trade, self._last_ms.get(symbol))
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
             self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s, trade.close_reason)
+
+            # ── Shield: mostrar cuánto se ahorró vs llegar al SL original ──────────
+            if trade.request and trade.close_reason != "tp_hit":
+                planned_risk = abs(trade.request.risk_usd or 0.0)
+                if planned_risk > 0.001:
+                    shield_usd = trade.pnl_usd + planned_risk  # actual - (-riesgo)
+                    if shield_usd > 0.001:
+                        pct_saved = shield_usd / planned_risk * 100
+                        pnl_str = (f"+${trade.pnl_usd:.2f}" if trade.pnl_usd >= 0
+                                   else f"-${abs(trade.pnl_usd):.2f}")
+                        log.info(
+                            "[SHIELD] %s | PnL: %s | Shield: +$%.2f (%.0f%% del riesgo salvado)",
+                            symbol, pnl_str, shield_usd, pct_saved,
+                        )
 
             # ── Cooldown tras be_sl con pérdida: 10 min en la misma dirección ───────
             # Si el SL de breakeven se ejecutó pero el trade terminó en pérdida,

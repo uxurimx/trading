@@ -241,6 +241,7 @@ class AIStrategyAgent:
 
     def __init__(self) -> None:
         self._last_call_ts: float = 0.0
+        self.last_scan_reason: str = ""   # razón del último "sin propuesta" (para UI)
 
     def is_ready(self) -> bool:
         provider = getattr(settings, "ai_provider", "openai")
@@ -324,22 +325,51 @@ class AIStrategyAgent:
             # Contar candidatos que pasan TODOS los filtros (score + ATR + volumen 24h)
             _MIN_VOL_24H = 5_000_000.0
             n_candidates = 0
+            n_low_score = n_low_vol = n_low_atr = n_no_data = 0
+            top_all: list = []   # (score, sym) para todos con datos
+
+            self.last_scan_reason = ""
             for s in symbols:
                 opp  = opps.get(s)
                 tech = techs.get(s)
                 ms   = states.get(s)
-                if not opp or opp.score < settings.ai_min_score:
+                if not opp or not tech or not ms or ms.ticker.last_price <= 0:
+                    n_no_data += 1
                     continue
-                if not tech or not ms or ms.ticker.last_price <= 0:
+                top_all.append((opp.score, s, tech, ms))
+                if opp.score < settings.ai_min_score:
+                    n_low_score += 1
                     continue
                 if ms.ticker.volume_24h < _MIN_VOL_24H:
+                    n_low_vol += 1
                     continue
                 if tech.atr_15m / ms.ticker.last_price * 100 < settings.ai_min_atr_pct:
+                    n_low_atr += 1
                     continue
                 n_candidates += 1
 
             if n_candidates == 0:
-                log.debug("AI Strategy: 0 candidatos viables — omitiendo llamada a API")
+                top_all.sort(reverse=True)
+                top_info = ""
+                if top_all:
+                    ts, sym, tech, ms = top_all[0]
+                    price = ms.ticker.last_price
+                    atr_pct = tech.atr_15m / price * 100 if price > 0 else 0
+                    vol_m = ms.ticker.volume_24h / 1_000_000
+                    _regime = getattr(ms, "regime", "")
+                    regime = _regime.value if hasattr(_regime, "value") else str(_regime)
+                    top_info = (
+                        f" | top={sym.replace('USDT', '')} score={ts}"
+                        f" ATR={atr_pct:.2f}% vol=${vol_m:.1f}M {regime}"
+                    )
+                reason = (
+                    f"sin candidatos (score<{settings.ai_min_score}:{n_low_score}"
+                    f" vol<$5M:{n_low_vol}"
+                    f" ATR<{settings.ai_min_atr_pct}%:{n_low_atr}"
+                    f" sin_datos:{n_no_data}){top_info}"
+                )
+                self.last_scan_reason = reason
+                log.info("AI Strategy: sin propuesta — %s", reason)
                 return None, None, {}
 
             market_snapshot  = _build_market_snapshot(symbols, states, opps, techs)
@@ -459,6 +489,7 @@ class AIStrategyAgent:
             if action != "TRADE":
                 log.info("AI Strategy: NO_TRADE — %s", reasoning[:200])
                 strategy_logger.info("NO_TRADE", "La IA decidió no operar", {"reasoning": reasoning})
+                self.last_scan_reason = f"NO_TRADE: {reasoning[:150]}"
                 return None, None, token_info
 
             # ── Extraer y validar campos ───────────────────────────────────────────

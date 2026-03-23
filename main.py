@@ -41,6 +41,11 @@ def main() -> None:
             print("[QTS] Otro proceso tiene el lock de la DB (probablemente VS Code/Pylance).")
             print("[QTS] Cierra VS Code o espera unos segundos y vuelve a arrancar.\n")
         sys.exit(1)
+    try:
+        from tools.changelog_server import start_background as _start_changelog
+        _start_changelog(open_browser=False)
+    except Exception:
+        pass  # changelog server es opcional, no debe bloquear el sistema
     run()
 
 

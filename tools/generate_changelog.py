@@ -3,7 +3,7 @@
 tools/generate_changelog.py
 ────────────────────────────
 Genera index.html — Dashboard visual del changelog de QTS.
-Se ejecuta automáticamente vía post-commit hook de git.
+Se ejecuta automáticamente vía pre-commit hook de git.
 
 Uso manual:
     python3 tools/generate_changelog.py
@@ -81,7 +81,7 @@ def categorize(message: str) -> str:
 
 # ─── Parsear git log ──────────────────────────────────────────────────────────
 
-def parse_commits() -> list[dict]:
+def parse_commits() -> tuple[list[dict], dict]:
     # 1. Metadata: hash|short|subject|author|date|refs
     meta_raw = run_git(
         "log",
@@ -107,9 +107,35 @@ def parse_commits() -> list[dict]:
             "tags":    tags,
         })
 
-    # 2. Numstat: insertions/deletions/files per commit
+    # 2. Commit bodies — second pass using END_BODY sentinel
+    bodies: dict[str, str] = {}
+    body_raw = run_git(
+        "log",
+        "--pretty=format:COMMIT_HASH:%H%n%b%nEND_BODY",
+    )
+    current_hash = ""
+    body_lines: list[str] = []
+    for line in body_raw.splitlines():
+        if line.startswith("COMMIT_HASH:"):
+            if current_hash:
+                bodies[current_hash] = "\n".join(body_lines).strip()
+            current_hash = line[len("COMMIT_HASH:"):]
+            body_lines = []
+        elif line == "END_BODY":
+            if current_hash:
+                bodies[current_hash] = "\n".join(body_lines).strip()
+            current_hash = ""
+            body_lines = []
+        else:
+            if current_hash:
+                body_lines.append(line)
+    if current_hash:
+        bodies[current_hash] = "\n".join(body_lines).strip()
+
+    # 3. Numstat: insertions/deletions/files per commit — also store per-commit file list
     numstat_raw = run_git("log", "--pretty=format:COMMIT:%H", "--numstat")
     stats: dict[str, dict] = {}
+    files_per_commit: dict[str, list[dict]] = {}
     current_hash = ""
     file_changes: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
@@ -117,6 +143,7 @@ def parse_commits() -> list[dict]:
         if line.startswith("COMMIT:"):
             current_hash = line[7:]
             stats[current_hash] = {"ins": 0, "del": 0, "files": 0}
+            files_per_commit[current_hash] = []
         elif current_hash and line.strip() and "\t" in line:
             parts = line.split("\t")
             if len(parts) >= 3:
@@ -127,13 +154,14 @@ def parse_commits() -> list[dict]:
                     stats[current_hash]["ins"]   += ins
                     stats[current_hash]["del"]   += dels
                     stats[current_hash]["files"] += 1
+                    files_per_commit[current_hash].append({"file": fname, "ins": ins, "del": dels})
                     file_changes[fname]["ins"]   += ins
                     file_changes[fname]["dels"]  += dels
                     file_changes[fname]["commits"] += 1
                 except ValueError:
                     pass
 
-    # 3. Merge
+    # 4. Merge
     commits = []
     for c in commits_meta:
         h = c["hash"]
@@ -145,7 +173,14 @@ def parse_commits() -> list[dict]:
             if h.startswith(prefix) or c["short"].startswith(prefix):
                 version_label = label
                 break
-        commits.append({**c, **s, "cat": cat, "version": version_label})
+        commits.append({
+            **c,
+            **s,
+            "cat": cat,
+            "version": version_label,
+            "body": bodies.get(h, ""),
+            "files_list": files_per_commit.get(h, []),
+        })
 
     return commits, dict(file_changes)
 
@@ -226,6 +261,7 @@ def render_commit_card(c: dict) -> str:
     ins   = c["ins"]
     dels  = c["del"]
     files = c["files"]
+    full_hash = _esc(c["hash"])
 
     tags_html = ""
     for t in c.get("tags", []):
@@ -244,7 +280,7 @@ def render_commit_card(c: dict) -> str:
         )
 
     return f"""
-    <div class="commit-card" data-cat="{cat}" data-msg="{msg.lower()}">
+    <div class="commit-card" data-cat="{cat}" data-msg="{msg.lower()}" data-hash="{full_hash}" onclick="showCommitDetail(this)">
       <div class="commit-left">
         <span class="cat-pill" style="background:{color}22;color:{color};border-color:{color}44"
               title="{label}">{emoji} {label}</span>
@@ -339,6 +375,25 @@ def render_module_pills(modules: dict) -> str:
     return pills
 
 
+def build_commits_data_json(commits: list[dict]) -> str:
+    """Build window.COMMITS_DATA as JSON: hash -> {message, body, author, date, files_list, ins, del, cat, version}"""
+    data = {}
+    for c in commits:
+        data[c["hash"]] = {
+            "message":    c["message"],
+            "body":       c.get("body", ""),
+            "author":     c["author"],
+            "date":       c["date"],
+            "files_list": c.get("files_list", []),
+            "ins":        c["ins"],
+            "del":        c["del"],
+            "cat":        c["cat"],
+            "version":    c.get("version", ""),
+            "short":      c["short"],
+        }
+    return json.dumps(data, ensure_ascii=False)
+
+
 # ─── Template HTML principal ──────────────────────────────────────────────────
 
 def build_html(commits: list[dict], stats: dict, file_changes: dict) -> str:
@@ -347,6 +402,7 @@ def build_html(commits: list[dict], stats: dict, file_changes: dict) -> str:
     top_files_html = render_top_files(stats["top_files"])
     cat_bars_html  = render_cat_bars(stats["cat_dist"])
     module_html    = render_module_pills(stats["modules"])
+    commits_data_json = build_commits_data_json(commits)
 
     # Category filter pills (for JS filtering)
     filter_pills = '<button class="filter-pill active" data-cat="all">All</button>'
@@ -453,6 +509,26 @@ a:hover {{ text-decoration: underline; }}
   transition: background var(--trans), border-color var(--trans);
 }}
 .theme-btn:hover {{ background: var(--bg); border-color: var(--accent); }}
+
+/* ─── Top Nav Tabs ────────────────────────────────────────────────────────── */
+.top-nav {{
+  max-width: 1100px; margin: 0 auto;
+  padding: 0 24px;
+  display: flex; gap: 4px; border-bottom: 1px solid var(--border2);
+}}
+.nav-tab {{
+  padding: 10px 18px; font-size: 13px; font-weight: 500;
+  color: var(--text-sub); border: none; background: none;
+  cursor: pointer; border-bottom: 2px solid transparent;
+  transition: color var(--trans), border-color var(--trans);
+  white-space: nowrap;
+}}
+.nav-tab:hover {{ color: var(--text); }}
+.nav-tab.active {{ color: var(--text); border-bottom-color: var(--accent); }}
+
+/* ─── Tab Panels ─────────────────────────────────────────────────────────── */
+.tab-panel {{ display: block; }}
+.tab-panel.hidden {{ display: none; }}
 
 /* ─── Layout ─────────────────────────────────────────────────────────────── */
 .main-layout {{
@@ -587,6 +663,7 @@ a:hover {{ text-decoration: underline; }}
   padding: 12px 14px;
   display: flex; gap: 12px; align-items: flex-start;
   transition: border-color var(--trans), background var(--trans), transform var(--trans);
+  cursor: pointer;
 }}
 .commit-card:hover {{
   border-color: var(--border);
@@ -719,6 +796,263 @@ footer strong {{ color: var(--text-sub); }}
   display: flex; align-items: center; justify-content: center;
 }}
 .scroll-top.visible {{ opacity: 1; pointer-events: all; }}
+
+/* ─── Modal ──────────────────────────────────────────────────────────────── */
+.modal-overlay {{
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.7);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(4px);
+}}
+.modal-overlay.hidden {{ display: none; }}
+.modal-box {{
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 680px; width: 100%;
+  max-height: 85vh; overflow-y: auto;
+  box-shadow: 0 20px 60px #0009;
+  animation: modalIn .18s ease;
+}}
+@keyframes modalIn {{
+  from {{ opacity: 0; transform: scale(.96) translateY(8px); }}
+  to   {{ opacity: 1; transform: scale(1)  translateY(0); }}
+}}
+.modal-header {{
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid var(--border2);
+}}
+.modal-close {{
+  background: none; border: none; color: var(--text-muted);
+  font-size: 18px; cursor: pointer; padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color var(--trans), background var(--trans);
+}}
+.modal-close:hover {{ color: var(--text); background: var(--bg-card2); }}
+.modal-box h2 {{
+  font-size: 15px; font-weight: 600; padding: 16px 20px 8px;
+  line-height: 1.4; color: var(--text);
+}}
+.modal-meta {{
+  padding: 0 20px 12px;
+  display: flex; flex-wrap: wrap; gap: 10px;
+  font-size: 12px; color: var(--text-sub);
+  border-bottom: 1px solid var(--border2);
+}}
+.modal-meta code {{
+  font-family: "SFMono-Regular", Consolas, monospace;
+  background: var(--bg-card2); padding: 1px 6px;
+  border-radius: 4px; border: 1px solid var(--border2);
+  color: var(--accent2); font-size: 11px;
+}}
+.modal-section {{
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border2);
+}}
+.modal-section:last-child {{ border-bottom: none; }}
+.modal-section h4 {{
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: .5px; margin-bottom: 10px;
+}}
+.modal-body-pre {{
+  font-size: 13px; color: var(--text-sub);
+  white-space: pre-wrap; word-break: break-word; line-height: 1.6;
+}}
+.modal-notes-area {{
+  width: 100%; background: var(--bg-card2);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: 10px 12px; font-size: 13px;
+  resize: vertical; min-height: 80px; line-height: 1.5;
+  margin-bottom: 8px;
+}}
+.modal-notes-area:focus {{ outline: none; border-color: var(--accent); }}
+.btn-save-notes {{
+  font-size: 12px; padding: 6px 14px;
+  background: var(--accent); color: #fff; border: none;
+  border-radius: var(--radius-sm); cursor: pointer;
+  transition: opacity var(--trans);
+}}
+.btn-save-notes:hover {{ opacity: .85; }}
+
+/* ─── File change rows (modal) ───────────────────────────────────────────── */
+.file-change-row {{
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 0; font-size: 12px;
+  border-bottom: 1px solid var(--border2);
+}}
+.file-change-row:last-child {{ border-bottom: none; }}
+.file-change-name {{
+  flex: 1; font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--text-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.file-change-ins {{ color: var(--green); font-family: monospace; font-size: 11px; white-space: nowrap; }}
+.file-change-del {{ color: var(--red);   font-family: monospace; font-size: 11px; white-space: nowrap; }}
+
+/* ─── Tasks Panel ────────────────────────────────────────────────────────── */
+#panel-tasks {{
+  max-width: 1100px; margin: 0 auto; padding: 32px 24px;
+}}
+.tasks-header {{
+  margin-bottom: 24px;
+}}
+.tasks-header h2 {{
+  font-size: 20px; font-weight: 700; margin-bottom: 14px;
+}}
+.task-add-row {{
+  display: flex; gap: 8px; flex-wrap: wrap;
+}}
+.task-add-row select, .task-add-row input {{
+  background: var(--bg-card); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--radius-sm);
+  padding: 8px 12px; font-size: 13px;
+  transition: border-color var(--trans);
+}}
+.task-add-row select {{ min-width: 130px; }}
+.task-add-row input {{ flex: 1; min-width: 200px; }}
+.task-add-row select:focus, .task-add-row input:focus {{
+  outline: none; border-color: var(--accent);
+}}
+.task-add-row button {{
+  background: var(--accent); color: #fff; border: none;
+  border-radius: var(--radius-sm); padding: 8px 18px;
+  font-size: 13px; cursor: pointer; font-weight: 600;
+  transition: opacity var(--trans);
+}}
+.task-add-row button:hover {{ opacity: .85; }}
+
+.tasks-group {{ margin-bottom: 28px; }}
+.tasks-group-title {{
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .6px; color: var(--text-muted); margin-bottom: 10px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border2);
+}}
+
+.task-item {{
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-bottom: 8px;
+  transition: border-color var(--trans);
+}}
+.task-item:hover {{ border-color: var(--border); }}
+.task-done {{ opacity: .5; }}
+.task-done .task-text {{ text-decoration: line-through; }}
+
+.type-task      {{ border-left-color: #3b82f6; }}
+.type-objective {{ border-left-color: #f59e0b; }}
+.type-note      {{ border-left-color: #8b5cf6; }}
+.type-bug       {{ border-left-color: #f85149; }}
+
+.task-check {{
+  margin-top: 2px; flex-shrink: 0;
+  width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);
+}}
+.task-text {{ flex: 1; font-size: 13px; line-height: 1.5; }}
+.task-meta {{ font-size: 10px; color: var(--text-muted); margin-top: 3px; }}
+.task-del {{
+  background: none; border: none; color: var(--text-muted);
+  font-size: 14px; cursor: pointer; padding: 2px 4px;
+  border-radius: 4px; line-height: 1;
+  transition: color var(--trans), background var(--trans);
+}}
+.task-del:hover {{ color: var(--red); background: #f8514918; }}
+
+/* ─── Commit Panel ───────────────────────────────────────────────────────── */
+#panel-commit {{
+  max-width: 800px; margin: 0 auto; padding: 32px 24px;
+}}
+.commit-panel h2 {{
+  font-size: 20px; font-weight: 700; margin-bottom: 20px;
+}}
+.server-status {{
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 4px 12px;
+  border-radius: 20px; margin-bottom: 20px;
+  border: 1px solid;
+}}
+.server-status.ok    {{ color: var(--green); border-color: #3fb95033; background: #3fb95011; }}
+.server-status.error {{ color: var(--red);   border-color: #f8514933; background: #f8514911; }}
+.server-status.checking {{ color: var(--yellow); border-color: #e3b34133; background: #e3b34111; }}
+
+#commit-form input, #commit-form textarea {{
+  width: 100%; background: var(--bg-card);
+  border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius-sm); padding: 10px 14px;
+  font-size: 13px; margin-bottom: 12px;
+  transition: border-color var(--trans);
+  font-family: inherit;
+}}
+#commit-form input:focus, #commit-form textarea:focus {{
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px #7c5cbf22;
+}}
+#commit-form textarea {{ resize: vertical; line-height: 1.5; }}
+
+.staged-file {{
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; font-size: 12px;
+  border-bottom: 1px solid var(--border2);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--text-sub);
+}}
+.staged-file:last-child {{ border-bottom: none; }}
+.staged-file-status {{
+  font-size: 10px; font-weight: 700; padding: 1px 5px;
+  border-radius: 3px; text-transform: uppercase;
+}}
+.staged-M {{ color: #e3b341; background: #e3b34120; }}
+.staged-A {{ color: var(--green); background: #3fb95020; }}
+.staged-D {{ color: var(--red); background: #f8514920; }}
+.staged-R {{ color: var(--accent2); background: #58a6ff20; }}
+
+#staged-files-list {{
+  background: var(--bg-card2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 14px;
+  margin-bottom: 14px; min-height: 48px;
+}}
+.staged-empty {{ font-size: 13px; color: var(--text-muted); text-align: center; padding: 8px 0; }}
+
+.commit-actions {{
+  display: flex; gap: 10px; margin-bottom: 12px;
+}}
+.btn-primary {{
+  background: var(--accent); color: #fff; border: none;
+  border-radius: var(--radius-sm); padding: 9px 20px;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: opacity var(--trans);
+}}
+.btn-primary:hover {{ opacity: .85; }}
+.btn-primary:disabled {{ opacity: .4; cursor: not-allowed; }}
+.btn-secondary {{
+  background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 9px 16px;
+  font-size: 13px; cursor: pointer;
+  transition: border-color var(--trans);
+}}
+.btn-secondary:hover {{ border-color: var(--accent); }}
+
+#commit-result {{
+  font-size: 13px; padding: 10px 14px;
+  border-radius: var(--radius-sm); margin-top: 8px;
+}}
+#commit-result.ok    {{ background: #3fb95018; color: var(--green); border: 1px solid #3fb95033; }}
+#commit-result.error {{ background: #f8514918; color: var(--red);   border: 1px solid #f8514933; }}
+
+#no-server-msg {{
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 24px; text-align: center;
+}}
+#no-server-msg p {{ color: var(--text-sub); margin-bottom: 12px; font-size: 14px; }}
+#no-server-msg code {{
+  display: block; background: var(--bg-card2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 16px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--accent2); font-size: 13px;
+}}
 </style>
 </head>
 <body>
@@ -736,9 +1070,15 @@ footer strong {{ color: var(--text-sub); }}
       <button class="theme-btn" id="themeBtn" title="Toggle theme">🌙</button>
     </div>
   </div>
+  <nav class="top-nav">
+    <button class="nav-tab active" data-panel="changelog" onclick="switchTab(this)">📋 Changelog</button>
+    <button class="nav-tab" data-panel="tasks" onclick="switchTab(this)">📋 Tareas</button>
+    <button class="nav-tab" data-panel="commit" onclick="switchTab(this)">💾 Commit</button>
+  </nav>
 </header>
 
-<!-- MAIN -->
+<!-- CHANGELOG PANEL -->
+<div id="panel-changelog" class="tab-panel">
 <div class="main-layout">
 
   <!-- STATS BAR -->
@@ -849,6 +1189,67 @@ footer strong {{ color: var(--text-sub); }}
   </aside>
 
 </div>
+</div>
+
+<!-- TASKS PANEL -->
+<div id="panel-tasks" class="tab-panel hidden">
+  <div class="tasks-header">
+    <h2>Tareas & Objetivos</h2>
+    <div class="task-add-row">
+      <select id="task-type">
+        <option value="task">✅ Tarea</option>
+        <option value="objective">🎯 Objetivo</option>
+        <option value="note">📝 Nota</option>
+        <option value="bug">🐛 Bug</option>
+      </select>
+      <input id="task-input" placeholder="Descripción..." onkeydown="if(event.key==='Enter') addTask()" />
+      <button onclick="addTask()">Agregar</button>
+    </div>
+  </div>
+  <div id="tasks-list"></div>
+</div>
+
+<!-- COMMIT PANEL -->
+<div id="panel-commit" class="tab-panel hidden">
+  <div class="commit-panel">
+    <h2>💾 Hacer Commit</h2>
+    <div class="server-status checking" id="server-status">⚡ Verificando servidor...</div>
+    <div id="commit-form" class="hidden">
+      <div id="staged-files-list"><div class="staged-empty">Cargando archivos...</div></div>
+      <input id="commit-title" placeholder="Título del commit (requerido)" />
+      <textarea id="commit-body" placeholder="Descripción detallada (opcional)&#10;&#10;Qué cambió y por qué..." rows="6"></textarea>
+      <div class="commit-actions">
+        <button onclick="loadGitStatus()" class="btn-secondary">↻ Actualizar</button>
+        <button onclick="doCommit()" class="btn-primary" id="btn-commit">💾 Hacer Commit</button>
+      </div>
+      <div id="commit-result"></div>
+    </div>
+    <div id="no-server-msg" class="hidden">
+      <p>Servidor no disponible. Ejecuta:</p>
+      <code>python3 tools/changelog_server.py</code>
+    </div>
+  </div>
+</div>
+
+<!-- COMMIT DETAIL MODAL -->
+<div id="commit-modal" class="modal-overlay hidden" onclick="closeModal(event)">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span id="modal-cat-pill"></span>
+      <button class="modal-close" onclick="document.getElementById('commit-modal').classList.add('hidden')">✕</button>
+    </div>
+    <h2 id="modal-title"></h2>
+    <div class="modal-meta" id="modal-meta"></div>
+    <div class="modal-section" id="modal-body-section">
+      <h4>📋 Descripción</h4>
+      <div id="modal-body-text"></div>
+    </div>
+    <div class="modal-section" id="modal-files-section">
+      <h4>📁 Archivos cambiados</h4>
+      <div id="modal-files-list"></div>
+    </div>
+  </div>
+</div>
 
 <footer>
   Auto-generated by <strong>QTS Changelog Generator</strong> ·
@@ -859,6 +1260,20 @@ footer strong {{ color: var(--text-sub); }}
 <button class="scroll-top" id="scrollTop" title="Volver arriba">↑</button>
 
 <script>
+// ─── Commits data (embedded) ────────────────────────────────────────────────
+window.COMMITS_DATA = {commits_data_json};
+
+// ─── Tab switching ──────────────────────────────────────────────────────────
+function switchTab(btn) {{
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  const panel = btn.dataset.panel;
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+  document.getElementById('panel-' + panel).classList.remove('hidden');
+  if (panel === 'commit') initCommitPanel();
+  if (panel === 'tasks') renderTasks();
+}}
+
 // ─── Theme toggle ──────────────────────────────────────────────────────────
 const root    = document.documentElement;
 const themeBtn= document.getElementById('themeBtn');
@@ -919,6 +1334,286 @@ window.addEventListener('scroll', () => {{
   scrollBtn.classList.toggle('visible', window.scrollY > 400);
 }});
 scrollBtn.addEventListener('click', () => window.scrollTo({{ top: 0, behavior: 'smooth' }}));
+
+// ─── Commit Detail Modal ───────────────────────────────────────────────────
+const CATEGORIES_META = {json.dumps({k: list(v) for k, v in CATEGORIES.items()})};
+
+function showCommitDetail(card) {{
+  const hash = card.dataset.hash;
+  const data = window.COMMITS_DATA[hash];
+  if (!data) return;
+
+  const [emoji, label, color] = CATEGORIES_META[data.cat] || ['📝', 'Misc', '#94a3b8'];
+
+  // Category pill
+  const pill = document.getElementById('modal-cat-pill');
+  pill.textContent = emoji + ' ' + label;
+  pill.style.cssText = 'font-size:11px;font-weight:600;padding:3px 10px;border-radius:10px;border:1px solid;' +
+    'background:' + color + '22;color:' + color + ';border-color:' + color + '44';
+
+  // Title
+  document.getElementById('modal-title').textContent = data.message;
+
+  // Meta
+  document.getElementById('modal-meta').innerHTML =
+    '<code>' + data.short + '</code>' +
+    '<span>👤 ' + escHtml(data.author) + '</span>' +
+    '<span>📅 ' + escHtml(data.date) + '</span>' +
+    (data.version ? '<span class="version-badge">' + escHtml(data.version) + '</span>' : '') +
+    '<span class="stat-chip ins">+' + data.ins + '</span>' +
+    '<span class="stat-chip del">−' + data.del + '</span>';
+
+  // Body / notes
+  const bodySection = document.getElementById('modal-body-section');
+  const bodyText    = document.getElementById('modal-body-text');
+  if (data.body && data.body.trim()) {{
+    bodyText.innerHTML = '<div class="modal-body-pre">' + escHtml(data.body) + '</div>';
+    bodySection.style.display = '';
+  }} else {{
+    // Editable notes area — saves to server if available
+    bodyText.innerHTML =
+      '<textarea class="modal-notes-area" id="notes-area-' + escHtml(hash) + '" ' +
+      'placeholder="Agregar descripción/notas para este commit..."></textarea>' +
+      '<button class="btn-save-notes" onclick="saveNotes(\'' + escHtml(hash) + '\')">Guardar nota</button>' +
+      '<span id="notes-save-msg-' + escHtml(hash) + '" style="font-size:11px;color:var(--text-muted);margin-left:8px"></span>';
+    // Pre-fill from localStorage
+    const stored = localStorage.getItem('qts-note-' + hash);
+    if (stored) document.getElementById('notes-area-' + hash).value = stored;
+    bodySection.style.display = '';
+  }}
+
+  // Files changed
+  const filesSection = document.getElementById('modal-files-section');
+  const filesList    = document.getElementById('modal-files-list');
+  if (data.files_list && data.files_list.length > 0) {{
+    filesList.innerHTML = data.files_list.map(f =>
+      '<div class="file-change-row">' +
+      '<span class="file-change-name">' + escHtml(f.file) + '</span>' +
+      '<span class="file-change-ins">+' + f.ins + '</span>' +
+      '<span class="file-change-del">-' + f.del + '</span>' +
+      '</div>'
+    ).join('');
+    filesSection.style.display = '';
+  }} else {{
+    filesSection.style.display = 'none';
+  }}
+
+  document.getElementById('commit-modal').classList.remove('hidden');
+}}
+
+function closeModal(event) {{
+  const box = document.querySelector('.modal-box');
+  if (!box.contains(event.target)) {{
+    document.getElementById('commit-modal').classList.add('hidden');
+  }}
+}}
+
+document.addEventListener('keydown', e => {{
+  if (e.key === 'Escape') {{
+    document.getElementById('commit-modal').classList.add('hidden');
+  }}
+}});
+
+function saveNotes(hash) {{
+  const area = document.getElementById('notes-area-' + hash);
+  if (!area) return;
+  const text = area.value.trim();
+  localStorage.setItem('qts-note-' + hash, text);
+  const msg = document.getElementById('notes-save-msg-' + hash);
+  if (msg) {{ msg.textContent = '✓ Guardado'; setTimeout(() => {{ msg.textContent = ''; }}, 2000); }}
+  // Also try server
+  fetch('http://localhost:7000/api/commit-notes', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ hash, note: text }})
+  }}).catch(() => {{}});
+}}
+
+function escHtml(s) {{
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}}
+
+// ─── Tasks (localStorage) ──────────────────────────────────────────────────
+const TYPE_ICONS = {{ task: '✅', objective: '🎯', note: '📝', bug: '🐛' }};
+const TYPE_LABELS = {{ task: 'Tareas', objective: 'Objetivos', note: 'Notas', bug: 'Bugs' }};
+
+function loadTasks() {{
+  try {{
+    return JSON.parse(localStorage.getItem('qts_tasks') || '[]');
+  }} catch(e) {{ return []; }}
+}}
+
+function saveTasks(tasks) {{
+  localStorage.setItem('qts_tasks', JSON.stringify(tasks));
+}}
+
+function addTask() {{
+  const typeEl = document.getElementById('task-type');
+  const inputEl = document.getElementById('task-input');
+  const text = inputEl.value.trim();
+  if (!text) {{ inputEl.focus(); return; }}
+  const tasks = loadTasks();
+  tasks.unshift({{
+    id: Date.now(),
+    type: typeEl.value,
+    text,
+    done: false,
+    created: new Date().toLocaleString()
+  }});
+  saveTasks(tasks);
+  inputEl.value = '';
+  renderTasks();
+}}
+
+function toggleTask(id) {{
+  const tasks = loadTasks();
+  const t = tasks.find(t => t.id === id);
+  if (t) {{ t.done = !t.done; saveTasks(tasks); renderTasks(); }}
+}}
+
+function deleteTask(id) {{
+  const tasks = loadTasks().filter(t => t.id !== id);
+  saveTasks(tasks);
+  renderTasks();
+}}
+
+function renderTasks() {{
+  const tasks = loadTasks();
+  const container = document.getElementById('tasks-list');
+  if (!container) return;
+
+  if (tasks.length === 0) {{
+    container.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:40px 0;font-size:14px">No hay tareas aún. ¡Agrega una arriba!</p>';
+    return;
+  }}
+
+  const byType = {{}};
+  tasks.forEach(t => {{
+    if (!byType[t.type]) byType[t.type] = [];
+    byType[t.type].push(t);
+  }});
+
+  const order = ['bug', 'objective', 'task', 'note'];
+  let html = '';
+  order.forEach(type => {{
+    const group = byType[type];
+    if (!group || group.length === 0) return;
+    html += '<div class="tasks-group">';
+    html += '<div class="tasks-group-title">' + TYPE_ICONS[type] + ' ' + TYPE_LABELS[type] + ' (' + group.length + ')</div>';
+    group.forEach(t => {{
+      html += '<div class="task-item type-' + t.type + (t.done ? ' task-done' : '') + '">' +
+        '<input type="checkbox" class="task-check" ' + (t.done ? 'checked' : '') +
+        ' onchange="toggleTask(' + t.id + ')" title="Marcar como ' + (t.done ? 'pendiente' : 'hecho') + '">' +
+        '<div style="flex:1">' +
+        '<div class="task-text">' + escHtml(t.text) + '</div>' +
+        '<div class="task-meta">' + escHtml(t.created) + '</div>' +
+        '</div>' +
+        '<button class="task-del" onclick="deleteTask(' + t.id + ')" title="Eliminar">✕</button>' +
+        '</div>';
+    }});
+    html += '</div>';
+  }});
+  container.innerHTML = html;
+}}
+
+// ─── Commit Panel ──────────────────────────────────────────────────────────
+let serverAvailable = false;
+
+async function initCommitPanel() {{
+  const statusEl = document.getElementById('server-status');
+  const formEl   = document.getElementById('commit-form');
+  const noSrvEl  = document.getElementById('no-server-msg');
+  statusEl.className = 'server-status checking';
+  statusEl.textContent = '⚡ Verificando servidor...';
+  try {{
+    const r = await fetch('http://localhost:7000/api/ping', {{ signal: AbortSignal.timeout(2000) }});
+    const d = await r.json();
+    if (d.ok) {{
+      serverAvailable = true;
+      statusEl.className = 'server-status ok';
+      statusEl.textContent = '● Servidor conectado en localhost:7000';
+      formEl.classList.remove('hidden');
+      noSrvEl.classList.add('hidden');
+      loadGitStatus();
+      return;
+    }}
+  }} catch(e) {{}}
+  serverAvailable = false;
+  statusEl.className = 'server-status error';
+  statusEl.textContent = '● Servidor no disponible';
+  formEl.classList.add('hidden');
+  noSrvEl.classList.remove('hidden');
+}}
+
+async function loadGitStatus() {{
+  if (!serverAvailable) return;
+  const listEl = document.getElementById('staged-files-list');
+  try {{
+    const r = await fetch('http://localhost:7000/api/status');
+    const d = await r.json();
+    const all = [
+      ...(d.staged   || []).map(f => ({{ ...f, area: 'staged' }})),
+      ...(d.unstaged || []).map(f => ({{ ...f, area: 'unstaged' }})),
+    ];
+    if (all.length === 0) {{
+      listEl.innerHTML = '<div class="staged-empty">Sin cambios detectados.</div>';
+      return;
+    }}
+    listEl.innerHTML = all.map(f =>
+      '<div class="staged-file">' +
+      '<span class="staged-file-status staged-' + f.status + '">' + f.status + '</span>' +
+      '<span style="flex:1">' + escHtml(f.file) + '</span>' +
+      (f.area === 'staged'
+        ? '<span style="font-size:10px;color:var(--green)">staged</span>'
+        : '<span style="font-size:10px;color:var(--yellow)">unstaged</span>') +
+      '</div>'
+    ).join('');
+  }} catch(e) {{
+    listEl.innerHTML = '<div class="staged-empty" style="color:var(--red)">Error al obtener estado git.</div>';
+  }}
+}}
+
+async function doCommit() {{
+  if (!serverAvailable) return;
+  const title  = document.getElementById('commit-title').value.trim();
+  const body   = document.getElementById('commit-body').value.trim();
+  const btn    = document.getElementById('btn-commit');
+  const result = document.getElementById('commit-result');
+  if (!title) {{
+    document.getElementById('commit-title').focus();
+    result.className = 'error';
+    result.textContent = 'El título del commit es requerido.';
+    return;
+  }}
+  btn.disabled = true;
+  btn.textContent = '⏳ Haciendo commit...';
+  result.className = '';
+  result.textContent = '';
+  try {{
+    const r = await fetch('http://localhost:7000/api/commit', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ title, body }})
+    }});
+    const d = await r.json();
+    if (d.ok) {{
+      result.className = 'ok';
+      result.textContent = '✓ Commit realizado: ' + (d.output || '').split('\\n')[0];
+      document.getElementById('commit-title').value = '';
+      document.getElementById('commit-body').value = '';
+      setTimeout(() => {{ location.reload(); }}, 2000);
+    }} else {{
+      result.className = 'error';
+      result.textContent = 'Error: ' + (d.error || 'Desconocido');
+    }}
+  }} catch(e) {{
+    result.className = 'error';
+    result.textContent = 'Error de red: ' + e.message;
+  }}
+  btn.disabled = false;
+  btn.textContent = '💾 Hacer Commit';
+  loadGitStatus();
+}}
 </script>
 </body>
 </html>"""

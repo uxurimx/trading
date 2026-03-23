@@ -191,6 +191,16 @@ def initialize_db() -> None:
     except Exception:
         pass
 
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS changelog_tasks (
+            id         VARCHAR PRIMARY KEY,
+            text       TEXT    NOT NULL DEFAULT '',
+            type       VARCHAR DEFAULT 'task',
+            done       BOOLEAN DEFAULT FALSE,
+            created_at BIGINT  NOT NULL DEFAULT 0
+        )
+    """)
+
     # Migraciones: agregar columnas si no existen (bases de datos previas)
     for migration in [
         "ALTER TABLE trade_journal ADD COLUMN strategy_tag VARCHAR DEFAULT 'absorcion'",
@@ -954,6 +964,45 @@ def save_symbol_trade_detail(trade: "TradeRecord", ms=None) -> None:
                   trade.id, trade.symbol, trade.pnl_usd)
     except Exception as e:
         log.error("save_symbol_trade_detail falló: %s", e)
+
+
+def get_changelog_tasks() -> list:
+    """Retorna la lista de tareas del changelog."""
+    try:
+        con = get_connection()
+        rows = con.execute("""
+            SELECT id, text, type, done, created_at
+            FROM changelog_tasks ORDER BY created_at ASC
+        """).fetchall()
+        con.close()
+        return [
+            {"id": r[0], "text": r[1], "type": r[2], "done": bool(r[3]), "createdAt": int(r[4])}
+            for r in rows
+        ]
+    except Exception as e:
+        log.error("get_changelog_tasks falló: %s", e)
+        return []
+
+
+def save_changelog_tasks(tasks: list) -> None:
+    """Reemplaza toda la lista de tareas del changelog."""
+    try:
+        con = get_connection()
+        con.execute("DELETE FROM changelog_tasks")
+        for task in tasks:
+            con.execute(
+                "INSERT INTO changelog_tasks (id, text, type, done, created_at) VALUES (?,?,?,?,?)",
+                (
+                    task.get("id", ""),
+                    task.get("text", ""),
+                    task.get("type", "task"),
+                    bool(task.get("done", False)),
+                    int(task.get("createdAt", int(time.time() * 1000))),
+                ),
+            )
+        con.close()
+    except Exception as e:
+        log.error("save_changelog_tasks falló: %s", e)
 
 
 def get_symbol_stats(symbol: str = None) -> list:
