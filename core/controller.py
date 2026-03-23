@@ -53,7 +53,6 @@ MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 
 # ─── Auxiliares de cálculo ────────────────────────────────────────────────────
 _BE_FEE_PCT        = 0.0025   # 0.11% round-trip fees + 0.14% slippage buffer para alts de baja liquidez
-_MIN_BE_PROGRESS   = 0.01     # progreso mínimo absoluto para mover a BE (evita t=0)
 _SL_WATCHDOG_S     = 30.0     # cada 30s verificar que el SL sigue activo en Bybit
 
 
@@ -1192,13 +1191,20 @@ class TradeController:
 
     def _manage_auto_protections(self, sym, trade, mark, entry, sl_dist, progress, now, be_held, ms, tech):
         """
-        Trailing Stop Escalonado en 3 niveles. El SL nunca retrocede.
+        Trailing Stop Progresivo en 6 niveles. El SL nunca retrocede (ratchet).
 
-        Nivel 1 — BE:   PnL neto cubre fees → SL a fee_be_price (entry ± 0.25%).
-        Nivel 2 — 40%:  Precio llega al 40% del camino al TP → SL al 25% del profit.
-        Nivel 3 — 80%:  Precio llega al 80% del camino al TP → SL al 60% del profit.
+        Fase 1 — Reducción gradual de riesgo (G1/G2/G3):
+          G1 @ 20%:   SL avanza 35% del camino desde orig_sl hacia entry  (65% riesgo restante)
+          G2 @ 40%:   SL avanza 65% del camino desde orig_sl hacia entry  (35% riesgo restante)
+          G3 @ 60%:   SL avanza 90% del camino desde orig_sl hacia entry  (10% riesgo restante)
 
-        Guard: SL siempre ≥ 0.1% de distancia al MarkPrice para evitar Error 10001.
+        Fase 2 — Territorio de ganancia (L1-BE / L2 / L3):
+          L1-BE @ 70%: SL en entry ± fee_buffer (sin pérdida de fees)
+          L2    @ 80%: SL al 25% del profit  (25% del camino entry→TP)
+          L3    @ 92%: SL al 60% del profit  (60% del camino entry→TP)
+
+        Guard: SL siempre ≥ 0.3% de distancia al MarkPrice para evitar Error 10001.
+        (El MarkPrice de Bybit puede diferir ≤0.2% del mark local — el buffer extra lo cubre.)
         """
         is_long = trade.request.side == "Buy"
         req     = trade.request
@@ -1212,65 +1218,82 @@ class TradeController:
         fee_buffer   = entry * _BE_FEE_PCT
         fee_be_price = (entry + fee_buffer) if is_long else (entry - fee_buffer)
 
-        tp_ref  = trade.request.tp_price if (trade.request and trade.request.tp_price > 0) else trade.current_tp
+        tp_ref  = req.tp_price if (req and req.tp_price > 0) else trade.current_tp
         tp_dist = abs(tp_ref - entry) if tp_ref > 0 else 0.0
 
-        current_benefit = (mark - entry) if is_long else (entry - mark)
+        # SL original del setup — base para los pasos G1/G2/G3
+        orig_sl   = req.sl_price if (req and req.sl_price > 0) else trade.current_sl
+        orig_dist = abs(entry - orig_sl)
 
-        # Determinar el mejor SL candidato según el nivel más avanzado
         new_sl    = None
         new_state = trade.state
         reason    = ""
 
-        # ── Nivel 1: BE — PnL positivo (cubre fees de entrada y salida) ──────
-        if current_benefit >= fee_buffer:
-            candidate = fee_be_price
-            if (is_long and candidate > trade.current_sl) or \
-               (not is_long and candidate < trade.current_sl):
+        def _update(candidate: float, new_reason: str, next_state=None) -> None:
+            nonlocal new_sl, new_state, reason
+            floor = new_sl if new_sl is not None else trade.current_sl
+            improves = (candidate > floor) if is_long else (candidate < floor)
+            if improves:
                 new_sl    = candidate
-                new_state = TradeState.BREAKEVEN if trade.state == TradeState.OPEN else trade.state
-                reason    = "L1-BE"
+                new_state = next_state if next_state is not None else trade.state
+                reason    = new_reason
 
-        # ── Nivel 2: 40% del camino al TP → SL al 25% del profit ─────────────
-        if tp_dist > 0 and progress >= 0.40:
-            profit_25 = (entry + tp_dist * 0.25) if is_long else (entry - tp_dist * 0.25)
-            floor     = new_sl if new_sl is not None else trade.current_sl
-            if (is_long and profit_25 > floor) or (not is_long and profit_25 < floor):
-                new_sl    = profit_25
-                new_state = TradeState.TRAILING
-                reason    = "L2-40%"
+        # ── Fase 1: Reducción gradual de riesgo ──────────────────────────────
+        if tp_dist > 0 and orig_dist > 0:
+            # G1: 20% → SL reduce 35% del riesgo inicial (queda 65% de distancia)
+            if progress >= 0.20:
+                g1 = (entry - orig_dist * 0.65) if is_long else (entry + orig_dist * 0.65)
+                _update(g1, "G1-20%")
 
-        # ── Nivel 3: 80% del camino al TP → SL al 60% del profit ─────────────
+            # G2: 40% → SL reduce 65% del riesgo inicial (queda 35%)
+            if progress >= 0.40:
+                g2 = (entry - orig_dist * 0.35) if is_long else (entry + orig_dist * 0.35)
+                _update(g2, "G2-40%")
+
+            # G3: 60% → SL reduce 90% del riesgo inicial (queda 10%)
+            if progress >= 0.60:
+                g3 = (entry - orig_dist * 0.10) if is_long else (entry + orig_dist * 0.10)
+                _update(g3, "G3-60%")
+
+        # ── Fase 2: Territorio de ganancia ───────────────────────────────────
+        # L1-BE: 70% → SL en break-even (entry ± fees)
+        if progress >= 0.70:
+            _update(fee_be_price, "L1-BE",
+                    TradeState.BREAKEVEN if trade.state == TradeState.OPEN else None)
+
+        # L2: 80% → lock 25% del profit
         if tp_dist > 0 and progress >= 0.80:
+            profit_25 = (entry + tp_dist * 0.25) if is_long else (entry - tp_dist * 0.25)
+            _update(profit_25, "L2-80%", TradeState.TRAILING)
+
+        # L3: 92% → lock 60% del profit
+        if tp_dist > 0 and progress >= 0.92:
             profit_60 = (entry + tp_dist * 0.60) if is_long else (entry - tp_dist * 0.60)
-            floor     = new_sl if new_sl is not None else trade.current_sl
-            if (is_long and profit_60 > floor) or (not is_long and profit_60 < floor):
-                new_sl    = profit_60
-                new_state = TradeState.TRAILING
-                reason    = "L3-80%"
+            _update(profit_60, "L3-92%", TradeState.TRAILING)
 
         if new_sl is None:
             return
 
         # ── Guard: distancia mínima al MarkPrice (previene Error 10001) ───────
-        # Para LONG: SL debe estar < MarkPrice; para SHORT: SL debe estar > MarkPrice.
-        _MIN_DIST = 0.001   # 0.1% mínimo de distancia al MarkPrice
+        # Bybit puede tener un MarkPrice hasta ~0.2% diferente del mark local.
+        # Usamos 0.3% de buffer para absorber esa divergencia con margen.
+        _MIN_DIST = 0.003   # 0.3% mínimo de distancia al MarkPrice
         if is_long:
             max_allowed = mark * (1.0 - _MIN_DIST)
             if new_sl > max_allowed:
-                log.debug("SL guard LONG %s: %.6g → %.6g (mark=%.6g -0.1%%)",
+                log.debug("SL guard LONG %s: %.6g → %.6g (mark=%.6g -0.3%%)",
                            sym, new_sl, max_allowed, mark)
                 new_sl = max_allowed
                 if new_sl <= trade.current_sl:
-                    return   # Clip eliminó la ganancia — no enviar
+                    return   # Clip eliminó la mejora — no enviar
         else:
             min_allowed = mark * (1.0 + _MIN_DIST)
             if new_sl < min_allowed:
-                log.debug("SL guard SHORT %s: %.6g → %.6g (mark=%.6g +0.1%%)",
+                log.debug("SL guard SHORT %s: %.6g → %.6g (mark=%.6g +0.3%%)",
                            sym, new_sl, min_allowed, mark)
                 new_sl = min_allowed
                 if new_sl >= trade.current_sl:
-                    return   # Clip eliminó la ganancia — no enviar
+                    return   # Clip eliminó la mejora — no enviar
 
         # ── Aplicar ───────────────────────────────────────────────────────────
         old_sl     = trade.current_sl
