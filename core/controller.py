@@ -28,7 +28,7 @@ from core.order_model import (
 )
 from core.strategy import StrategyEngine
 from core.config import settings
-from core.db import save_trade
+from core.db import save_trade, get_active_session
 from core.session import SessionManager, SessionStatus
 from core.audit_agent import audit_agent
 import core.notifier as notifier
@@ -54,6 +54,12 @@ MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 # ─── Auxiliares de cálculo ────────────────────────────────────────────────────
 _BE_FEE_PCT        = 0.0025   # 0.11% round-trip fees + 0.14% slippage buffer para alts de baja liquidez
 _SL_WATCHDOG_S     = 30.0     # cada 30s verificar que el SL sigue activo en Bybit
+
+# Trade Viability Monitor
+_VIABILITY_MIN_ELAPSED = 180   # esperar 3 min antes de evaluar viabilidad
+_VIABILITY_STALE_S     = 120   # precio debe llevar ≥2 min contra el trade
+_VIABILITY_CHECK_S     = 60    # throttle: evaluar máximo cada 60 s
+_VIABILITY_THRESHOLD   = 4     # ≥4 de 6 señales adversas para cerrar
 
 
 class TradeController:
@@ -128,10 +134,14 @@ class TradeController:
         self._slippage_blacklist: Dict[str, float] = {}
         # SL Watchdog: timestamp (monotonic) de la última verificación REST por símbolo
         self._sl_watchdog_ts:  Dict[str, float]    = {}
+        # Trade Viability Monitor
+        self._price_against_since: Dict[str, float] = {}  # cuándo precio fue contra el trade
+        self._viability_last_ts:   Dict[str, float] = {}  # última evaluación de viabilidad
 
         # ── Módulo de Sesiones (TSAA) ──
         self._session: Optional[SessionManager] = None
         self._last_balance: float = 0.0
+        self._auto_restore_done: bool = False   # evitar chequear DB en cada tick
 
     # ── API pública ───────────────────────────────────────────────────────────
 
@@ -172,15 +182,43 @@ class TradeController:
         self._duration_set_ts = time.time()
         self._notify()
 
-    def start_session(self) -> bool:
-        """Inicia manualmente una nueva sesión TSAA."""
+    def start_session(
+        self,
+        name:         str   = "",
+        target_pnl:   float = 0.0,
+        max_drawdown: float = 0.0,
+        duration_h:   float = 0.0,
+    ) -> bool:
+        """Inicia manualmente una nueva sesión TSAA con objetivos opcionales."""
         if self._session:
             return False
         if self._last_balance <= 0:
             log.warning("[TSAA] No se puede iniciar sesión sin balance conocido.")
             return False
-            
-        self._session = SessionManager(self._last_balance)
+        self._session = SessionManager(
+            self._last_balance,
+            name=name,
+            target_pnl=target_pnl,
+            max_drawdown=max_drawdown,
+            duration_h=duration_h,
+        )
+        self.set_mode(AutoMode.FULL_AUTO)
+        self._notify()
+        return True
+
+    def restore_session(self, session_data: dict) -> bool:
+        """
+        Reanuda una sesión guardada en DB como la sesión activa.
+        Solo funciona si no hay una sesión activa en este momento.
+        """
+        if self._session:
+            log.warning("[TSAA] Ya hay una sesión activa (%s) — ciérrala antes de reanudar otra.",
+                        self._session.id)
+            return False
+        if session_data.get("status") not in ("ACTIVE",):
+            log.warning("[TSAA] Solo se pueden reanudar sesiones con status ACTIVE.")
+            return False
+        self._session = SessionManager.from_snapshot(session_data)
         self.set_mode(AutoMode.FULL_AUTO)
         self._notify()
         return True
@@ -307,7 +345,15 @@ class TradeController:
         self._last_balance = account.balance.wallet_balance
         upnl = sum(p.unrealized_pnl for p in account.positions.values())
 
-        # Auto-inicio eliminado - ahora es manual vía UI
+        # Auto-restaurar sesión ACTIVE desde DB al primer tick con balance conocido
+        if not self._auto_restore_done and self._last_balance > 0:
+            self._auto_restore_done = True
+            _active = get_active_session()
+            if _active and not self._session:
+                self._session = SessionManager.from_snapshot(_active)
+                self.set_mode(AutoMode.FULL_AUTO)
+                log.info("[TSAA] Sesión '%s' restaurada automáticamente al iniciar.",
+                         _active.get("name", _active["id"]))
         
         status = SessionStatus.ACTIVE
         if self._session:
@@ -1013,6 +1059,8 @@ class TradeController:
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)
             self._sl_watchdog_ts.pop(symbol, None)
+            self._price_against_since.pop(symbol, None)
+            self._viability_last_ts.pop(symbol, None)
             self._closing.discard(symbol)   # liberar lock de cierre
 
             with executor_logger.context(trade.trace_id):
@@ -1159,24 +1207,29 @@ class TradeController:
                 self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
                 return
 
-        # ── SL Watchdog: verificar que el SL sigue activo en Bybit cada 30s ──
-        # Protege contra glitches de API que eliminan el SL después de apertura.
-        # Solo aplica a trades reales (no paper) con SL configurado.
-        if (
-            trade.request
-            and trade.request.sl_price > 0
-            and not settings.paper_trading
-            and trade.opened_at > 0
-            and elapsed >= 15   # dar 15s al trade para estabilizarse
-        ):
+        # ── SL Watchdog + Progress Log ───────────────────────────────────────
+        # Cada 30s: log del progreso del trade + verificación de SL en Bybit.
+        if trade.opened_at > 0 and elapsed >= 15:
             _last_wdog = self._sl_watchdog_ts.get(sym, 0.0)
             if (now - _last_wdog) >= _SL_WATCHDOG_S:
                 self._sl_watchdog_ts[sym] = now
-                self._bridge.submit(
-                    self._watchdog_check_sl(sym, trade.request.sl_price,
-                                            trade.request.tp_price, trade.request.side,
-                                            trade.request.trace_id)
+                # Progreso hacia SL (negativo = alejándose del SL)
+                sl_prog_pct = max(0.0, ((entry - mark) / sl_dist * 100) if is_long
+                                       else ((mark - entry) / sl_dist * 100))
+                log.info(
+                    "[TRADE] %s %s  mark=%.5g  →TP:%.0f%%  →SL:%.0f%%  "
+                    "t=%ds  PnL=$%.3f  cvd=%s  rsi=%.0f",
+                    "▲ LONG" if is_long else "▼ SHORT", sym, mark,
+                    progress * 100, sl_prog_pct,
+                    elapsed, trade.pnl_usd, ms.cvd_momentum, ms.rsi_1m,
                 )
+                # Verificación REST del SL (solo trades reales con SL configurado)
+                if trade.request and trade.request.sl_price > 0 and not settings.paper_trading:
+                    self._bridge.submit(
+                        self._watchdog_check_sl(sym, trade.request.sl_price,
+                                                trade.request.tp_price, trade.request.side,
+                                                trade.request.trace_id)
+                    )
 
         # ── Gestión Automática de Posición (Breakeven / Trailing) ───────────
         # Determinar el modo efectivo.
@@ -1186,6 +1239,15 @@ class TradeController:
         # tampoco está en FULL_AUTO.
         effective = trade.auto_mode if trade.auto_mode != AutoMode.MANUAL else self.mode
         runs_full = effective == AutoMode.FULL_AUTO or self.mode == AutoMode.FULL_AUTO
+
+        # ── Viability Check: cierre anticipado si la tesis original fracasó ─
+        # Solo en FULL_AUTO y con el trade aún OPEN (no en BE ni trailing).
+        if runs_full and trade.state == TradeState.OPEN:
+            if self._check_trade_viability(sym, trade, mark, entry, sl_dist, progress, now, ms, tech):
+                self.close_symbol(sym, "viability_exit")
+                self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
+                return
+
         if runs_full:
             self._manage_auto_protections(sym, trade, mark, entry, sl_dist, progress, now, be_held, ms, tech)
 
@@ -1316,6 +1378,126 @@ class TradeController:
                                                   prev_sl=old_sl, prev_state=prev_state))
         self._last_sl_upd[sym] = now
         self._notify()
+
+    # ── Viability Monitor ───────────────────────────────────────────────────
+
+    def _check_trade_viability(
+        self,
+        sym:      str,
+        trade:    "TradeRecord",
+        mark:     float,
+        entry:    float,
+        sl_dist:  float,
+        progress: float,
+        now:      float,
+        ms:       "MarketState",
+        tech:     "Optional[TechSignal]",
+    ) -> bool:
+        """
+        Determina si el trade aún tiene validez técnica.
+        Retorna True → cerrar el trade (viability_exit).
+
+        Filosofía: NO cierra por miedo ni porque esté en negativo.
+        Requiere convergencia de señales que indiquen que la TESIS ORIGINAL fracasó.
+
+        Pre-condiciones (todas deben cumplirse):
+          · ≥ 3 min desde apertura (_VIABILITY_MIN_ELAPSED)
+          · Precio lleva ≥ 2 min contra el trade (_VIABILITY_STALE_S)
+          · Throttle: no más de 1 evaluación cada 60 s (_VIABILITY_CHECK_S)
+
+        6 señales evaluadas (necesita ≥ _VIABILITY_THRESHOLD = 4):
+          1. Precio consistentemente contra el trade (ya es condición de entrada)
+          2. CVD adverso: ≥4 de las últimas 5 velas con delta negativo (LONG) / positivo (SHORT)
+          3. Tape pressure: >62% del volumen reciente en contra del trade
+          4. EMA 15m en contra de la dirección del trade
+          5. OI velocity negativo sostenido (capital saliendo del mercado)
+          6. RSI extremo adverso (LONG <35, SHORT >65)
+        """
+        is_long = trade.request.side == "Buy"
+        elapsed = int(time.time()) - trade.opened_at if trade.opened_at > 0 else 0
+
+        # ── Tracking: tiempo que el precio lleva contra el trade ─────────────
+        price_against = (mark < entry) if is_long else (mark > entry)
+        if price_against:
+            self._price_against_since.setdefault(sym, now)
+        else:
+            self._price_against_since.pop(sym, None)
+
+        # ── Pre-condiciones para evaluar ─────────────────────────────────────
+        if elapsed < _VIABILITY_MIN_ELAPSED:
+            return False
+
+        stale_elapsed = now - self._price_against_since.get(sym, now)
+        if stale_elapsed < _VIABILITY_STALE_S:
+            return False   # Precio aún no lleva suficiente tiempo en contra
+
+        last_check = self._viability_last_ts.get(sym, 0.0)
+        if (now - last_check) < _VIABILITY_CHECK_S:
+            return False   # Ya evaluado recientemente
+        self._viability_last_ts[sym] = now
+
+        # ── Evaluar señales adversas ──────────────────────────────────────────
+        adverse = 0
+        reasons: list[str] = []
+
+        # S1: Precio lleva ≥ _VIABILITY_STALE_S contra el trade (pre-condición, siempre suma)
+        adverse += 1
+        reasons.append(f"price_against({stale_elapsed:.0f}s)")
+
+        # S2: CVD adverso — ≥4/5 velas con delta en contra
+        cvd_candles = list(ms.cvd_candles)[-5:]
+        if len(cvd_candles) >= 3:
+            bear_n = sum(1 for c in cvd_candles if c.delta < 0)
+            bull_n = len(cvd_candles) - bear_n
+            adverse_n = bear_n if is_long else bull_n
+            if adverse_n >= 4:
+                adverse += 1
+                reasons.append(f"cvd({adverse_n}/5 adversas)")
+
+        # S3: Tape pressure — >62% volumen en contra (últimas 30 operaciones)
+        recent = list(ms.trades)[-30:]
+        if len(recent) >= 10:
+            adv_vol = sum(t.qty for t in recent
+                          if (is_long and t.side == "Sell") or (not is_long and t.side == "Buy"))
+            tot_vol = sum(t.qty for t in recent)
+            if tot_vol > 0 and adv_vol / tot_vol > 0.62:
+                adverse += 1
+                reasons.append(f"tape({adv_vol/tot_vol:.0%} adverso)")
+
+        # S4: EMA 15m en contra de la dirección del trade
+        if tech and tech.has_data and tech.ema15m_bull != is_long:
+            adverse += 1
+            reasons.append("ema15m_contra")
+
+        # S5: OI velocity negativo (capital saliendo del mercado)
+        oi_vel = ms.oi_velocity
+        if oi_vel < -2000:   # > $2 000/min saliendo
+            adverse += 1
+            reasons.append(f"oi_exit({oi_vel:.0f}/min)")
+
+        # S6: RSI extremo adverso
+        rsi = ms.rsi_1m
+        if (is_long and rsi < 35) or (not is_long and rsi > 65):
+            adverse += 1
+            reasons.append(f"rsi_extremo({rsi:.0f})")
+
+        verdict = "INVÁLIDO" if adverse >= _VIABILITY_THRESHOLD else "VÁLIDO"
+        log.info(
+            "[VIABILITY] %s %s  señales_adversas=%d/6  requerido=%d  "
+            "[%s]  stale=%.0fs  elapsed=%ds",
+            sym, verdict, adverse, _VIABILITY_THRESHOLD,
+            ", ".join(reasons), stale_elapsed, elapsed,
+        )
+
+        if adverse >= _VIABILITY_THRESHOLD:
+            log.warning(
+                "[VIABILITY] %s → CERRANDO ANTICIPADO — %d/6 señales confirman tesis inválida "
+                "(precio contra trade %.0fs, %s)",
+                sym, adverse, stale_elapsed, ", ".join(reasons),
+            )
+            return True
+
+        return False
 
     # ── Métricas de señal ───────────────────────────────────────────────────
 

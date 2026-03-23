@@ -6,7 +6,7 @@ import os
 import queue
 import threading
 import time
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import duckdb
 
@@ -139,6 +139,9 @@ def initialize_db() -> None:
         "ALTER TABLE trade_journal ADD COLUMN session_id VARCHAR DEFAULT ''",
         "ALTER TABLE trading_sessions ADD COLUMN name VARCHAR DEFAULT 'Nueva Sesión'",
         "ALTER TABLE trading_sessions ADD COLUMN api_cost DOUBLE DEFAULT 0",
+        "ALTER TABLE trading_sessions ADD COLUMN target_pnl DOUBLE DEFAULT 0",
+        "ALTER TABLE trading_sessions ADD COLUMN max_drawdown DOUBLE DEFAULT 0",
+        "ALTER TABLE trading_sessions ADD COLUMN duration_h DOUBLE DEFAULT 0",
     ]:
         try:
             con.execute(migration)
@@ -337,8 +340,9 @@ def save_session(session_data: dict) -> None:
         con = get_connection()
         con.execute("""
             INSERT OR REPLACE INTO trading_sessions
-                (id, name, start_ts, end_ts, initial_balance, final_balance, pnl, api_cost, status)
-            VALUES (?,?,?,?,?,?,?,?,?)
+                (id, name, start_ts, end_ts, initial_balance, final_balance,
+                 pnl, api_cost, status, target_pnl, max_drawdown, duration_h)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             session_data["id"],
             session_data.get("name", "Nueva Sesión"),
@@ -349,10 +353,65 @@ def save_session(session_data: dict) -> None:
             session_data["pnl"],
             session_data.get("api_cost", 0.0),
             session_data["status"],
+            session_data.get("target_pnl", 0.0),
+            session_data.get("max_drawdown", 0.0),
+            session_data.get("duration_h", 0.0),
         ))
         con.close()
     except Exception as e:
         log.error("save_session falló: %s", e)
+
+
+def get_active_session() -> Optional[dict]:
+    """Retorna la sesión ACTIVE más reciente, o None si no hay ninguna."""
+    try:
+        con = get_connection()
+        row = con.execute("""
+            SELECT id, name, start_ts, end_ts, initial_balance, final_balance,
+                   pnl, api_cost, status, target_pnl, max_drawdown, duration_h
+            FROM trading_sessions
+            WHERE status = 'ACTIVE'
+            ORDER BY start_ts DESC LIMIT 1
+        """).fetchone()
+        con.close()
+        if not row:
+            return None
+        return {
+            "id": row[0], "name": row[1], "start_ts": int(row[2]),
+            "end_ts": int(row[3]), "initial_balance": float(row[4]),
+            "final_balance": float(row[5]), "pnl": float(row[6]),
+            "api_cost": float(row[7]), "status": row[8],
+            "target_pnl": float(row[9] or 0), "max_drawdown": float(row[10] or 0),
+            "duration_h": float(row[11] or 0),
+        }
+    except Exception as e:
+        log.error("get_active_session falló: %s", e)
+        return None
+
+
+def get_session_by_id(session_id: str) -> Optional[dict]:
+    """Retorna una sesión por ID, o None."""
+    try:
+        con = get_connection()
+        row = con.execute("""
+            SELECT id, name, start_ts, end_ts, initial_balance, final_balance,
+                   pnl, api_cost, status, target_pnl, max_drawdown, duration_h
+            FROM trading_sessions WHERE id = ?
+        """, (session_id,)).fetchone()
+        con.close()
+        if not row:
+            return None
+        return {
+            "id": row[0], "name": row[1], "start_ts": int(row[2]),
+            "end_ts": int(row[3]), "initial_balance": float(row[4]),
+            "final_balance": float(row[5]), "pnl": float(row[6]),
+            "api_cost": float(row[7]), "status": row[8],
+            "target_pnl": float(row[9] or 0), "max_drawdown": float(row[10] or 0),
+            "duration_h": float(row[11] or 0),
+        }
+    except Exception as e:
+        log.error("get_session_by_id falló: %s", e)
+        return None
 
 
 def close_all_sessions() -> None:
@@ -405,7 +464,8 @@ def get_all_sessions(limit: int = 50) -> list:
     try:
         con = get_connection()
         rows = con.execute("""
-            SELECT id, name, start_ts, end_ts, initial_balance, final_balance, pnl, api_cost, status
+            SELECT id, name, start_ts, end_ts, initial_balance, final_balance,
+                   pnl, api_cost, status, target_pnl, max_drawdown, duration_h
             FROM trading_sessions
             ORDER BY start_ts DESC LIMIT ?
         """, (limit,)).fetchall()
@@ -421,6 +481,9 @@ def get_all_sessions(limit: int = 50) -> list:
                 "pnl":             float(r[6]),
                 "api_cost":        float(r[7]),
                 "status":          r[8],
+                "target_pnl":      float(r[9] or 0),
+                "max_drawdown":    float(r[10] or 0),
+                "duration_h":      float(r[11] or 0),
             }
             for r in rows
         ]

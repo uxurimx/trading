@@ -1474,10 +1474,18 @@ class MainWindow(Adw.ApplicationWindow):
         )
 
         # ── Pestaña 4: Sesiones ─────────────────────────────────────────
-        self._session_view = SessionView()
+        self._session_view = SessionView(
+            on_start_session  = self._on_start_session_from_view,
+            on_resume_session = self._on_resume_session_from_view,
+            get_active_session_id = lambda: (
+                self.controller._session.id if self.controller._session else None
+            ),
+        )
         self._stack.add_titled_with_icon(
             self._session_view, "sessions", "📁 Sesiones", "folder-open-symbolic"
         )
+        # Pasar la referencia a la ventana para que el diálogo sea modal
+        GLib.idle_add(lambda: self._session_view.set_parent_window(self) or False)
 
         # ── Pestaña 4: Configuración ────────────────────────────────────
         self._settings_view = SettingsView(paper_wallet=self._paper_wallet,
@@ -1568,6 +1576,33 @@ class MainWindow(Adw.ApplicationWindow):
         state = self.stream.states.get(self._sym)
         if state:
             state.reset_session()
+
+    # ── Callbacks de Sesión desde SessionView ─────────────────────────────────
+
+    def _on_start_session_from_view(
+        self,
+        name:         str,
+        target_pnl:   float,
+        max_drawdown: float,
+        duration_h:   float,
+    ) -> None:
+        """Crea una nueva sesión TSAA desde el diálogo de SessionView."""
+        ok = self.controller.start_session(
+            name=name,
+            target_pnl=target_pnl,
+            max_drawdown=max_drawdown,
+            duration_h=duration_h,
+        )
+        if not ok:
+            import logging
+            logging.getLogger("qts.ui").warning(
+                "No se puede crear sesión: ya hay una activa (%s)",
+                self.controller._session.id if self.controller._session else "?",
+            )
+
+    def _on_resume_session_from_view(self, session_data: dict) -> None:
+        """Reanuda una sesión ACTIVE desde el historial."""
+        self.controller.restore_session(session_data)
 
     def _on_paper_toggle(self, active: bool) -> None:
         """Activa/desactiva paper trading. Limpia posiciones activas del controller."""

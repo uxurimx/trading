@@ -30,32 +30,77 @@ class SessionManager:
     Calcula el PnL acumulado (cerrado + flotante) y vigila los límites.
     """
 
-    def __init__(self, initial_balance: float) -> None:
+    def __init__(
+        self,
+        initial_balance: float,
+        name:         str   = "",
+        target_pnl:   float = 0.0,
+        max_drawdown: float = 0.0,
+        duration_h:   float = 0.0,
+    ) -> None:
         self.id: str = f"sess-{uuid.uuid4().hex[:6]}"
         self.start_ts: int = int(time.time())
         self.initial_balance: float = initial_balance
-        
+
         self.current_balance: float = initial_balance
         self.floating_pnl:    float = 0.0
         self.closed_pnl:      float = 0.0
-        
+
         self.status: SessionStatus = SessionStatus.ACTIVE
         self.end_ts: int = 0
         self.api_cost: float = 0.0
-        self.name: str = settings.session_name
-        
-        # Límites desde settings
-        self.max_duration_s: int = int(settings.session_duration_h * 3600)
-        self.target_pnl:     float = settings.session_target_pnl
-        self.max_drawdown:   float = settings.session_max_drawdown
-        self.api_limit:      float = settings.session_api_limit
+
+        # Parámetros — los argumentos explícitos tienen prioridad sobre settings
+        self.name:         str   = name        or settings.session_name
+        self.target_pnl:   float = target_pnl  if target_pnl  != 0.0 else settings.session_target_pnl
+        self.max_drawdown: float = max_drawdown if max_drawdown != 0.0 else settings.session_max_drawdown
+        self.duration_h:   float = duration_h  if duration_h  != 0.0 else settings.session_duration_h
+        self.max_duration_s: int = int(self.duration_h * 3600)
+        self.api_limit:    float = settings.session_api_limit
 
         log.info("[TSAA] Nueva sesión '%s' iniciada: %s  Balance=$%.2f",
                  self.name, self.id, initial_balance)
         log.info("[TSAA] Límites: TP=$%.1f SL=$%.1f API=$%.2f Dur=%.1fh",
-                 self.target_pnl, self.max_drawdown, self.api_limit, settings.session_duration_h)
-        
+                 self.target_pnl, self.max_drawdown, self.api_limit, self.duration_h)
+
         self._persist()
+
+    @classmethod
+    def from_snapshot(cls, data: dict) -> "SessionManager":
+        """
+        Restaura un SessionManager desde un registro de DB.
+        Permite reanudar una sesión activa tras reinicio del sistema.
+        El closed_pnl se toma directamente del snapshot; la sesión continúa
+        acumulando desde ese punto.
+        """
+        mgr: "SessionManager" = object.__new__(cls)
+        mgr.id              = data["id"]
+        mgr.name            = data.get("name", "Sesión")
+        mgr.start_ts        = int(data["start_ts"])
+        mgr.end_ts          = int(data.get("end_ts", 0))
+        mgr.initial_balance = float(data["initial_balance"])
+        mgr.current_balance = float(data.get("final_balance", data["initial_balance"]))
+        mgr.floating_pnl    = 0.0
+        mgr.closed_pnl      = float(data.get("pnl", 0.0))
+        mgr.api_cost        = float(data.get("api_cost", 0.0))
+        try:
+            mgr.status = SessionStatus(data["status"])
+        except (ValueError, KeyError):
+            mgr.status = SessionStatus.ACTIVE
+
+        # Objetivos almacenados en DB, fallback a settings si están a 0
+        mgr.target_pnl   = float(data.get("target_pnl", 0.0))   or settings.session_target_pnl
+        mgr.max_drawdown = float(data.get("max_drawdown", 0.0))  or settings.session_max_drawdown
+        mgr.duration_h   = float(data.get("duration_h", 0.0))   or settings.session_duration_h
+        mgr.max_duration_s = int(mgr.duration_h * 3600)
+        mgr.api_limit    = settings.session_api_limit
+
+        log.info(
+            "[TSAA] Sesión '%s' reanudada desde DB: %s  PnL acumulado=$%.2f  "
+            "Objetivo=$%.1f  Drawdown=$%.1f",
+            mgr.name, mgr.id, mgr.closed_pnl, mgr.target_pnl, mgr.max_drawdown,
+        )
+        return mgr
 
     def update(self, current_balance: float, floating_pnl: float) -> SessionStatus:
         """
@@ -122,7 +167,10 @@ class SessionManager:
             "final_balance":   self.current_balance,
             "pnl":             self.closed_pnl,
             "api_cost":        self.api_cost,
-            "status":          self.status.value
+            "status":          self.status.value,
+            "target_pnl":      self.target_pnl,
+            "max_drawdown":    self.max_drawdown,
+            "duration_h":      self.duration_h,
         }
         save_session(data)
 
