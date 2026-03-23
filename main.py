@@ -31,7 +31,16 @@ from interface.gtk_app import run
 
 
 def main() -> None:
-    initialize_db()
+    try:
+        initialize_db()
+    except Exception as e:
+        # El error más común: otro proceso Python (VS Code / Pylance) tiene el lock.
+        # El usuario debe cerrar el editor o esperar unos segundos y reintentar.
+        print(f"\n[QTS] ERROR al inicializar la base de datos: {e}")
+        if "lock" in str(e).lower() or "conflict" in str(e).lower():
+            print("[QTS] Otro proceso tiene el lock de la DB (probablemente VS Code/Pylance).")
+            print("[QTS] Cierra VS Code o espera unos segundos y vuelve a arrancar.\n")
+        sys.exit(1)
     run()
 
 

@@ -127,6 +127,7 @@ class Settings(BaseSettings):
     profit_lock_pct:  float = 60.0   # % para profit lock
     trailing_pct:     float = 70.0   # % para trailing stop
     be_hold_time_s:   int   = 30     # segundos que el precio debe mantenerse en BE
+    sl_watchdog_s:    int   = 30     # intervalo (segundos) para verificar SL+TP en Bybit
 
     # Estrategia
     min_scan_score:   int   = 70     # score mínimo para generar propuesta

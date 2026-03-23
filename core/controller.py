@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 from gi.repository import GLib
 
@@ -28,7 +28,7 @@ from core.order_model import (
 )
 from core.strategy import StrategyEngine
 from core.config import settings
-from core.db import save_trade, get_active_session
+from core.db import save_trade, get_active_session, save_symbol_trade_detail
 from core.session import SessionManager, SessionStatus
 from core.audit_agent import audit_agent
 import core.notifier as notifier
@@ -53,7 +53,7 @@ MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 
 # ─── Auxiliares de cálculo ────────────────────────────────────────────────────
 _BE_FEE_PCT        = 0.0025   # 0.11% round-trip fees + 0.14% slippage buffer para alts de baja liquidez
-_SL_WATCHDOG_S     = 30.0     # cada 30s verificar que el SL sigue activo en Bybit
+# _SL_WATCHDOG_S: usa settings.sl_watchdog_s (configurable en .env, default 30s)
 
 # Trade Viability Monitor
 _VIABILITY_MIN_ELAPSED = 180   # esperar 3 min antes de evaluar viabilidad
@@ -137,6 +137,8 @@ class TradeController:
         # Trade Viability Monitor
         self._price_against_since: Dict[str, float] = {}  # cuándo precio fue contra el trade
         self._viability_last_ts:   Dict[str, float] = {}  # última evaluación de viabilidad
+        # Último MarketState visto por símbolo (para enriquecer symbol_trade_detail al cerrar)
+        self._last_ms: Dict[str, Any] = {}
 
         # ── Módulo de Sesiones (TSAA) ──
         self._session: Optional[SessionManager] = None
@@ -1031,6 +1033,7 @@ class TradeController:
 
             self._log.append(trade)
             save_trade(trade)
+            save_symbol_trade_detail(trade, self._last_ms.get(symbol))
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
             self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s, trade.close_reason)
 
@@ -1067,6 +1070,7 @@ class TradeController:
             self._sl_watchdog_ts.pop(symbol, None)
             self._price_against_since.pop(symbol, None)
             self._viability_last_ts.pop(symbol, None)
+            self._last_ms.pop(symbol, None)
             self._closing.discard(symbol)   # liberar lock de cierre
 
             with executor_logger.context(trade.trace_id):
@@ -1097,6 +1101,9 @@ class TradeController:
         if not ms or not trade.request:
             return
 
+        # Guardar último MarketState para enriquecer symbol_trade_detail al cerrar
+        self._last_ms[sym] = ms
+
         # Bybit Hedge Mode usa claves "SYM_1" (Long) / "SYM_2" (Short) / "SYM_0" (One-way)
         # Paper mode usa la clave plana "SYM"
         pos = account.positions.get(sym)
@@ -1116,6 +1123,11 @@ class TradeController:
             return
 
         trade.pnl_usd = pos.unrealized_pnl
+        # Actualizar MFE / MAE (excursiones máximas durante el trade)
+        if trade.pnl_usd > trade.max_pnl:
+            trade.max_pnl = trade.pnl_usd
+        if trade.pnl_usd < trade.min_pnl:
+            trade.min_pnl = trade.pnl_usd
 
         entry = trade.entry_price or (pos.entry_price if pos else 0.0)
         sl      = trade.current_sl
@@ -1217,7 +1229,7 @@ class TradeController:
         # Cada 30s: log del progreso del trade + verificación de SL en Bybit.
         if trade.opened_at > 0 and elapsed >= 15:
             _last_wdog = self._sl_watchdog_ts.get(sym, 0.0)
-            if (now - _last_wdog) >= _SL_WATCHDOG_S:
+            if (now - _last_wdog) >= settings.sl_watchdog_s:
                 self._sl_watchdog_ts[sym] = now
                 # Progreso hacia SL (negativo = alejándose del SL)
                 sl_prog_pct = max(0.0, ((entry - mark) / sl_dist * 100) if is_long

@@ -118,6 +118,8 @@ class TradeRecord:
 
     pnl_usd:         float        = 0.0
     pnl_at_open:     float        = 0.0    # daily_pnl snapshot al abrir (para calcular PnL del trade)
+    max_pnl:         float        = 0.0    # MFE: máximo PnL favorable durante el trade
+    min_pnl:         float        = 0.0    # MAE: máximo PnL adverso (negativo)
     close_reason:    str          = ""
     auto_mode:       AutoMode     = AutoMode.MANUAL
 

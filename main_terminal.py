@@ -40,7 +40,14 @@ def _load_symbols() -> None:
 
 
 def main() -> None:
-    initialize_db()
+    try:
+        initialize_db()
+    except Exception as e:
+        print(f"\n[QTS] ERROR al inicializar la base de datos: {e}")
+        if "lock" in str(e).lower() or "conflict" in str(e).lower():
+            print("[QTS] Otro proceso tiene el lock de la DB (probablemente VS Code/Pylance).")
+            print("[QTS] Cierra VS Code o espera unos segundos y vuelve a arrancar.\n")
+        import sys; sys.exit(1)
     _load_symbols()
     app = TradingApp()
     app.run()
