@@ -680,6 +680,35 @@ class BybitExecutor:
             log.warning("get_position_sl_tp(%s): %s", symbol, e)
         return 0.0, 0.0
 
+    async def get_all_open_positions(self) -> list:
+        """
+        Retorna TODAS las posiciones abiertas en Bybit (linear USDT perpetuals).
+        Cada elemento: {symbol, side, size, entry_price, stop_loss, take_profit}.
+        Usado por el orphan-check periódico del controller.
+        """
+        result = []
+        try:
+            data = await self._get("/v5/position/list", {
+                "category":   "linear",
+                "settleCoin": "USDT",
+                "limit":      "200",
+            })
+            for p in data.get("result", {}).get("list", []):
+                size = float(p.get("size") or 0)
+                if size <= 0:
+                    continue
+                result.append({
+                    "symbol":      p.get("symbol", ""),
+                    "side":        p.get("side", ""),
+                    "size":        size,
+                    "entry_price": float(p.get("avgPrice") or p.get("entryPrice") or 0),
+                    "stop_loss":   float(p.get("stopLoss") or 0),
+                    "take_profit": float(p.get("takeProfit") or 0),
+                })
+        except Exception as e:
+            log.warning("get_all_open_positions: %s", e)
+        return result
+
     async def get_position_open_time(self, symbol: str, since_ms: int = 0) -> int:
         """
         Recupera el timestamp real de apertura de la posición consultando el historial

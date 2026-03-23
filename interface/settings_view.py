@@ -229,12 +229,20 @@ class SettingsView(Gtk.ScrolledWindow):
         box.append(_section("  Niveles de trail (% progreso al TP)"))
 
         _trail_defs = [
-            ("g1_pct", "G1 — reduce riesgo 35%",   5,  35, 5, "SL queda a 65% del riesgo inicial"),
-            ("g2_pct", "G2 — reduce riesgo 65%",  15,  55, 5, "SL queda a 35% del riesgo inicial"),
-            ("g3_pct", "G3 — reduce riesgo 90%",  30,  75, 5, "SL queda a 10% del riesgo inicial"),
-            ("l1_pct", "L1-BE — break-even",       50,  90, 5, "SL se mueve a entry ± fees"),
-            ("l2_pct", "L2 — lock 25% profit",     60,  95, 5, "Activa TradeState.TRAILING"),
-            ("l3_pct", "L3 — lock 60% profit",     70,  99, 5, ""),
+            ("g1_pct",          "G1 — reduce riesgo 35%",    5,  35, 5,
+             "SL queda a 65% del riesgo inicial"),
+            ("g2_pct",          "G2 — reduce riesgo 65%",   15,  55, 5,
+             "SL queda a 35% del riesgo inicial"),
+            ("g3_pct",          "G3 — reduce riesgo 90%",   30,  75, 5,
+             "SL queda a 10% del riesgo inicial"),
+            ("l1_pct",          "L1-BE — break-even",        50,  90, 5,
+             "SL se mueve a entry ± fees"),
+            ("l2_pct",          "L2 — trail 5pp (activa)",   60,  95, 5,
+             "Trailing dinámico: SL sigue el mejor progreso a max 5pp de brecha"),
+            ("kill_switch_pct", "Kill switch (%)",            70,  99, 1,
+             "Zona crítica: trail se ajusta a 3pp detrás del mejor progreso"),
+            ("l3_pct",          "L3 — trail 2pp (zona TP)",  75,  99, 1,
+             "Ultra-ajustado: max 2pp de brecha al llegar cerca del TP"),
         ]
         self._trail_spins: dict = {}
         for attr, label, lo, hi, step, hint in _trail_defs:

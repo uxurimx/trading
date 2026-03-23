@@ -308,6 +308,22 @@ class TradePriceChart(Gtk.DrawingArea):
         self._vol_trades: list = []  # trades recientes para volume trail
         self.set_draw_func(self._draw)
 
+        # Drag state for SL/TP dragging
+        self._lo:   float = 0.0
+        self._rng:  float = 1.0
+        self._w:    int   = 1
+        self._drag_target: str    = ""    # "sl" | "tp" | ""
+        self._drag_x_start: float = 0.0
+        self._drag_x: float       = 0.0
+        self.on_drag_confirm      = None  # callable(target: str, new_price: float)
+
+        _gesture = Gtk.GestureDrag()
+        _gesture.set_button(1)
+        _gesture.connect("drag-begin",  self._on_drag_begin)
+        _gesture.connect("drag-update", self._on_drag_update)
+        _gesture.connect("drag-end",    self._on_drag_end)
+        self.add_controller(_gesture)
+
     def update(self, entry: float, sl: float, tp: float, mark: float, side: str,
                trail_best: float = 0.0, trail_worst: float = 0.0,
                be_pct: float = 0.40, sg_pct: float = 0.30,
@@ -359,6 +375,10 @@ class TradePriceChart(Gtk.DrawingArea):
         lo  = min(prices) * 0.9980
         hi  = max(prices) * 1.0020
         rng = hi - lo or 1e-9
+        # Save for gesture coordinate conversion
+        self._lo  = lo
+        self._rng = rng
+        self._w   = w
 
         def px(price: float) -> float:
             return (price - lo) / rng * w
@@ -624,6 +644,61 @@ class TradePriceChart(Gtk.DrawingArea):
         cr.move_to(max(2.0, x_mark - tw / 2), mid - 9)
         cr.show_text(text)
 
+        # ── Drag preview: línea arrastrada resaltada ──────────────────────────
+        if self._drag_target:
+            x_drag    = max(0.0, min(float(w), self._drag_x))
+            drag_price = lo + (x_drag / w) * rng
+            drag_col   = RGB["sell"] if self._drag_target == "sl" else RGB["buy"]
+            cr.set_source_rgba(*drag_col, 1.0)
+            cr.set_line_width(3)
+            cr.move_to(x_drag, 0); cr.line_to(x_drag, h); cr.stroke()
+            cr.set_font_size(9)
+            lbl = _fp(drag_price)
+            ext = cr.text_extents(lbl)
+            tx  = max(2.0, min(w - ext[2] - 2, x_drag + 4))
+            cr.set_source_rgba(0.1, 0.1, 0.1, 0.82)
+            cr.rectangle(tx - 2, mid - 15, ext[2] + 4, 13); cr.fill()
+            cr.set_source_rgba(*drag_col, 1.0)
+            cr.move_to(tx, mid - 4); cr.show_text(lbl)
+
+    def _on_drag_begin(self, gesture, x, y) -> None:
+        self._drag_target = ""
+        if self._rng <= 0 or self._w <= 0:
+            return
+        x_sl = (self._sl - self._lo) / self._rng * self._w if self._sl > 0 else -9999.0
+        x_tp = (self._tp - self._lo) / self._rng * self._w if self._tp > 0 else -9999.0
+        HIT = 12
+        if abs(x - x_sl) <= HIT:
+            self._drag_target = "sl"
+            self._drag_x = x_sl
+        elif abs(x - x_tp) <= HIT:
+            self._drag_target = "tp"
+            self._drag_x = x_tp
+        self._drag_x_start = x
+        if self._drag_target:
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            self.queue_draw()
+
+    def _on_drag_update(self, gesture, dx, dy) -> None:
+        if not self._drag_target:
+            return
+        self._drag_x = self._drag_x_start + dx
+        self.queue_draw()
+
+    def _on_drag_end(self, gesture, dx, dy) -> None:
+        if not self._drag_target:
+            return
+        target = self._drag_target
+        self._drag_target = ""
+        x_final = self._drag_x_start + dx
+        self.queue_draw()
+        if self._rng > 0 and self._w > 0:
+            new_price = self._lo + (x_final / self._w) * self._rng
+        else:
+            return
+        if new_price > 0 and callable(self.on_drag_confirm):
+            self.on_drag_confirm(target, new_price)
+
 
 # ─── Tarjeta de trade activo ──────────────────────────────────────────────────
 
@@ -694,6 +769,7 @@ class TradeCard(Gtk.Box):
         # ── Fila 2: gráfico siempre visible ────────────────────────────
         self._chart = TradePriceChart()
         self._chart.set_margin_start(6); self._chart.set_margin_end(6)
+        self._chart.on_drag_confirm = self._on_chart_drag
         self.append(self._chart)
 
         # ── Fila 3: precios Entry/SL/TP + progreso inline ───────────────
@@ -961,6 +1037,32 @@ class TradeCard(Gtk.Box):
             l1_pct=None, l2_pct=None, l3_pct=None,
         )
         self._refresh_config_popover()
+
+    def _on_chart_drag(self, target: str, new_price: float) -> None:
+        """Llamado por el gráfico al soltar una línea SL/TP arrastrada."""
+        if not self._symbol:
+            return
+        label = "SL" if target == "sl" else "TP"
+        import gi; gi.require_version("Adw", "1")
+        from gi.repository import Adw
+        dialog = Adw.AlertDialog(
+            heading=f"¿Mover {label}?",
+            body=f"Nuevo {label}: {_fp(new_price)}\n\n¿Confirmar el cambio en Bybit?",
+        )
+        dialog.add_response("cancel",  "Cancelar")
+        dialog.add_response("confirm", f"Mover {label}")
+        dialog.set_response_appearance("confirm", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        sym = self._symbol
+        def _on_resp(d, resp):
+            if resp == "confirm":
+                if target == "sl":
+                    self._controller.adjust_sl_tp(sym, new_sl=new_price)
+                else:
+                    self._controller.adjust_sl_tp(sym, new_tp=new_price)
+        dialog.connect("response", _on_resp)
+        dialog.present(self.get_root())
 
     def show_trade(self, trade: "TradeRecord", mark: float, upnl: float,
                    klines: list = None, market_state=None) -> None:

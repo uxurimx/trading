@@ -142,6 +142,10 @@ class TradeController:
         # Time Stop inteligente: snooze cuando indicadores son favorables
         self._time_stop_snooze: Dict[str, float] = {}  # sym → monotonic hasta cuándo esperar
         self._time_stop_ext:    Dict[str, int]   = {}  # sym → número de extensiones concedidas
+        # SL Breach Detector: ticks consecutivos donde mark cruzó el SL del sistema
+        self._sl_breach_count: Dict[str, int]    = {}
+        # Orphan Check: último momento en que se verificó posiciones huérfanas en Bybit (REST)
+        self._orphan_check_ts: float             = 0.0
 
         # ── Módulo de Sesiones (TSAA) ──
         self._session: Optional[SessionManager] = None
@@ -428,6 +432,13 @@ class TradeController:
 
         # Detectar trades cerrados externamente (o por SL/TP de Bybit)
         self._detect_closed_trades(states, account)
+
+        # Verificación periódica de huérfanas en Bybit vía REST (cada 60s)
+        _now_mono = time.monotonic()
+        if (not settings.paper_trading and account.connected
+                and (_now_mono - self._orphan_check_ts) >= 60.0):
+            self._orphan_check_ts = _now_mono
+            self._bridge.submit(self._check_orphan_positions_rest())
 
         # Capturar baseline de PnL al primer tick activo del trade.
         # Esperar 3s para que los execution events de entrada hayan llegado por WebSocket
@@ -1022,6 +1033,85 @@ class TradeController:
             self._bridge.submit(self._fix_reconciled_opened_at(sym))
             self._notify()
 
+    async def _check_orphan_positions_rest(self) -> None:
+        """
+        Verifica mediante REST si Bybit tiene posiciones abiertas sin registro en el sistema.
+
+        Casos detectados:
+          1. Posición en Bybit que el sistema no conoce → reconcilia (crea TradeRecord mínimo).
+          2. Posición conocida pero con SL cruzado → fuerza cierre inmediato.
+          3. Inconsistencia de lado (sistema dice LONG, Bybit tiene SHORT) → alerta.
+        """
+        import asyncio as _aio
+        try:
+            bybit_pos = await self._executor.get_all_open_positions()
+        except Exception as e:
+            log.warning("[ORPHAN] Error consultando posiciones REST: %s", e)
+            return
+
+        # Verificar trades activos del sistema contra lo que hay en Bybit
+        for sym, trade in list(self._active.items()):
+            if not trade.is_active:
+                continue
+            matching = next((p for p in bybit_pos
+                             if p["symbol"] == sym and p["size"] > 0), None)
+            if matching is None:
+                # El sistema cree que hay trade pero Bybit no lo ve
+                # (puede que ya estén en proceso los 150 ticks de confirm)
+                log.warning("[ORPHAN] %s: sistema activo pero NO aparece en Bybit REST", sym)
+            elif trade.request and matching["side"] != trade.request.side:
+                log.error("[ORPHAN] %s: INCONSISTENCIA lado sistema=%s Bybit=%s",
+                          sym, trade.request.side, matching["side"])
+            elif trade.current_sl > 0:
+                # Verificar que el SL en Bybit coincide con el del sistema
+                bybit_sl = matching["stop_loss"]
+                if bybit_sl > 0:
+                    is_long = trade.request.side == "Buy"
+                    # Si el SL de Bybit es peor que el del sistema (trailing no aplicó)
+                    sl_stale = (bybit_sl < trade.current_sl) if is_long else (bybit_sl > trade.current_sl)
+                    if sl_stale:
+                        log.warning("[ORPHAN] %s SL divergente: sistema=%.5g Bybit=%.5g — reaplicando",
+                                    sym, trade.current_sl, bybit_sl)
+                        trace = trade.request.trace_id if trade.request else ""
+                        side  = trade.request.side if trade.request else ""
+                        await self._executor.set_sl_tp(
+                            sym, sl=trade.current_sl, tp=trade.current_tp,
+                            side=side, trace_id=trace,
+                        )
+                elif bybit_sl == 0:
+                    log.warning("[ORPHAN] %s: SL AUSENTE en Bybit (sistema=%.5g) — el watchdog lo restaurará",
+                                sym, trade.current_sl)
+
+        # Detectar posiciones en Bybit sin registro en el sistema
+        from core.order_model import OrderRequest as _Req
+        for pos_data in bybit_pos:
+            sym = pos_data["symbol"]
+            if sym in self._active:
+                continue
+            # Posición huérfana — crear registro mínimo para monitoreo
+            log.warning("[ORPHAN] Posición huérfana detectada vía REST: %s %s @ %.5g SL=%.5g",
+                        pos_data["side"], sym, pos_data["entry_price"], pos_data["stop_loss"])
+            req = _Req(
+                symbol      = sym,
+                side        = pos_data["side"],
+                qty         = pos_data["size"],
+                entry_price = pos_data["entry_price"],
+                sl_price    = pos_data["stop_loss"],
+                tp_price    = pos_data["take_profit"],
+            )
+            trade = TradeRecord(
+                symbol      = sym,
+                request     = req,
+                state       = TradeState.OPEN,
+                entry_price = pos_data["entry_price"],
+                current_sl  = pos_data["stop_loss"],
+                current_tp  = pos_data["take_profit"],
+                opened_at   = int(time.time()),
+            )
+            self._active[sym] = trade
+            self._bridge.submit(self._fix_reconciled_opened_at(sym))
+            self._notify()
+
     def _detect_closed_trades(self, states: Dict[str, "MarketState"], account: "AccountState") -> None:
         """Compara estado local con Bybit para detectar cierres externos (SL/TP/Manual).
 
@@ -1165,6 +1255,7 @@ class TradeController:
             self._last_ms.pop(symbol, None)
             self._time_stop_snooze.pop(symbol, None)
             self._time_stop_ext.pop(symbol, None)
+            self._sl_breach_count.pop(symbol, None)
             self._closing.discard(symbol)   # liberar lock de cierre
 
             with executor_logger.context(trade.trace_id):
@@ -1353,15 +1444,41 @@ class TradeController:
                     self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
                     return
 
+        # ── SL Breach Detector ────────────────────────────────────────────────
+        # Si el mark ha cruzado el SL actual (el que el sistema cree que está activo),
+        # forzamos cierre sin esperar los 150 ticks (~15s) del watchdog de posición.
+        # Esto cubre el caso donde precio se mueve tan rápido que el SL de Bybit
+        # no alcanza a ejecutarse, o donde la actualización del SL falló en Bybit.
+        if trade.current_sl > 0 and not settings.paper_trading:
+            _sl_crossed = (mark <= trade.current_sl) if is_long else (mark >= trade.current_sl)
+            if _sl_crossed:
+                self._sl_breach_count[sym] = self._sl_breach_count.get(sym, 0) + 1
+                _bc = self._sl_breach_count[sym]
+                if _bc == 1:
+                    log.warning("[SL_BREACH] %s mark=%.5g cruzó SL=%.5g (estado=%s) — confirmando...",
+                                sym, mark, trade.current_sl, trade.state.value)
+                if _bc >= 3:  # 3 ticks consecutivos (~300ms) para descartar wicks fugaces
+                    log.warning("[SL_BREACH] %s mark=%.5g confirmado fuera del SL=%.5g — cierre forzado",
+                                sym, mark, trade.current_sl)
+                    self._sl_breach_count.pop(sym, None)
+                    self.close_symbol(sym, "sl_breach")
+                    return
+            else:
+                self._sl_breach_count.pop(sym, None)
+
         # ── SL Watchdog + Progress Log ───────────────────────────────────────
         # Cada 30s: log del progreso del trade + verificación de SL en Bybit.
         if trade.opened_at > 0 and elapsed >= 15:
             _last_wdog = self._sl_watchdog_ts.get(sym, 0.0)
             if (now - _last_wdog) >= settings.sl_watchdog_s:
                 self._sl_watchdog_ts[sym] = now
-                # Progreso hacia SL (negativo = alejándose del SL)
-                sl_prog_pct = max(0.0, ((entry - mark) / sl_dist * 100) if is_long
-                                       else ((mark - entry) / sl_dist * 100))
+                # Distancia del mark al SL actual en % del riesgo original.
+                # Positivo = buffer de seguridad restante; negativo = SL ya traspasado.
+                _cur_sl = trade.current_sl
+                if is_long:
+                    sl_prog_pct = (mark - _cur_sl) / sl_dist * 100      # positivo si mark > sl (bien)
+                else:
+                    sl_prog_pct = (_cur_sl - mark) / sl_dist * 100      # positivo si mark < sl (bien)
                 log.info(
                     "[TRADE] %s %s  mark=%.5g  →TP:%.0f%%  →SL:%.0f%%  "
                     "t=%ds  PnL=$%.3f  cvd=%s  rsi=%.0f",
@@ -1410,10 +1527,11 @@ class TradeController:
           G2 @ 40%:   SL avanza 65% del camino desde orig_sl hacia entry  (35% riesgo restante)
           G3 @ 60%:   SL avanza 90% del camino desde orig_sl hacia entry  (10% riesgo restante)
 
-        Fase 2 — Territorio de ganancia (L1-BE / L2 / L3):
+        Fase 2 — Territorio de ganancia (L1-BE / L2 / Kill / L3):
           L1-BE @ 70%: SL en entry ± fee_buffer (sin pérdida de fees)
-          L2    @ 80%: SL al 25% del profit  (25% del camino entry→TP)
-          L3    @ 92%: SL al 60% del profit  (60% del camino entry→TP)
+          L2    @ 80%: trailing dinámico — SL sigue el mejor progreso a max 5pp de brecha
+          KILL  @ 85%: trailing aún más ajustado — max 3pp de brecha
+          L3    @ 92%: trailing ultra-ajustado — max 2pp de brecha
 
         Guard: SL siempre ≥ 0.3% de distancia al MarkPrice para evitar Error 10001.
         (El MarkPrice de Bybit puede diferir ≤0.2% del mark local — el buffer extra lo cubre.)
@@ -1483,20 +1601,36 @@ class TradeController:
         # L1-BE → SL en break-even (entry ± fees)
         _l1 = _t("l1_pct", settings.l1_pct)
         if progress >= _l1:
-            _update(fee_be_price, f"L1-BE",
+            _update(fee_be_price, "L1-BE",
                     TradeState.BREAKEVEN if trade.state == TradeState.OPEN else None)
 
-        # L2 → lock 25% del profit
-        _l2 = _t("l2_pct", settings.l2_pct)
-        if tp_dist > 0 and progress >= _l2:
-            profit_25 = (entry + tp_dist * 0.25) if is_long else (entry - tp_dist * 0.25)
-            _update(profit_25, f"L2-{int(_l2*100)}%", TradeState.TRAILING)
+        # Mejor progreso alcanzado en todo el trade (para trailing dinámico L2/L3)
+        _best_price = trade.highest_price if is_long else trade.lowest_price
+        _best_prog  = (((_best_price - entry) / tp_dist) if is_long
+                       else ((entry - _best_price) / tp_dist)) if tp_dist > 0 else 0.0
 
-        # L3 → lock 60% del profit
+        # L2 → trailing dinámico: SL sigue el mejor progreso, max 5pp de brecha
+        _l2 = _t("l2_pct", settings.l2_pct)
+        if tp_dist > 0 and _best_prog >= _l2:
+            _l2_gap = 0.05   # 5 puntos porcentuales de brecha
+            l2_sl = ((entry + max(0.0, _best_prog - _l2_gap) * tp_dist) if is_long
+                     else (entry - max(0.0, _best_prog - _l2_gap) * tp_dist))
+            _update(l2_sl, f"L2-trail{int(_best_prog * 100)}%", TradeState.TRAILING)
+
+        # Kill switch → cuando el mejor progreso entra en zona crítica (default 85%)
+        # Trail aún más ajustado: max 3pp de brecha para no perder la ganancia
+        _kill = settings.kill_switch_pct / 100.0
+        if tp_dist > 0 and _best_prog >= _kill:
+            kill_sl = ((entry + max(0.0, _best_prog - 0.03) * tp_dist) if is_long
+                       else (entry - max(0.0, _best_prog - 0.03) * tp_dist))
+            _update(kill_sl, f"KILL-trail{int(_best_prog * 100)}%", TradeState.TRAILING)
+
+        # L3 → trailing ultra-ajustado: max 2pp de brecha (zona casi-TP)
         _l3 = _t("l3_pct", settings.l3_pct)
-        if tp_dist > 0 and progress >= _l3:
-            profit_60 = (entry + tp_dist * 0.60) if is_long else (entry - tp_dist * 0.60)
-            _update(profit_60, f"L3-{int(_l3*100)}%", TradeState.TRAILING)
+        if tp_dist > 0 and _best_prog >= _l3:
+            l3_sl = ((entry + max(0.0, _best_prog - 0.02) * tp_dist) if is_long
+                     else (entry - max(0.0, _best_prog - 0.02) * tp_dist))
+            _update(l3_sl, f"L3-trail{int(_best_prog * 100)}%", TradeState.TRAILING)
 
         if new_sl is None:
             return

@@ -164,8 +164,11 @@ class Settings(BaseSettings):
     g2_pct: float = 40.0   # G2: SL queda a 35% del riesgo inicial
     g3_pct: float = 60.0   # G3: SL queda a 10% del riesgo inicial
     l1_pct: float = 70.0   # L1-BE: SL en break-even (entry ± fees)
-    l2_pct: float = 80.0   # L2: lock 25% del profit
-    l3_pct: float = 92.0   # L3: lock 60% del profit
+    l2_pct: float = 80.0   # L2: trail dinámico a max 5pp detrás del mejor progreso
+    l3_pct: float = 92.0   # L3: trail ultra-ajustado a max 2pp detrás del mejor progreso
+
+    # Kill switch: cuando el mejor progreso alcanza este umbral, trail a max 3pp detrás
+    kill_switch_pct: float = 85.0
 
     # Flag interno para evitar guardar durante la carga inicial de Pydantic
     _initialized: bool = False
