@@ -146,6 +146,8 @@ class TradeController:
         self._sl_breach_count: Dict[str, int]    = {}
         # Orphan Check: último momento en que se verificó posiciones huérfanas en Bybit (REST)
         self._orphan_check_ts: float             = 0.0
+        # Último AccountState visto (para calcular PnL real tras cierre market)
+        self._last_account: Any                  = None
 
         # ── Módulo de Sesiones (TSAA) ──
         self._session: Optional[SessionManager] = None
@@ -399,6 +401,7 @@ class TradeController:
     ) -> None:
         # ── 0. Gestión de Sesión (TSAA) ──
         self._last_balance = account.balance.wallet_balance
+        self._last_account = account
         upnl = sum(p.unrealized_pnl for p in account.positions.values())
 
         # Auto-restaurar sesión ACTIVE desde DB al primer tick con balance conocido
@@ -1039,9 +1042,12 @@ class TradeController:
 
         Casos detectados:
           1. Posición en Bybit que el sistema no conoce → reconcilia (crea TradeRecord mínimo).
-          2. Posición conocida pero con SL cruzado → fuerza cierre inmediato.
+          2. Posición conocida pero con SL divergente → reaaplica el SL correcto.
           3. Inconsistencia de lado (sistema dice LONG, Bybit tiene SHORT) → alerta.
         """
+        # Solo aplica en modo real con executor que soporte REST completo
+        if settings.paper_trading or not hasattr(self._executor, "get_all_open_positions"):
+            return
         import asyncio as _aio
         try:
             bybit_pos = await self._executor.get_all_open_positions()
@@ -1449,7 +1455,7 @@ class TradeController:
         # forzamos cierre sin esperar los 150 ticks (~15s) del watchdog de posición.
         # Esto cubre el caso donde precio se mueve tan rápido que el SL de Bybit
         # no alcanza a ejecutarse, o donde la actualización del SL falló en Bybit.
-        if trade.current_sl > 0 and not settings.paper_trading:
+        if trade.current_sl > 0 and not settings.paper_trading and sym not in self._closing:
             _sl_crossed = (mark <= trade.current_sl) if is_long else (mark >= trade.current_sl)
             if _sl_crossed:
                 self._sl_breach_count[sym] = self._sl_breach_count.get(sym, 0) + 1
@@ -2042,6 +2048,15 @@ class TradeController:
                     result = await self._executor.close_position(symbol, req.qty, req.side)
                     if result.success:
                         executor_logger.info("CLOSE_SUCCESS", f"Posición {symbol} cerrada con éxito")
+                        # Esperar 2s para que el execution event de Bybit actualice daily_pnl
+                        await _aio.sleep(2.0)
+                        trade2 = self._active.get(symbol)
+                        if trade2 and self._last_account and symbol in self._pnl_captured:
+                            real_pnl = self._last_account.daily_pnl - trade2.pnl_at_open
+                            log.info("[CLOSE_PNL] %s PnL real=$%.4f (daily=%.4f − base=%.4f)",
+                                     symbol, real_pnl,
+                                     self._last_account.daily_pnl, trade2.pnl_at_open)
+                            trade2.pnl_usd = real_pnl
                         GLib.idle_add(self._finalize_trade, symbol, reason)
                         return
                     else:
@@ -2049,6 +2064,15 @@ class TradeController:
                         # Posición ya en cero — otro coroutine cerró primero
                         if any(k in err.lower() for k in _ALREADY_CLOSED):
                             log.info("[CLOSE] %s ya cerrada (posición=0) — finalizando", symbol)
+                            # Esperar 2s para capturar PnL real del execution event
+                            await _aio.sleep(2.0)
+                            trade2 = self._active.get(symbol)
+                            if trade2 and self._last_account and symbol in self._pnl_captured:
+                                real_pnl = self._last_account.daily_pnl - trade2.pnl_at_open
+                                log.info("[CLOSE_PNL] %s PnL real=$%.4f (daily=%.4f − base=%.4f)",
+                                         symbol, real_pnl,
+                                         self._last_account.daily_pnl, trade2.pnl_at_open)
+                                trade2.pnl_usd = real_pnl
                             GLib.idle_add(self._finalize_trade, symbol, reason)
                             return
                         log.error("[CLOSE %d/%d] Cierre falló: %s — %s",
