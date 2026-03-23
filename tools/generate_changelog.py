@@ -1374,7 +1374,7 @@ function showCommitDetail(card) {{
     bodyText.innerHTML =
       '<textarea class="modal-notes-area" id="notes-area-' + escHtml(hash) + '" ' +
       'placeholder="Agregar descripción/notas para este commit..."></textarea>' +
-      '<button class="btn-save-notes" onclick="saveNotes(\'' + escHtml(hash) + '\')">Guardar nota</button>' +
+      '<button class="btn-save-notes" onclick="saveNotes(\\'' + escHtml(hash) + '\\')">Guardar nota</button>' +
       '<span id="notes-save-msg-' + escHtml(hash) + '" style="font-size:11px;color:var(--text-muted);margin-left:8px"></span>';
     // Pre-fill from localStorage
     const stored = localStorage.getItem('qts-note-' + hash);
