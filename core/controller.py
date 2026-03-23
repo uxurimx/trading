@@ -139,6 +139,9 @@ class TradeController:
         self._viability_last_ts:   Dict[str, float] = {}  # última evaluación de viabilidad
         # Último MarketState visto por símbolo (para enriquecer symbol_trade_detail al cerrar)
         self._last_ms: Dict[str, Any] = {}
+        # Time Stop inteligente: snooze cuando indicadores son favorables
+        self._time_stop_snooze: Dict[str, float] = {}  # sym → monotonic hasta cuándo esperar
+        self._time_stop_ext:    Dict[str, int]   = {}  # sym → número de extensiones concedidas
 
         # ── Módulo de Sesiones (TSAA) ──
         self._session: Optional[SessionManager] = None
@@ -1113,6 +1116,8 @@ class TradeController:
             self._price_against_since.pop(symbol, None)
             self._viability_last_ts.pop(symbol, None)
             self._last_ms.pop(symbol, None)
+            self._time_stop_snooze.pop(symbol, None)
+            self._time_stop_ext.pop(symbol, None)
             self._closing.discard(symbol)   # liberar lock de cierre
 
             with executor_logger.context(trade.trace_id):
@@ -1258,16 +1263,48 @@ class TradeController:
             if is_long: trade._rsi_peak = max(getattr(trade, '_rsi_peak', 0), rsi)
             else: trade._rsi_bottom = min(getattr(trade, '_rsi_bottom', 100), rsi)
 
-        # ── Time Stop ────────────────────────
+        # ── Time Stop inteligente ────────────────────────────────────────────
         if (
             settings.time_stop_enabled
             and trade.state == TradeState.OPEN
             and elapsed >= settings.time_stop_window_s
+            and now >= self._time_stop_snooze.get(sym, 0)   # no está en período de prórroga
         ):
             if progress < settings.time_stop_min_pct / 100:
-                self.close_symbol(sym, f"time_stop({elapsed}s)")
-                self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
-                return
+                # ── Verificar si los indicadores justifican una prórroga ──────
+                _cvd     = str(getattr(ms, "cvd_momentum", "")).upper()
+                _rsi     = ms.rsi_1m
+                _ext_n   = self._time_stop_ext.get(sym, 0)
+                _MAX_EXT = 2  # máximo 2 prórrogas → trade vive hasta 3× time_stop_window_s
+
+                _cvd_ok = (
+                    (is_long  and any(x in _cvd for x in ("ALCISTA", "ASCENDENTE"))) or
+                    (not is_long and any(x in _cvd for x in ("BAJISTA", "DESCENDENTE")))
+                )
+                _rsi_ok = (
+                    (is_long  and 35 <= _rsi <= 73) or
+                    (not is_long and 27 <= _rsi <= 65)
+                )
+                _price_right = progress > 0   # precio al menos en la dirección correcta
+
+                if _cvd_ok and _rsi_ok and _price_right and _ext_n < _MAX_EXT:
+                    self._time_stop_ext[sym]   = _ext_n + 1
+                    ext_s = settings.time_stop_window_s
+                    self._time_stop_snooze[sym] = now + ext_s
+                    log.info(
+                        "[TIME_STOP] %s prórroga %d/%d — CVD=%s RSI=%.0f prog=%.0f%% "
+                        "(revisa en %ds)",
+                        sym, _ext_n + 1, _MAX_EXT,
+                        getattr(ms, "cvd_momentum", ""), _rsi, progress * 100, ext_s,
+                    )
+                else:
+                    why = (f"CVD={getattr(ms,'cvd_momentum','')} RSI={_rsi:.0f} "
+                           f"prog={progress*100:.0f}% ext={_ext_n}/{_MAX_EXT}")
+                    if _ext_n > 0:
+                        log.info("[TIME_STOP] %s cerrado tras %d prórroga(s) — %s", sym, _ext_n, why)
+                    self.close_symbol(sym, f"time_stop({elapsed}s)")
+                    self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
+                    return
 
         # ── SL Watchdog + Progress Log ───────────────────────────────────────
         # Cada 30s: log del progreso del trade + verificación de SL en Bybit.
