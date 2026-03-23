@@ -902,6 +902,30 @@ class TradeController:
 
     # ── Monitoreo ─────────────────────────────────────────────────────────────
 
+    async def _fix_reconciled_opened_at(self, sym: str) -> None:
+        """
+        Corrige trade.opened_at tras una reconciliación usando el historial de
+        ejecuciones de Bybit (más preciso que pos.created_time del stream).
+        Se ejecuta ~3s después de la reconciliación para dar tiempo al executor.
+        Solo aplica si el tiempo real es ≤ 4 horas (trades de sesión actual).
+        """
+        import asyncio as _aio
+        await _aio.sleep(3.0)
+        trade = self._active.get(sym)
+        if not trade or not trade.is_active:
+            return
+        actual_ts = await self._executor.get_position_open_time(sym)
+        now = int(time.time())
+        # Aceptar solo timestamps dentro de las últimas 4 horas
+        if actual_ts > 0 and (now - actual_ts) <= 4 * 3600:
+            old = trade.opened_at
+            trade.opened_at = actual_ts
+            log.info("[RECONCILE] opened_at corregido: %s  was=%ds-ago  now=%ds-ago",
+                     sym, now - old, now - actual_ts)
+        else:
+            log.info("[RECONCILE] opened_at mantiene now (exec_ts=%s, now=%s) para %s",
+                     actual_ts, now, sym)
+
     def _reconcile_positions(self, account: "AccountState") -> None:
         """
         Reconciliación de inicio: detecta posiciones abiertas en Bybit que
@@ -927,9 +951,9 @@ class TradeController:
                 tp_price    = pos.take_profit,
                 leverage    = int(pos.leverage) if pos.leverage else 1,
             )
-            ct = pos.created_time
-            if ct > 1_000_000_000_000:
-                ct = ct // 1000
+            # opened_at: usar now como base segura para evitar que time_stop/trailing
+            # disparen inmediatamente con timestamps erróneos de pos.created_time.
+            # Una corutina asíncrona lo corregirá desde el historial de ejecuciones.
             trade = TradeRecord(
                 symbol     = sym,
                 request    = req,
@@ -937,11 +961,13 @@ class TradeController:
                 entry_price= pos.entry_price,
                 current_sl = pos.stop_loss,
                 current_tp = pos.take_profit,
-                opened_at  = ct or int(time.time()),
+                opened_at  = int(time.time()),
             )
             self._active[sym] = trade
             log.warning("[RECONCILE] Posición huérfana recuperada: %s %s @ %.5g — monitoreo activo",
                         pos.side, sym, pos.entry_price)
+            # Corrección asíncrona del opened_at real usando historial de Bybit
+            self._bridge.submit(self._fix_reconciled_opened_at(sym))
             self._notify()
 
     def _detect_closed_trades(self, states: Dict[str, "MarketState"], account: "AccountState") -> None:
@@ -1112,6 +1138,8 @@ class TradeController:
             pos = account.positions.get(f"{sym}_{h_idx}") or account.positions.get(f"{sym}_0")
 
         mark = ms.ticker.last_price
+        if mark <= 0:
+            return   # Streams aún no inicializados — esperar datos de mercado válidos
 
         # High/Low Water Mark para trailing
         if mark > 0:
