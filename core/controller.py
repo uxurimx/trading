@@ -54,6 +54,7 @@ MAX_SAME_DIRECTION = 4      # máximo trades simultáneos en la misma dirección
 # ─── Auxiliares de cálculo ────────────────────────────────────────────────────
 _BE_FEE_PCT        = 0.0025   # 0.11% round-trip fees + 0.14% slippage buffer para alts de baja liquidez
 _MIN_BE_PROGRESS   = 0.01     # progreso mínimo absoluto para mover a BE (evita t=0)
+_SL_WATCHDOG_S     = 30.0     # cada 30s verificar que el SL sigue activo en Bybit
 
 
 class TradeController:
@@ -126,6 +127,8 @@ class TradeController:
         self._symbol_scores: Dict[str, float] = {}
         # Blacklist temporal por slippage excesivo: sym → unix_ts de expiración
         self._slippage_blacklist: Dict[str, float] = {}
+        # SL Watchdog: timestamp (monotonic) de la última verificación REST por símbolo
+        self._sl_watchdog_ts:  Dict[str, float]    = {}
 
         # ── Módulo de Sesiones (TSAA) ──
         self._session: Optional[SessionManager] = None
@@ -747,48 +750,58 @@ class TradeController:
                     timestamp=int(time.time() * 1000),
                 )
 
-                # ── PASO 3: Aplicar SL/TP (3 intentos) ───────────────────────
+                # ── PASO 3: Aplicar SL/TP — 5 intentos con backoff exponencial ──
+                # Delays: 1s · 2s · 3s · 4s · 5s  (total max ~15s de espera)
+                # El primer intento espera 1s para dejar que Bybit registre la posición.
                 if req.sl_price > 0 or req.tp_price > 0:
+                    _delays = [1.0, 2.0, 3.0, 4.0, 5.0]
                     sl_ok = False
-                    for attempt in range(1, 4):
-                        await _aio.sleep(0.5 if attempt == 1 else 1.0)
+                    for attempt, delay in enumerate(_delays, start=1):
+                        await _aio.sleep(delay)
                         ok = await self._executor.set_sl_tp(
                             req.symbol, sl=req.sl_price, tp=req.tp_price,
                             side=req.side, trace_id=req.trace_id,
                         )
                         if ok:
                             sl_ok = True
-                            log.info("[EXEC 3/4] SL/TP aplicado %s  SL=%.5g  TP=%.5g (intento %d)",
-                                     req.symbol, req.sl_price, req.tp_price, attempt)
+                            log.info("[EXEC 3/4] SL/TP aplicado %s  SL=%.5g  TP=%.5g (intento %d/%d)",
+                                     req.symbol, req.sl_price, req.tp_price, attempt, len(_delays))
                             break
-                        log.warning("[EXEC 3/4] Intento %d/3 set_sl_tp falló para %s", attempt, req.symbol)
+                        log.warning("[EXEC 3/4] Intento %d/%d set_sl_tp falló para %s — esperando %.0fs",
+                                    attempt, len(_delays), req.symbol, _delays[attempt] if attempt < len(_delays) else 0)
 
                     if not sl_ok:
-                        log.critical("🚨 [EXEC 3/4] set_sl_tp agotó 3 intentos para %s", req.symbol)
-                        result = await _panic_exit("SL/TP no aplicado tras 3 intentos")
+                        log.critical("🚨 [EXEC 3/4] set_sl_tp agotó %d intentos para %s — PANIC EXIT",
+                                     len(_delays), req.symbol)
+                        result = await _panic_exit(f"SL/TP no aplicado tras {len(_delays)} intentos")
                         GLib.idle_add(self._on_order_result, result, req)
                         return
 
-                    # ── PASO 4: Verificar SL presente en posición Bybit ──────
-                    await _aio.sleep(0.5)
-                    sl_verified = await self._executor.verify_sl_on_position(req.symbol)
-                    if not sl_verified:
-                        log.critical("🚨 [EXEC 4/4] SL no presente en Bybit para %s — reintentando", req.symbol)
-                        await _aio.sleep(1.0)
-                        ok = await self._executor.set_sl_tp(
-                            req.symbol, sl=req.sl_price, tp=req.tp_price,
-                            side=req.side, trace_id=req.trace_id,
-                        )
-                        await _aio.sleep(0.5)
+                    # ── PASO 4: Verificar SL en Bybit — 3 rondas de confirmación ──
+                    # Ronda 1: verificar directamente
+                    # Ronda 2: si falla, re-aplicar y verificar de nuevo
+                    # Ronda 3: último intento tras 3s de espera — si sigue sin SL → panic
+                    for verify_round in range(1, 4):
+                        await _aio.sleep(1.0 if verify_round == 1 else 3.0)
                         sl_verified = await self._executor.verify_sl_on_position(req.symbol)
-
-                    if not sl_verified:
-                        log.critical("🚨 [EXEC 4/4] SL DEFINITIVAMENTE AUSENTE en Bybit para %s — PANIC EXIT", req.symbol)
-                        result = await _panic_exit("SL no verificado en posición Bybit")
+                        if sl_verified:
+                            log.info("[EXEC 4/4] SL verificado en Bybit para %s — trade protegido (ronda %d)",
+                                     req.symbol, verify_round)
+                            break
+                        log.critical("🚨 [EXEC 4/4] SL ausente en Bybit para %s (ronda %d/3) — reintentando set_sl_tp",
+                                     req.symbol, verify_round)
+                        if verify_round < 3:
+                            await self._executor.set_sl_tp(
+                                req.symbol, sl=req.sl_price, tp=req.tp_price,
+                                side=req.side, trace_id=req.trace_id,
+                            )
+                    else:
+                        # Las 3 rondas de verificación fallaron
+                        log.critical("🚨 [EXEC 4/4] SL DEFINITIVAMENTE AUSENTE en Bybit para %s — PANIC EXIT",
+                                     req.symbol)
+                        result = await _panic_exit("SL no verificado en Bybit tras 3 rondas de confirmación")
                         GLib.idle_add(self._on_order_result, result, req)
                         return
-
-                    log.info("[EXEC 4/4] SL verificado en Bybit para %s — trade protegido", req.symbol)
 
             except Exception as exc:
                 log.error("Error crítico ejecutando orden %s: %s", req.symbol, exc)
@@ -970,6 +983,15 @@ class TradeController:
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
             self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s, trade.close_reason)
 
+            # ── Cooldown tras be_sl con pérdida: 10 min en la misma dirección ───────
+            # Si el SL de breakeven se ejecutó pero el trade terminó en pérdida,
+            # significa que el move de SL falló en Bybit → penalizar re-entrada rápida.
+            if trade.close_reason == "be_sl" and trade.pnl_usd < 0 and trade.request:
+                now_m = time.monotonic()
+                self._exit_cooldown[symbol] = (trade.request.side, now_m + 600)  # 10 min
+                log.info("[COOLDOWN] %s — be_sl con PnL negativo, cooldown 10min (%s)",
+                         symbol, trade.request.side)
+
             # ── Slippage Blacklist: pérdida > 1.5× riesgo planeado → 4h de bloqueo ──
             planned_risk = abs(trade.request.risk_usd) if trade.request and trade.request.risk_usd else 0.0
             actual_loss  = -trade.pnl_usd  # positivo cuando hay pérdida
@@ -991,6 +1013,7 @@ class TradeController:
             self._best_sl.pop(symbol, None)
             self._trail_high.pop(symbol, None)
             self._trail_low.pop(symbol, None)
+            self._sl_watchdog_ts.pop(symbol, None)
             self._closing.discard(symbol)   # liberar lock de cierre
 
             with executor_logger.context(trade.trace_id):
@@ -1137,6 +1160,25 @@ class TradeController:
                 self._exit_cooldown[sym] = (trade.request.side, now + settings.symbol_cooldown_s)
                 return
 
+        # ── SL Watchdog: verificar que el SL sigue activo en Bybit cada 30s ──
+        # Protege contra glitches de API que eliminan el SL después de apertura.
+        # Solo aplica a trades reales (no paper) con SL configurado.
+        if (
+            trade.request
+            and trade.request.sl_price > 0
+            and not settings.paper_trading
+            and trade.opened_at > 0
+            and elapsed >= 15   # dar 15s al trade para estabilizarse
+        ):
+            _last_wdog = self._sl_watchdog_ts.get(sym, 0.0)
+            if (now - _last_wdog) >= _SL_WATCHDOG_S:
+                self._sl_watchdog_ts[sym] = now
+                self._bridge.submit(
+                    self._watchdog_check_sl(sym, trade.request.sl_price,
+                                            trade.request.tp_price, trade.request.side,
+                                            trade.request.trace_id)
+                )
+
         # ── Gestión Automática de Posición (Breakeven / Trailing) ───────────
         # Determinar el modo efectivo.
         # Si el sistema está en FULL_AUTO, gestionar TODOS los trades activos
@@ -1245,7 +1287,10 @@ class TradeController:
             elif new_state == TradeState.TRAILING:
                 notifier.trailing_activated(sym, new_sl)
 
-        self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, reason))
+        # Pasamos prev_sl y prev_state para que _modify_sl_safe pueda revertir
+        # el estado local si Bybit rechaza el move (evita be_sl con PnL negativo)
+        self._bridge.submit(self._modify_sl_safe(sym, new_sl, req.side, reason,
+                                                  prev_sl=old_sl, prev_state=prev_state))
         self._last_sl_upd[sym] = now
         self._notify()
 
@@ -1313,7 +1358,16 @@ class TradeController:
         # Implementar si es necesario para logs precisos
         pass
 
-    async def _modify_sl_safe(self, sym: str, sl: float, side: str, reason: str) -> None:
+    async def _modify_sl_safe(
+        self, sym: str, sl: float, side: str, reason: str,
+        prev_sl: float = 0.0, prev_state: "TradeState | None" = None,
+    ) -> None:
+        """
+        Intenta mover el SL en Bybit con 2 reintentos.
+        Si todos los intentos fallan y se proporcionaron prev_sl / prev_state,
+        revierte el trade local a su estado anterior para evitar que el sistema
+        piense que está protegido cuando no lo está (causa be_sl con PnL negativo).
+        """
         import asyncio as _aio
         trade    = self._active.get(sym)
         trace_id = trade.trace_id if trade else None
@@ -1335,6 +1389,68 @@ class TradeController:
             if attempt < 2:
                 await _aio.sleep(0.5)
         log.error("[SL %s] FALLÓ tras 2 intentos para %s — SL en riesgo", reason, sym)
+        # Revertir estado local: el SL en Bybit NO se movió. Si no revertimos,
+        # el sistema cree que el trade está protegido (be_sl/trailing) cuando en
+        # realidad Bybit tiene el SL original → genera cierres be_sl con pérdida.
+        if trade and prev_sl > 0:
+            log.warning("[SL %s] Revirtiendo trade %s a SL=%.6g (estado=%s) — Bybit no confirmó el move",
+                        reason, sym, prev_sl, prev_state.name if prev_state else "?")
+            trade.current_sl = prev_sl
+            if prev_state is not None:
+                trade.state = prev_state
+
+    async def _watchdog_check_sl(
+        self, sym: str, orig_sl: float, orig_tp: float, side: str, trace_id: str,
+    ) -> None:
+        """
+        Verifica cada _SL_WATCHDOG_S segundos que el SL sigue activo en Bybit.
+        Si está ausente:
+          · Intenta re-aplicar el SL actual del trade (puede haber sido movido por trailing).
+          · Si el re-apply también falla → cierra la posición.
+        Un trade sin SL es inaceptable — mejor cerrar con pérdida pequeña que
+        dejar la posición expuesta sin protección.
+        """
+        import asyncio as _aio
+        trade = self._active.get(sym)
+        if not trade or not trade.is_active:
+            return   # trade ya cerrado
+
+        sl_present = await self._executor.verify_sl_on_position(sym)
+        if sl_present:
+            return   # todo correcto
+
+        # SL ausente — usar el SL actual del trade (puede ser el trailing, no el original)
+        current_sl = trade.current_sl if trade.current_sl > 0 else orig_sl
+        current_tp = trade.current_tp if trade.current_tp > 0 else orig_tp
+
+        log.warning("[WATCHDOG] %s — SL AUSENTE en Bybit. Reintentando set_sl_tp SL=%.6g TP=%.6g",
+                    sym, current_sl, current_tp)
+        with executor_logger.context(trace_id):
+            executor_logger.warning("WATCHDOG_SL_MISSING",
+                                    f"SL ausente en Bybit — reintentando",
+                                    {"sl": current_sl, "tp": current_tp})
+
+        for attempt in range(1, 4):
+            ok = await self._executor.set_sl_tp(
+                sym, sl=current_sl, tp=current_tp, side=side, trace_id=trace_id,
+            )
+            if ok:
+                confirmed = await self._executor.verify_sl_on_position(sym)
+                if confirmed:
+                    log.info("[WATCHDOG] %s — SL restaurado (intento %d)", sym, attempt)
+                    with executor_logger.context(trace_id):
+                        executor_logger.info("WATCHDOG_SL_RESTORED",
+                                             f"SL restaurado en intento {attempt}")
+                    return
+            if attempt < 3:
+                await _aio.sleep(1.5)
+
+        # El SL no pudo restaurarse — cerrar posición para evitar trade huérfano
+        log.critical("[WATCHDOG] %s — SL NO RESTAURADO tras 3 intentos. CERRANDO posición.", sym)
+        with executor_logger.context(trace_id):
+            executor_logger.critical("WATCHDOG_PANIC_CLOSE",
+                                     "SL no restaurado — cerrando posición para evitar trade huérfano")
+        GLib.idle_add(self.close_symbol, sym, "watchdog_no_sl")
 
     async def _clear_tp(self, sym: str, side: str) -> None:
         trade = self._active.get(sym)

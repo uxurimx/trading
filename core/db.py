@@ -6,7 +6,7 @@ import os
 import queue
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Tuple
 
 import duckdb
 
@@ -121,6 +121,14 @@ def initialize_db() -> None:
             duration_s   INTEGER DEFAULT 0,
             created_at   TIMESTAMP DEFAULT now(),
             session_id   VARCHAR DEFAULT ''
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS monitored_symbols (
+            symbol     VARCHAR PRIMARY KEY,
+            vol_24h    DOUBLE  NOT NULL,
+            updated_at BIGINT  NOT NULL
         )
     """)
 
@@ -594,4 +602,44 @@ def get_trade_analytics(hours: int = 48) -> dict:
     except Exception as e:
         log.error("get_trade_analytics falló: %s", e)
         return {}
+
+
+# ─── Símbolos Monitoreados ────────────────────────────────────────────────────
+
+def save_monitored_symbols(symbols: List[Tuple[str, float]]) -> None:
+    """
+    Guarda la lista de símbolos factibles (symbol, vol_24h) en la DB.
+    Reemplaza completamente la lista anterior.
+    """
+    if not symbols:
+        return
+    try:
+        now = int(time.time())
+        con = get_connection()
+        con.execute("DELETE FROM monitored_symbols")
+        con.executemany(
+            "INSERT INTO monitored_symbols (symbol, vol_24h, updated_at) VALUES (?, ?, ?)",
+            [(sym, vol, now) for sym, vol in symbols],
+        )
+        con.close()
+        log.info("DB: %d símbolos guardados en monitored_symbols", len(symbols))
+    except Exception as e:
+        log.error("save_monitored_symbols falló: %s", e)
+
+
+def load_monitored_symbols() -> List[str]:
+    """
+    Carga la lista de símbolos desde la DB (cache del último fetch exitoso).
+    Retorna [] si la tabla está vacía.
+    """
+    try:
+        con = get_connection()
+        rows = con.execute(
+            "SELECT symbol FROM monitored_symbols ORDER BY vol_24h DESC"
+        ).fetchall()
+        con.close()
+        return [r[0] for r in rows]
+    except Exception as e:
+        log.error("load_monitored_symbols falló: %s", e)
+        return []
 

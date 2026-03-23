@@ -42,6 +42,7 @@ from core.risk import RiskFortress, RiskStatus, OK_STATUS
 from core.status_writer import StatusWriter
 from core.technicals import TradeContextAnalyzer, TechSignal, NEUTRAL_TECH
 from core.executor import BybitExecutor
+from core.db import save_monitored_symbols, load_monitored_symbols
 from core.paper_wallet import PaperWallet, PaperExecutor
 from core.strategy import StrategyEngine
 from core.controller import TradeController
@@ -1750,6 +1751,50 @@ class MainWindow(Adw.ApplicationWindow):
         self._multi_tech.update(new_tech)
 
 
+# ─── Carga de símbolos al inicio ──────────────────────────────────────────────
+
+def _load_symbols_at_startup() -> None:
+    """
+    Política de 3 niveles para cargar el universo de símbolos:
+      1. Bybit live (fetch_top_usdt_symbols_sync) → filtra blacklist → guarda en DB
+      2. Cache DB (load_monitored_symbols) si Bybit no responde
+      3. settings.symbols (.env) como último recurso
+    En todos los casos actualiza settings.symbols para que MarketStream use
+    la lista correcta.
+    """
+    import logging as _log
+    _l = _log.getLogger("qts.startup")
+    bl = settings.blacklist_set
+
+    if settings.auto_load_symbols:
+        fetched = BybitExecutor.fetch_top_usdt_symbols_sync(
+            limit   = settings.max_symbols,
+            testnet = settings.bybit_testnet,
+        )
+        if fetched:
+            # Aplicar blacklist y guardar en DB
+            filtered = [(sym, vol) for sym, vol in fetched if sym not in bl]
+            save_monitored_symbols(filtered)
+            syms = [sym for sym, _ in filtered]
+            settings.symbols = ",".join(syms)
+            _l.info("Símbolos cargados desde Bybit: %d pares (vol ≥ $10M)", len(syms))
+            return
+
+        # Bybit no respondió → intentar cache DB
+        cached = load_monitored_symbols()
+        cached = [s for s in cached if s not in bl]
+        if cached:
+            settings.symbols = ",".join(cached)
+            _l.warning(
+                "Bybit no disponible — usando cache DB: %d pares", len(cached)
+            )
+            return
+
+        _l.warning("Sin datos de Bybit ni cache DB — usando .env como fallback")
+    else:
+        _l.info("auto_load_symbols desactivado — usando .env")
+
+
 # ─── Aplicación ───────────────────────────────────────────────────────────────
 
 class QTSApplication(Adw.Application):
@@ -1757,19 +1802,10 @@ class QTSApplication(Adw.Application):
     def __init__(self) -> None:
         super().__init__(application_id="com.qts.trading")
 
-        # ── Carga dinámica de símbolos desde Bybit ────────────────────────────
+        # ── Carga dinámica de símbolos desde Bybit → DB ───────────────────────
+        # Prioridad: (1) Bybit live  →  (2) Cache DB  →  (3) .env fallback
         # Se hace ANTES de crear MarketStream para que use la lista actualizada.
-        # Ejecuta de forma síncrona (bloqueante brevemente) solo en startup.
-        if settings.auto_load_symbols:
-            fetched = BybitExecutor.fetch_top_usdt_symbols_sync(
-                limit   = settings.max_symbols,
-                testnet = settings.bybit_testnet,
-            )
-            if fetched:
-                bl = settings.blacklist_set
-                filtered = [s for s in fetched if s not in bl]
-                settings.symbols = ",".join(filtered)
-        # Si falla o está desactivado, usa settings.symbols (fallback manual)
+        _load_symbols_at_startup()
 
         self._stream   = MarketStream()
         self._acct     = AccountStream()

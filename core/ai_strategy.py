@@ -479,18 +479,27 @@ class AIStrategyAgent:
                 strategy_logger.error("VALIDATION_ERROR", "Campos obligatorios faltantes", {"data": data})
                 return None
 
-            # Normalizar símbolo: corregir typo *SDT → *USDT (ej. UAISDT → UAIUSDT)
-            if symbol not in symbols and symbol.endswith("SDT") and not symbol.endswith("USDT"):
-                symbol = symbol[:-3] + "USDT"
+            # Normalizar símbolo: solo se admiten pares USDT de futuros perpetuos.
+            # Corregir typos comunes antes de buscar en la lista.
+            if not symbol.endswith("USDT"):
+                # Intento 1: typo *SDT → *USDT (ej. UAISDT → UAIUSDT)
+                if symbol.endswith("SDT"):
+                    symbol = symbol[:-3] + "USDT"
+                # Intento 2: símbolo sin sufijo (ej. "UAI" → "UAIUSDT")
+                elif not any(symbol.endswith(s) for s in ("BTC", "ETH", "BNB")):
+                    symbol = symbol + "USDT"
+                else:
+                    # El AI devolvió un par no-USDT (ej. UAIBTC) — rechazar
+                    log.error("AI Strategy: símbolo '%s' no es par USDT — ignorando", symbol)
+                    strategy_logger.warning("SYMBOL_ERROR",
+                                            f"Símbolo {symbol} no es par USDT perpetuo",
+                                            {"raw_symbol": symbol})
+                    return None
 
             if symbol not in symbols:
-                sym_usdt = symbol + "USDT"
-                if sym_usdt in symbols:
-                    symbol = sym_usdt
-                else:
-                    log.error("AI Strategy: símbolo '%s' no monitoreado", symbol)
-                    strategy_logger.warning("SYMBOL_ERROR", f"Símbolo {symbol} no monitoreado")
-                    return None
+                log.error("AI Strategy: símbolo '%s' no está en la lista monitoreada", symbol)
+                strategy_logger.warning("SYMBOL_ERROR", f"Símbolo {symbol} no monitoreado")
+                return None
 
             # ── Validar dirección coherente ─────────────────────────────────────
             opp = opps.get(symbol)
