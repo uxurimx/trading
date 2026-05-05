@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "qts-trading": {
-      "command": "python",
-      "args": ["/home/dev/Projects/trading/mcp_server.py"]
+      "command": "/home/dev/Projects/jesustorres/Projects/trading/.venv/bin/python",
+      "args": ["/home/dev/Projects/jesustorres/Projects/trading/mcp_server.py"]
     }
   }
 }
