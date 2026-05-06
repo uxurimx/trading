@@ -243,6 +243,18 @@ class TradeController:
         self.set_mode(AutoMode.MANUAL)
         self._notify()
 
+    def sync_from_bybit(self) -> None:
+        """
+        Fuerza una sincronización inmediata con Bybit vía REST.
+        Recupera posiciones abiertas y crea TradeRecords para las que
+        el sistema no conoce (útil tras restart o desincronización).
+        """
+        if settings.paper_trading:
+            return
+        log.info("[SYNC] Sincronización manual con Bybit solicitada.")
+        self._orphan_check_ts = 0.0   # forzar chequeo en el próximo tick
+        self._bridge.submit(self._check_orphan_positions_rest())
+
     def _finalize_session_and_audit(self) -> None:
         """Lógica común para cerrar sesión y lanzar agente de auditoría."""
         if not self._session:
@@ -432,6 +444,8 @@ class TradeController:
         if not self._reconciled and account.connected and not settings.paper_trading:
             self._reconcile_positions(account)
             self._reconciled = True
+            # También disparar REST check inmediato: el WS puede no tener posiciones todavía
+            self._orphan_check_ts = 0.0   # forzar que el chequeo de abajo lo ejecute ya
 
         # Detectar trades cerrados externamente (o por SL/TP de Bybit)
         self._detect_closed_trades(states, account)

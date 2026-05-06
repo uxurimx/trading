@@ -140,14 +140,30 @@ def _build_market_snapshot(
     candidates.sort(reverse=True)
     top = candidates[:settings.ai_top_symbols]
 
+    # Contexto de temporalidad para el modelo
+    _SPEED_CONTEXT = {
+        "nano":     ("nano — scalping extremo",   "1m/3m",   "30-120s",  "0.5-1.5×ATR"),
+        "scalp":    ("scalp — operativa rápida",  "1m/15m",  "2-15min",  "1-2×ATR"),
+        "fast":     ("fast — intradía corto",     "5m/30m",  "15-60min", "1.5-2.5×ATR"),
+        "standard": ("standard — intradía normal","15m/1h",  "1-4h",     "2-4×ATR"),
+    }
+    spd = settings.speed_level
+    sp_desc, sp_tfs, sp_dur, sp_tp = _SPEED_CONTEXT.get(spd, _SPEED_CONTEXT["standard"])
+    speed_ctx = (
+        f"=== MODO DE OPERACIÓN: {sp_desc.upper()} ===\n"
+        f"Temporalidad: {sp_tfs}  |  Duración esperada: {sp_dur}  |  TP objetivo: {sp_tp}\n"
+        f"Criterio: entradas precisas en {sp_tfs}, SL/TP ajustados a este horizonte temporal.\n"
+    )
+
     if not top:
         return (
-            f"=== SIN CANDIDATOS VÁLIDOS ===\n"
+            speed_ctx
+            + f"=== SIN CANDIDATOS VÁLIDOS ===\n"
             f"(score ≥ {settings.ai_min_score} Y ATR ≥ {settings.ai_min_atr_pct}% Y R:R ≥ {settings.min_rr})\n"
             "Mercado en baja volatilidad — esperar condiciones mejores."
         )
 
-    lines = [f"=== TOP {len(top)} CANDIDATOS (score ≥ {settings.ai_min_score}, ATR ≥ {settings.ai_min_atr_pct}%) ==="]
+    lines = [speed_ctx + f"=== TOP {len(top)} CANDIDATOS (score ≥ {settings.ai_min_score}, ATR ≥ {settings.ai_min_atr_pct}%) ==="]
 
     for _score, sym in top:
         ms   = states.get(sym)

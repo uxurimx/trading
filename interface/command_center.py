@@ -834,6 +834,22 @@ class TradeCard(Gtk.Box):
                   self._risk_lbl3, self._risk_lbl4]:
             detail_box.append(w)
 
+        # ── Señales de mercado aplicadas al trade ─────────────────────────
+        detail_box.append(_sep())
+        self._signals_title = _section("SEÑALES EN TIEMPO REAL")
+        self._signals_abs   = _ml()
+        self._signals_rg    = _ml()
+        self._signals_tr    = _ml()
+        self._signals_tech  = _ml()
+        self._signals_opp   = _ml()
+        self._advice_lbl    = _ml()
+        self._advice_lbl.set_wrap(True)
+        self._advice_lbl.set_max_width_chars(55)
+        for w in [self._signals_title, self._signals_abs, self._signals_rg,
+                  self._signals_tr, self._signals_tech, self._signals_opp,
+                  self._advice_lbl]:
+            detail_box.append(w)
+
         self._revealer.set_child(detail_box)
         self.append(self._revealer)
 
@@ -1065,7 +1081,9 @@ class TradeCard(Gtk.Box):
         dialog.present(self.get_root())
 
     def show_trade(self, trade: "TradeRecord", mark: float, upnl: float,
-                   klines: list = None, market_state=None) -> None:
+                   klines: list = None, market_state=None,
+                   abs_signal=None, regime=None, trend=None,
+                   tech=None, opp=None) -> None:
         self.set_visible(True)
         req = trade.request
         if not req:
@@ -1291,6 +1309,198 @@ class TradeCard(Gtk.Box):
         else:
             self._warn_lbl.set_visible(False)
 
+        # Señales de mercado en tiempo real
+        self._render_trade_signals(trade, mark, abs_signal, regime, trend, tech, opp)
+
+    def _render_trade_signals(self, trade, mark: float,
+                               abs_signal, regime, trend, tech, opp) -> None:
+        """Renderiza señales aplicadas al trade con consejo accionable."""
+        req  = trade.request
+        side = req.side if req else "Buy"
+        is_long = side == "Buy"
+
+        # ── Absorción ─────────────────────────────────────────────────────
+        if abs_signal and abs_signal.is_signal:
+            abs_col = HEX[abs_signal.color_key]
+            abs_aligned = (
+                (abs_signal.label == "ABSORCIÓN COMPRADORA" and is_long) or
+                (abs_signal.label == "ABSORCIÓN VENDEDORA"  and not is_long)
+            )
+            abs_icon = "✓" if abs_aligned else "✗"
+            abs_clr  = HEX["buy"] if abs_aligned else HEX["sell"]
+            self._signals_abs.set_markup(
+                f'<span color="{HEX["sub"]}">Absorción </span>'
+                f'<span color="{abs_clr}" weight="bold">{abs_icon} {abs_signal.label}</span>'
+                f'<span color="{HEX["over"]}"> {abs_signal.score}/100</span>'
+            )
+        else:
+            self._signals_abs.set_markup(
+                f'<span color="{HEX["sub"]}">Absorción </span>'
+                f'<span color="{HEX["over"]}">Sin señal</span>'
+            )
+
+        # ── Régimen ───────────────────────────────────────────────────────
+        if regime:
+            rg_favorable = (
+                (regime.regime in ("TRENDING_UP", "ACCUMULATION") and is_long) or
+                (regime.regime == "TRENDING_DOWN" and not is_long)
+            )
+            rg_icon = "✓" if rg_favorable else ("✗" if regime.regime == "VOLATILE" else "─")
+            rg_clr  = HEX["buy"] if rg_favorable else (HEX["sell"] if regime.regime == "VOLATILE" else HEX["over"])
+            self._signals_rg.set_markup(
+                f'<span color="{HEX["sub"]}">Régimen   </span>'
+                f'<span color="{rg_clr}" weight="bold">{rg_icon} {regime.label}</span>'
+            )
+        else:
+            self._signals_rg.set_markup(
+                f'<span color="{HEX["sub"]}">Régimen   </span>'
+                f'<span color="{HEX["over"]}">──</span>'
+            )
+
+        # ── Tendencia ─────────────────────────────────────────────────────
+        if trend and trend.direction != "NEUTRAL":
+            tr_aligned = (
+                (trend.direction == "ALCISTA" and is_long) or
+                (trend.direction == "BAJISTA" and not is_long)
+            )
+            tr_icon = "✓" if tr_aligned else "✗"
+            tr_clr  = HEX["buy"] if tr_aligned else HEX["sell"]
+            self._signals_tr.set_markup(
+                f'<span color="{HEX["sub"]}">Tendencia </span>'
+                f'<span color="{tr_clr}" weight="bold">{tr_icon} {trend.label}</span>'
+                f'<span color="{HEX["over"]}"> {trend.score}% ({trend.aligned}/{trend.total} TFs)</span>'
+            )
+        else:
+            self._signals_tr.set_markup(
+                f'<span color="{HEX["sub"]}">Tendencia </span>'
+                f'<span color="{HEX["over"]}">Sin tendencia clara</span>'
+            )
+
+        # ── Técnicos ─────────────────────────────────────────────────────
+        if tech and tech.has_data:
+            ema_bull = tech.ema15m_bull and tech.ema1h_bull
+            ema_bear = (not tech.ema15m_bull) and (not tech.ema1h_bull)
+            rsi_bull = tech.rsi_15m > 50 and tech.rsi_1h > 50
+            rsi_bear = tech.rsi_15m < 50 and tech.rsi_1h < 50
+            ema_ok = (ema_bull and is_long) or (ema_bear and not is_long)
+            rsi_ok = (rsi_bull and is_long) or (rsi_bear and not is_long)
+            ema_clr = HEX["buy"] if ema_ok else HEX["over"]
+            rsi_clr = HEX["buy"] if rsi_ok else HEX["over"]
+            atr_str = f"ATR {tech.atr_15m:.2f}" if tech.atr_15m > 0 else ""
+            self._signals_tech.set_markup(
+                f'<span color="{HEX["sub"]}">Técnicos  </span>'
+                f'<span color="{ema_clr}">EMA {"✓" if ema_ok else "─"}</span>'
+                f'  <span color="{rsi_clr}">RSI {tech.rsi_15m:.0f} {"✓" if rsi_ok else "─"}</span>'
+                + (f'  <span color="{HEX["over"]}">{atr_str}</span>' if atr_str else "")
+            )
+        else:
+            self._signals_tech.set_markup(
+                f'<span color="{HEX["sub"]}">Técnicos  </span>'
+                f'<span color="{HEX["over"]}">Sin datos de klines</span>'
+            )
+
+        # ── Oportunidad ──────────────────────────────────────────────────
+        if opp:
+            opp_clr = HEX[opp.color_key] if opp.score >= 30 else HEX["over"]
+            self._signals_opp.set_markup(
+                f'<span color="{HEX["sub"]}">Score     </span>'
+                f'<span color="{opp_clr}" weight="bold">{opp.score}/100</span>'
+                + (f'<span color="{HEX["over"]}" size="small">  {"  ".join(opp.reasons[:2])}</span>'
+                   if opp.reasons else "")
+            )
+        else:
+            self._signals_opp.set_markup(
+                f'<span color="{HEX["sub"]}">Score     </span>'
+                f'<span color="{HEX["over"]}">──</span>'
+            )
+
+        # ── Consejo accionable ────────────────────────────────────────────
+        advice = self._generate_advice(trade, mark, abs_signal, regime, trend, tech, opp, is_long)
+        if advice:
+            self._advice_lbl.set_markup(
+                f'<span color="{HEX["warn"]}" size="small" weight="bold">→ {GLib.markup_escape_text(advice)}</span>'
+            )
+        else:
+            self._advice_lbl.set_text("")
+
+    def _generate_advice(self, trade, mark, abs_signal, regime, trend, tech, opp, is_long: bool) -> str:
+        """Genera un consejo accionable basado en las señales actuales vs la dirección del trade."""
+        req = trade.request
+        if not req:
+            return ""
+        entry = trade.entry_price or req.entry_price
+        tp    = req.tp_price
+        sl    = trade.current_sl
+
+        # Contar señales favorables vs adversas
+        signals_ok  = 0
+        signals_bad = 0
+
+        if abs_signal and abs_signal.is_signal:
+            if (abs_signal.label == "ABSORCIÓN COMPRADORA" and is_long) or \
+               (abs_signal.label == "ABSORCIÓN VENDEDORA"  and not is_long):
+                signals_ok += 2
+            else:
+                signals_bad += 2
+
+        if regime:
+            if (regime.regime in ("TRENDING_UP", "ACCUMULATION") and is_long) or \
+               (regime.regime == "TRENDING_DOWN" and not is_long):
+                signals_ok += 1
+            elif regime.regime == "VOLATILE":
+                signals_bad += 2
+            elif (regime.regime == "TRENDING_DOWN" and is_long) or \
+                 (regime.regime == "TRENDING_UP" and not is_long):
+                signals_bad += 1
+
+        if trend and trend.direction != "NEUTRAL":
+            if (trend.direction == "ALCISTA" and is_long) or \
+               (trend.direction == "BAJISTA" and not is_long):
+                signals_ok += 1
+            else:
+                signals_bad += 1
+
+        if tech and tech.has_data:
+            ema_bull = tech.ema15m_bull and tech.ema1h_bull
+            ema_bear = (not tech.ema15m_bull) and (not tech.ema1h_bull)
+            rsi_bull = tech.rsi_15m > 50 and tech.rsi_1h > 50
+            rsi_bear = tech.rsi_15m < 50 and tech.rsi_1h < 50
+            ema_ok = (ema_bull and is_long) or (ema_bear and not is_long)
+            rsi_ok = (rsi_bull and is_long) or (rsi_bear and not is_long)
+            if ema_ok: signals_ok += 1
+            if rsi_ok: signals_ok += 1
+            if not ema_ok: signals_bad += 1
+
+        # Progreso del trade
+        tp_dist = abs(tp - entry) if entry > 0 else 1
+        prog = ((mark - entry) / tp_dist if is_long else (entry - mark) / tp_dist) if tp_dist > 0 else 0
+        prog = max(0.0, min(1.0, prog))
+
+        from core.order_model import TradeState
+        # Reglas de consejo
+        if regime and regime.regime == "VOLATILE":
+            return "Mercado volátil — considera reducir tamaño o cerrar si no toca TP pronto"
+        if signals_bad >= 3 and prog < 0.3:
+            return "Múltiples señales adversas — setup debilitado, evalúa salida parcial"
+        if signals_bad >= 2 and prog < 0.15:
+            return "Setup debilitándose — vigilar SL, no promediar a la baja"
+        if signals_ok >= 3 and prog > 0.5:
+            return "Setup fuerte + buen progreso — mantener, el trail protegerá ganancias"
+        if signals_ok >= 4:
+            return "Todas las señales alineadas — mantener posición con confianza"
+        if prog >= 0.8 and signals_ok < signals_bad:
+            return "Cerca del TP con señales mixtas — considera salida parcial ya"
+        if trade.state == TradeState.BREAKEVEN and signals_bad > signals_ok:
+            return "Breakeven activo — no puedes perder, pero señales adversas sugieren salir"
+        if trend and trend.direction != "NEUTRAL":
+            if (trend.direction == "ALCISTA" and not is_long) or \
+               (trend.direction == "BAJISTA" and is_long):
+                if trend.score >= 60:
+                    return f"Tendencia {'alcista' if not is_long else 'bajista'} fuerte en contra — vigilar de cerca"
+        if signals_ok > signals_bad:
+            return "Setup moderado — mantener siguiendo el plan original"
+        return ""
+
     def clear(self) -> None:
         self.set_visible(False)
         self._symbol = ""
@@ -1435,6 +1645,11 @@ class CommandCenter(Gtk.Box):
         self._jnl_ts:       float = 0.0
         self._jnl_log_len:  int   = -1
         self._market_states: dict = {}
+        self._abs_signals:  dict = {}
+        self._regimes:      dict = {}
+        self._trends:       dict = {}
+        self._techs:        dict = {}
+        self._opps:         dict = {}
         self._hist_ts:      float = 0.0
         self._last_cs:      Optional[ControllerState] = None
         self._radar_ts:     float = 0.0
@@ -1550,12 +1765,19 @@ class CommandCenter(Gtk.Box):
         self._trades_title = _section("ACTIVOS (0)")
         self._total_pnl_lbl = _ml()
         self._total_pnl_lbl.set_hexpand(True)
+        self._sync_btn = Gtk.Button(label="⟳ Bybit")
+        self._sync_btn.add_css_class("flat")
+        self._sync_btn.set_tooltip_text(
+            "Sincronizar con Bybit vía REST — importa posiciones abiertas que el sistema no conoce"
+        )
+        self._sync_btn.connect("clicked", self._on_sync_bybit)
         close_all_btn = Gtk.Button(label="✗ Todo")
         close_all_btn.add_css_class("destructive-action")
         close_all_btn.add_css_class("flat")
         close_all_btn.connect("clicked", lambda _: self._controller.close_now())
         trades_hdr.append(self._trades_title)
         trades_hdr.append(self._total_pnl_lbl)
+        trades_hdr.append(self._sync_btn)
         trades_hdr.append(close_all_btn)
         left.append(trades_hdr)
 
@@ -1707,6 +1929,18 @@ class CommandCenter(Gtk.Box):
             )
         else:
             self._dur_hint.set_text("")
+
+    def _on_sync_bybit(self, _btn) -> None:
+        self._sync_btn.set_label("⟳ …")
+        self._sync_btn.set_sensitive(False)
+        self._controller.sync_from_bybit()
+        # Re-habilitar botón tras 3s para evitar spam
+        GLib.timeout_add(3000, self._reset_sync_btn)
+
+    def _reset_sync_btn(self) -> bool:
+        self._sync_btn.set_label("⟳ Bybit")
+        self._sync_btn.set_sensitive(True)
+        return False   # no repetir
 
     def _on_controller_update(self, cs: ControllerState) -> None:
         GLib.idle_add(self._render_controller_state, cs)
@@ -1986,9 +2220,19 @@ class CommandCenter(Gtk.Box):
         risk:          "RiskStatus",
         sim:           Optional[dict] = None,
         market_states: Optional[dict] = None,
+        abs_signals:   Optional[dict] = None,
+        regimes:       Optional[dict] = None,
+        trends:        Optional[dict] = None,
+        techs:         Optional[dict] = None,
+        opps:          Optional[dict] = None,
     ) -> None:
         self._session_header.update()
-        self._market_states = market_states or {}
+        self._market_states  = market_states or {}
+        self._abs_signals    = abs_signals   or {}
+        self._regimes        = regimes       or {}
+        self._trends         = trends        or {}
+        self._techs          = techs         or {}
+        self._opps           = opps          or {}
         self._render_balance(account)
         self._render_active_trades(account, self._market_states)
         self._render_simulation(sim)
@@ -2074,7 +2318,16 @@ class CommandCenter(Gtk.Box):
 
             total_upnl += upnl
             kl = self._klines_store.get(sym, _settings.slow_kline) if self._klines_store else []
-            self._trade_cards[sym].show_trade(trade, mark, upnl, klines=kl, market_state=ms)
+            self._trade_cards[sym].show_trade(
+                trade, mark, upnl,
+                klines       = kl,
+                market_state = ms,
+                abs_signal   = self._abs_signals.get(sym),
+                regime       = self._regimes.get(sym),
+                trend        = self._trends.get(sym),
+                tech         = self._techs.get(sym),
+                opp          = self._opps.get(sym),
+            )
 
         # Actualizar encabezado
         paper_tag = ' <span foreground="#f8e45c" weight="bold">[PAPER]</span>' if _settings.paper_trading else ""

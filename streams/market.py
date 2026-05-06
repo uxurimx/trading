@@ -275,6 +275,23 @@ class MarketState:
 
     # ── Reset ─────────────────────────────────────────────────────────────────
 
+    def seed_volume_profile(self, klines: list) -> None:
+        """
+        Inicializa el VolumeProfile con datos históricos de klines REST.
+        Se llama una vez al arrancar, antes de que el WS acumule suficientes trades.
+        Formato Bybit: [startTime, open, high, low, close, volume, turnover]
+        """
+        if getattr(self, "_vp_seeded", False):
+            return
+        for k in reversed(klines):   # reversed → más antiguo primero
+            try:
+                h = float(k[2]); l = float(k[3]); c = float(k[4]); v = float(k[5])
+                if v > 0:
+                    self.volume_profile.add((h + l + c) / 3.0, v)
+            except (IndexError, ValueError, TypeError):
+                pass
+        self._vp_seeded = True
+
     def reset_session(self) -> None:
         self.cvd = 0.0
         self.session_buy_vol  = 0.0
@@ -282,6 +299,7 @@ class MarketState:
         self.liq_long_total   = 0.0
         self.liq_short_total  = 0.0
         self.volume_profile.reset()
+        self._vp_seeded = False   # permitir re-seed tras reset
 
     # ── Propiedades derivadas ─────────────────────────────────────────────────
 

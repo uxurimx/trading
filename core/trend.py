@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 
 # Timeframes por nivel de velocidad  (etiqueta, segundos, peso Fibonacci)
 _TF_BY_SPEED: dict = {
+    "nano": [
+        ("1m",  60,  1),
+        ("3m",  180, 2),
+    ],
     "scalp": [
         ("1m",   60,   1),
         ("3m",   180,  2),

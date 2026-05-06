@@ -31,13 +31,13 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 from core.absorption import AbsorptionDetector, AbsorptionSignal, NEUTRAL_SIGNAL
 from core.liquidity import LiquidityAnalyzer, LiquidityMap, LiquidityLevel, _EMPTY_MAP
-from core.trend import TrendAnalyzer, TrendSignal, NEUTRAL_TREND, TIMEFRAMES
+from core.trend import TrendAnalyzer, TrendSignal, NEUTRAL_TREND
 from core.regime import (
     RegimeClassifier, OpportunityScorer,
     RegimeSignal, OpportunitySignal,
     NEUTRAL_REGIME, NEUTRAL_OPP,
 )
-from core.config import settings
+from core.config import settings, SPEED_CONFIGS
 from core.risk import RiskFortress, RiskStatus, OK_STATUS
 from core.status_writer import StatusWriter
 from core.technicals import TradeContextAnalyzer, TechSignal, NEUTRAL_TECH
@@ -122,6 +122,15 @@ def fm(v: float, sign: bool = False) -> str:
 def sc(val: float) -> str:
     """Color semántico según signo."""
     return HEX["buy"] if val >= 0 else HEX["sell"]
+
+
+def _interval_label(v: str) -> str:
+    """Convierte '60' → '1h', '15' → '15m', etc."""
+    try:
+        n = int(v)
+        return f"{n // 60}h" if n >= 60 else f"{n}m"
+    except (ValueError, TypeError):
+        return str(v)
 
 
 def mk(text: str, color: str, bold: bool = False) -> str:
@@ -266,6 +275,23 @@ class BuyPctBar(Gtk.DrawingArea):
         cr.fill()
 
 
+# ─── Speed level — TF labels visibles por modo ───────────────────────────────
+
+_SPEED_TF_LABELS: dict[str, set] = {
+    "nano":     {"1m", "3m"},
+    "scalp":    {"1m", "3m", "5m", "15m"},
+    "fast":     {"1m", "3m", "5m", "15m", "30m"},
+    "standard": {"1m", "3m", "5m", "30m", "1h", "6h"},
+}
+_ALL_TF_LABELS = ["1m", "3m", "5m", "15m", "30m", "1h", "6h"]
+_SPEED_ITEMS   = [
+    ("nano",     "NANO"),
+    ("scalp",    "SCALP"),
+    ("fast",     "FAST"),
+    ("standard", "STD"),
+]
+
+
 # ─── Widget: Trend Bar ───────────────────────────────────────────────────────
 
 class TrendBar(Gtk.Box):
@@ -291,9 +317,10 @@ class TrendBar(Gtk.Box):
         sep.set_margin_end(4)
         self.append(sep)
 
-        # Bloques por timeframe
-        self._tf_boxes: dict[str, Gtk.Label] = {}
-        for label, _, _ in TIMEFRAMES:
+        # Bloques por timeframe — todos los posibles; visibilidad controlada por speed
+        self._tf_containers: dict[str, Gtk.Box] = {}
+        self._tf_boxes:      dict[str, Gtk.Label] = {}
+        for label in _ALL_TF_LABELS:
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             box.set_margin_start(6)
             box.set_margin_end(6)
@@ -301,9 +328,7 @@ class TrendBar(Gtk.Box):
             val_lbl = Gtk.Label()
             val_lbl.add_css_class("qts-mono")
             val_lbl.set_use_markup(True)
-            val_lbl.set_markup(
-                f'<span color="{HEX["over"]}"><b>─</b></span>'
-            )
+            val_lbl.set_markup(f'<span color="{HEX["over"]}"><b>─</b></span>')
 
             key_lbl = Gtk.Label(label=label)
             key_lbl.add_css_class("qts-label")
@@ -311,7 +336,11 @@ class TrendBar(Gtk.Box):
             box.append(val_lbl)
             box.append(key_lbl)
             self.append(box)
-            self._tf_boxes[label] = val_lbl
+            self._tf_containers[label] = box
+            self._tf_boxes[label]      = val_lbl
+
+        # Inicializar visibilidad según speed actual
+        self._sync_tf_visibility()
 
         sep2 = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
         sep2.set_margin_start(6)
@@ -338,8 +367,61 @@ class TrendBar(Gtk.Box):
         self._score_lbl = Gtk.Label()
         self._score_lbl.add_css_class("qts-mono-sm")
         self._score_lbl.set_use_markup(True)
-        self._score_lbl.set_margin_end(12)
+        self._score_lbl.set_margin_end(8)
         self.append(self._score_lbl)
+
+        # Spacer → empuja el selector de speed hacia la derecha
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        self.append(spacer)
+
+        sep3 = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        sep3.set_margin_start(6)
+        sep3.set_margin_end(8)
+        self.append(sep3)
+
+        # Selector de Speed Level (linked pill buttons, mismo estilo que símbolos)
+        speed_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=0,
+            css_classes=["symbol-group"],
+        )
+        speed_box.set_margin_end(8)
+        speed_box.set_valign(Gtk.Align.CENTER)
+
+        self._speed_btns:     dict[str, Gtk.ToggleButton] = {}
+        self._speed_updating: bool = False
+        first_btn: Optional[Gtk.ToggleButton] = None
+
+        for key, label in _SPEED_ITEMS:
+            btn = Gtk.ToggleButton(label=label)
+            cfg = SPEED_CONFIGS.get(key, {})
+            btn.set_tooltip_text(
+                f"{cfg.get('desc', '')}  ·  klines {cfg.get('fast', '?')}m/{cfg.get('slow', '?')}m"
+            )
+            if first_btn is None:
+                first_btn = btn
+            else:
+                btn.set_group(first_btn)
+            btn.set_active(key == settings.speed_level)
+            btn.connect("toggled", self._on_speed_toggled, key)
+            speed_box.append(btn)
+            self._speed_btns[key] = btn
+
+        self.append(speed_box)
+
+    def _sync_tf_visibility(self) -> None:
+        """Muestra solo los TF del speed actual; oculta el resto."""
+        active = _SPEED_TF_LABELS.get(settings.speed_level, _SPEED_TF_LABELS["standard"])
+        for label, box in self._tf_containers.items():
+            box.set_visible(label in active)
+
+    def _on_speed_toggled(self, btn: Gtk.ToggleButton, key: str) -> None:
+        if self._speed_updating:
+            return
+        if btn.get_active():
+            settings.speed_level = key
+            self._sync_tf_visibility()
 
     def update(self, sig: TrendSignal) -> None:
         for tf in sig.timeframes:
@@ -364,6 +446,15 @@ class TrendBar(Gtk.Box):
         self._score_lbl.set_markup(
             f'<span color="{col}" weight="bold">{sig.score}%</span>'
         )
+
+        # Sincronizar botón activo con settings (cambio externo, ej. desde .env)
+        current = settings.speed_level
+        active_btn = self._speed_btns.get(current)
+        if active_btn and not active_btn.get_active():
+            self._speed_updating = True
+            active_btn.set_active(True)
+            self._speed_updating = False
+            self._sync_tf_visibility()
 
 
 # ─── Widget: Score Bar (Cairo) ───────────────────────────────────────────────
@@ -466,11 +557,51 @@ class PositionBar(Gtk.Box):
         self._render_balance(acct.balance, risk)
         self._render_risk(risk)
 
+    @staticmethod
+    def _compute_progress(pos) -> Optional[tuple]:
+        """
+        Calcula el progreso hacia el TP usando la misma fórmula que el controller.
+        Retorna (prog_pct, level, next_label, next_pct) o None si no hay TP.
+        """
+        entry = pos.entry_price
+        tp    = pos.take_profit
+        mark  = pos.mark_price
+        if tp <= 0 or entry <= 0:
+            return None
+        tp_dist = abs(tp - entry)
+        if tp_dist < 1e-9:
+            return None
+
+        prog     = (mark - entry) / tp_dist if pos.is_long else (entry - mark) / tp_dist
+        prog_pct = prog * 100
+
+        g1, g2, g3 = settings.g1_pct, settings.g2_pct, settings.g3_pct
+        l1, l2      = settings.l1_pct, settings.l2_pct
+        kil, l3     = settings.kill_switch_pct, settings.l3_pct
+
+        if prog_pct >= l3:
+            level, next_label, next_pct = "L3",   "TP",   100
+        elif prog_pct >= kil:
+            level, next_label, next_pct = "KILL", "L3",   l3
+        elif prog_pct >= l2:
+            level, next_label, next_pct = "L2",   "KILL", kil
+        elif prog_pct >= l1:
+            level, next_label, next_pct = "L1",   "L2",   l2
+        elif prog_pct >= g3:
+            level, next_label, next_pct = "G3",   "L1",   l1
+        elif prog_pct >= g2:
+            level, next_label, next_pct = "G2",   "G3",   g3
+        elif prog_pct >= g1:
+            level, next_label, next_pct = "G1",   "G2",   g2
+        else:
+            level, next_label, next_pct = None,   "G1",   g1
+
+        return prog_pct, level, next_label, next_pct
+
     def _render_positions(self, acct: AccountState) -> None:
         positions = acct.open_positions()
 
         if not acct.connected and not positions:
-            key_color = HEX["over"]
             if acct.error:
                 self._pos_lbl.set_markup(
                     f'<span color="{HEX["sell"]}" size="small">⚠ {GLib.markup_escape_text(acct.error)}</span>'
@@ -495,6 +626,27 @@ class PositionBar(Gtk.Box):
             pnl_s = f"{pos.unrealized_pnl:+.2f}"
             pct_s = f"{pos.pnl_pct:+.1f}%"
 
+            # Progreso hacia TP con nivel G/L activo
+            prog_str = ""
+            prog_info = self._compute_progress(pos)
+            if prog_info:
+                prog_pct, level, next_label, next_pct = prog_info
+                if level in ("L2", "L3", "KILL"):
+                    lv_col = HEX["buy"]
+                elif level == "L1":
+                    lv_col = HEX["blue"]
+                elif level in ("G1", "G2", "G3"):
+                    lv_col = HEX["warn"]
+                else:
+                    lv_col = HEX["over"]
+                prog_col = HEX["buy"] if prog_pct >= 0 else HEX["sell"]
+                lv_str   = level if level else "─"
+                prog_str = (
+                    f'  <span color="{lv_col}" weight="bold">{lv_str}</span>'
+                    f'<span color="{prog_col}"> {prog_pct:.0f}%</span>'
+                    f'<span color="{HEX["over"]}">→{next_label}@{next_pct:.0f}%</span>'
+                )
+
             liq_str = ""
             if pos.liquidation_price > 0:
                 d = pos.distance_to_liq_pct
@@ -512,7 +664,7 @@ class PositionBar(Gtk.Box):
                 f'  <span color="{HEX["sub"]}">▶</span>'
                 f'  <span color="{HEX["text"]}">{fp(pos.mark_price)}</span>'
                 f'  <span color="{pnlc}" weight="bold">{pnl_s} ({pct_s})</span>'
-                f'{liq_str}{sl_str}{tp_str}'
+                f'{prog_str}{liq_str}{sl_str}{tp_str}'
             )
 
         self._pos_lbl.set_markup("    ".join(parts))
@@ -775,10 +927,14 @@ class IntelPanel(Gtk.Box):
         self.append(self._sep())
 
         # ── Técnicos (Phase 6+) ────────────────────────────────────────────
-        tech_sec = Gtk.Label(label="TÉCNICOS  15m · 1h")
-        tech_sec.add_css_class("qts-section")
-        tech_sec.set_xalign(0)
-        self.append(tech_sec)
+        self._tech_sec_lbl = Gtk.Label()
+        self._tech_sec_lbl.add_css_class("qts-section")
+        self._tech_sec_lbl.set_xalign(0)
+        self._tech_sec_lbl.set_label(
+            f"TÉCNICOS  {settings.speed_cfg.get('tf_label','15m')} · "
+            f"{_interval_label(settings.slow_kline)}"
+        )
+        self.append(self._tech_sec_lbl)
 
         self._tech_ema15_lbl  = self._row_label()
         self._tech_ema1h_lbl  = self._row_label()
@@ -894,33 +1050,39 @@ class IntelPanel(Gtk.Box):
         )
 
     def _render_technicals(self, tech: "TechSignal") -> None:
+        fl = settings.speed_cfg.get("tf_label", "15m")
+        sl = _interval_label(settings.slow_kline)
+
         if not tech.has_data:
             dim = HEX["over"]
-            self._tech_ema15_lbl.set_markup(f'<span color="{dim}">EMA 9/21 (15m)  ──</span>')
-            self._tech_ema1h_lbl.set_markup(f'<span color="{dim}">EMA 50 (1h)     ──</span>')
+            self._tech_ema15_lbl.set_markup(f'<span color="{dim}">EMA 9/21 ({fl})  ──</span>')
+            self._tech_ema1h_lbl.set_markup(f'<span color="{dim}">EMA 50 ({sl})     ──</span>')
             self._tech_rsi_lbl.set_markup(f'<span color="{dim}">RSI             ──</span>')
             self._tech_sr_lbl.set_markup(f'<span color="{dim}">Sup / Res       ──</span>')
-            self._tech_atr_lbl.set_markup(f'<span color="{dim}">ATR (15m)       ──</span>')
+            self._tech_atr_lbl.set_markup(f'<span color="{dim}">ATR ({fl})       ──</span>')
             self._tech_score_bar.update(0, "over")
             self._tech_score_lbl.set_text("")
             for lbl in self._tech_obs_lbls:
                 lbl.set_text("")
             return
 
-        # EMA 15m
+        # EMA fast TF
         ema15c = HEX["buy"] if tech.ema15m_bull else HEX["sell"]
         ema15s = "▲ ALCISTA" if tech.ema15m_bull else "▼ BAJISTA"
-        ema200_badge = f'  <span color="{HEX["warn"]}" size="small">⚑ EN EMA200 1h</span>' if tech.at_ema200 else ""
+        ema200_badge = (
+            f'  <span color="{HEX["warn"]}" size="small">⚑ EN EMA200 {sl}</span>'
+            if tech.at_ema200 else ""
+        )
         self._tech_ema15_lbl.set_markup(
-            f'<span color="{HEX["sub"]}">EMA 9/21 (15m) </span>'
+            f'<span color="{HEX["sub"]}">EMA 9/21 ({fl}) </span>'
             f'<span color="{ema15c}" weight="bold">{ema15s}</span>'
         )
 
-        # EMA 1h
+        # EMA slow TF
         ema1h_c = HEX["buy"] if tech.ema1h_bull else HEX["sell"]
         ema1h_s = "▲ sobre EMA50" if tech.ema1h_bull else "▼ bajo EMA50"
         self._tech_ema1h_lbl.set_markup(
-            f'<span color="{HEX["sub"]}">EMA 50  (1h)   </span>'
+            f'<span color="{HEX["sub"]}">EMA 50  ({sl})   </span>'
             f'<span color="{ema1h_c}" weight="bold">{ema1h_s}</span>'
             f'{ema200_badge}'
         )
@@ -933,9 +1095,9 @@ class IntelPanel(Gtk.Box):
         self._tech_rsi_lbl.set_markup(
             f'<span color="{HEX["sub"]}">RSI             </span>'
             f'<span color="{rsi15c}" weight="bold">{tech.rsi_15m:.1f}</span>'
-            f'<span color="{HEX["over"]}"> 15m  </span>'
+            f'<span color="{HEX["over"]}"> {fl}  </span>'
             f'<span color="{rsi1hc}">{tech.rsi_1h:.1f}</span>'
-            f'<span color="{HEX["over"]}"> 1h</span>'
+            f'<span color="{HEX["over"]}"> {sl}</span>'
         )
 
         # Soporte / Resistencia
@@ -950,7 +1112,7 @@ class IntelPanel(Gtk.Box):
         if tech.atr_15m > 0:
             atr_pct = tech.atr_15m / tech.ema9_15m * 100 if tech.ema9_15m > 0 else 0
             self._tech_atr_lbl.set_markup(
-                f'<span color="{HEX["sub"]}">ATR (15m)       </span>'
+                f'<span color="{HEX["sub"]}">ATR ({fl})       </span>'
                 f'<span color="{HEX["text"]}">{fp(tech.atr_15m)}</span>'
                 f'<span color="{HEX["over"]}"> ({atr_pct:.2f}%)</span>'
             )
@@ -1113,6 +1275,10 @@ class IntelPanel(Gtk.Box):
         self._render_liquidity(lmap, tk.last_price)
 
         # ── Técnicos (klines REST) ─────────────────────────────────────────────
+        self._tech_sec_lbl.set_label(
+            f"TÉCNICOS  {settings.speed_cfg.get('tf_label','15m')} · "
+            f"{_interval_label(settings.slow_kline)}"
+        )
         self._render_technicals(tech)
 
         # ── Oportunidad (componentes debajo de absorción) ──────────────────────
@@ -1375,9 +1541,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._tech_signal     = NEUTRAL_TECH
         self._kline_req_ctr   = 199  # forzar fetch inmediato en primer ciclo
         # Cache multi-símbolo para el controller (actualizado cada ~3s = 30 ciclos)
-        self._multi_opp:  dict = {}
-        self._multi_tech: dict = {}
-        self._multi_ctr:  int  = 0
+        self._multi_opp:    dict = {}
+        self._multi_tech:   dict = {}
+        self._multi_abs:    dict = {}
+        self._multi_regime: dict = {}
+        self._multi_trend:  dict = {}
+        self._multi_ctr:    int  = 0
 
         # ── ViewStack (dos pestañas) ────────────────────────────
         self._stack = Adw.ViewStack()
@@ -1671,6 +1840,12 @@ class MainWindow(Adw.ApplicationWindow):
             self._kline_req_ctr = 0
             for _s in settings.symbol_list:
                 self.klines.request(_s)
+                # Seed VolumeProfile desde klines históricos (solo la primera vez)
+                _st = self.stream.states.get(_s)
+                if _st and not getattr(_st, "_vp_seeded", False):
+                    _kl = self.klines.store.get(_s, settings.fast_kline)
+                    if _kl:
+                        _st.seed_volume_profile(_kl)
 
         positions = account.open_positions()
         if positions:
@@ -1729,7 +1904,12 @@ class MainWindow(Adw.ApplicationWindow):
         # ── Actualizar paneles ──────────────────────────────────────────────
         self._order_panel.update(account, risk, sim_dict)
         self._cmd_center.update(account, risk, sim_dict,
-                                market_states=self.stream.states)
+                                market_states=self.stream.states,
+                                abs_signals=self._multi_abs,
+                                regimes=self._multi_regime,
+                                trends=self._multi_trend,
+                                techs=self._multi_tech,
+                                opps=self._multi_opp)
         self._extractor_view.update(account, market_states=self.stream.states)
         self._journal_view.refresh()
         self._session_view.refresh()
@@ -1755,8 +1935,11 @@ class MainWindow(Adw.ApplicationWindow):
     async def _compute_multi_signals(self) -> None:
         """Corre en el bridge thread: analiza 15 símbolos sin bloquear GTK."""
         from streams.account import Position as _Pos
-        new_opp:  dict = {}
-        new_tech: dict = {}
+        new_opp:    dict = {}
+        new_tech:   dict = {}
+        new_abs:    dict = {}
+        new_regime: dict = {}
+        new_trend:  dict = {}
         for sym in settings.symbol_list:
             try:
                 st = self.stream.states.get(sym)
@@ -1766,7 +1949,10 @@ class MainWindow(Adw.ApplicationWindow):
                 sig_s = self._abs_detector.analyze(st)
                 lm_s  = self._liq_analyzer.analyze(st)
                 rg_s  = self._regime_clf.classify(st, tr_s)
-                new_opp[sym] = self._opp_scorer.score(sig_s, rg_s, tr_s, lm_s)
+                new_opp[sym]    = self._opp_scorer.score(sig_s, rg_s, tr_s, lm_s)
+                new_abs[sym]    = sig_s
+                new_regime[sym] = rg_s
+                new_trend[sym]  = tr_s
                 k15 = self.klines.store.get(sym, settings.fast_kline)
                 k1h = self.klines.store.get(sym, settings.slow_kline)
                 if k15 and k1h:
@@ -1784,6 +1970,9 @@ class MainWindow(Adw.ApplicationWindow):
         # Merge results back (GIL protege los dict writes simples)
         self._multi_opp.update(new_opp)
         self._multi_tech.update(new_tech)
+        self._multi_abs.update(new_abs)
+        self._multi_regime.update(new_regime)
+        self._multi_trend.update(new_trend)
 
 
 # ─── Carga de símbolos al inicio ──────────────────────────────────────────────

@@ -19,8 +19,15 @@ from core.config import settings, SPEED_CONFIGS
 
 _BASE = "https://api-testnet.bybit.com" if settings.bybit_testnet else "https://api.bybit.com"
 
-# Intervalo de refresco: 90s es suficiente para klines (las velas son lentas)
-REFRESH_SECS = 90
+# Refresco adaptativo: ~1/4 del intervalo de la vela rápida.
+# nano/scalp usan velas de 1m → refrescar cada 10-15 s para no perder cierres.
+# standard usa 15m → 60 s es suficiente.
+_REFRESH_BY_SPEED: dict = {
+    "nano":     10,
+    "scalp":    15,
+    "fast":     30,
+    "standard": 60,
+}
 
 
 class KlineStore:
@@ -42,8 +49,8 @@ class KlineStore:
         self._data[symbol][interval] = klines
 
     def stale(self, symbol: str) -> bool:
-        last = self._last_ts.get(symbol, 0)
-        return time.monotonic() - last > REFRESH_SECS
+        secs = _REFRESH_BY_SPEED.get(settings.speed_level, 60)
+        return time.monotonic() - self._last_ts.get(symbol, 0) > secs
 
     def touch(self, symbol: str) -> None:
         self._last_ts[symbol] = time.monotonic()
