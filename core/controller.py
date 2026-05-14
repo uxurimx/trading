@@ -516,11 +516,13 @@ class TradeController:
         risk:    "RiskStatus",
     ) -> None:
         # Solo escanear símbolos sin posición activa, ejecución pendiente ni blacklist
-        blacklist = settings.blacklist_set
-        available = [s for s in self._symbols
-                     if s not in self._active
-                     and s not in self._pending_exec
-                     and s not in blacklist]
+        blacklist  = settings.blacklist_set
+        focus      = settings.focused_symbol.strip()
+        scan_pool  = [focus] if focus and focus in self._symbols else self._symbols
+        available  = [s for s in scan_pool
+                      if s not in self._active
+                      and s not in self._pending_exec
+                      and s not in blacklist]
 
         # ── API Optimization Guard: Slots Ocupados ──
         if len(self._active) >= self.multi_trades:

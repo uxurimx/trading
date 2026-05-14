@@ -13,39 +13,106 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SPEED_CONFIGS: Dict[str, Dict[str, Any]] = {
     "nano": {
+        # Klines
         "fast": "1",   "fast_limit": 100,
         "slow": "3",   "slow_limit": 100,
         "tf_label": "1m",
         "label": "NANO",
         "desc": "Trades <90s · SL/TP ultrajustado",
-        "be_hold_s": 2,       # 2 s para confirmar breakeven
-        "atr_sl_mult": 0.4,   # SL ultra-corto (R:R 2.5)
-        "atr_tp_mult": 1.0,   # TP mínimo
+        # Gestión de trade
+        "be_hold_s":       2,     # s para confirmar breakeven
+        "atr_sl_mult":     0.4,   # SL ultra-corto
+        "atr_tp_mult":     1.0,   # TP ajustado a R:R 2.5
+        # Parámetros de estrategia auto-ajustados
+        "min_rr":           1.5,
+        "min_scan_score":   70,
+        "ai_min_score":     70,
+        "ai_min_atr_pct":   0.04,  # 1m ATR en BTC ≈ 0.04%
+        "breakeven_pct":    30.0,
+        "profit_lock_pct":  55.0,
+        "trailing_pct":     68.0,
+        "ai_min_interval_s": 20,
+        "scan_interval_s":  5,
     },
     "scalp": {
+        # Klines
         "fast": "1",   "fast_limit": 100,
         "slow": "5",   "slow_limit": 100,
         "tf_label": "1m",
         "label": "SCALP",
         "desc": "Trades 1–5 min · ATR 1m",
-        "be_hold_s": 5,    # 5 s para confirmar breakeven
+        # Gestión de trade
+        "be_hold_s":       5,
+        "atr_sl_mult":     0.8,
+        "atr_tp_mult":     2.0,
+        # Parámetros de estrategia auto-ajustados
+        "min_rr":           1.7,
+        "min_scan_score":   55,    # score más bajo: scalp opera con señales más cortas
+        "ai_min_score":     55,
+        "ai_min_atr_pct":   0.08,  # 1m ATR — BTC ≈ 0.04%, XRP ≈ 0.25% → umbral permisivo
+        "breakeven_pct":    30.0,
+        "profit_lock_pct":  55.0,
+        "trailing_pct":     70.0,
+        "ai_min_interval_s": 30,
+        "scan_interval_s":  10,
     },
     "fast": {
+        # Klines
         "fast": "5",   "fast_limit": 80,
         "slow": "15",  "slow_limit": 80,
         "tf_label": "5m",
         "label": "FAST",
         "desc": "Trades 5–20 min · ATR 5m",
-        "be_hold_s": 10,   # 10 s
+        # Gestión de trade
+        "be_hold_s":       10,
+        "atr_sl_mult":     1.2,
+        "atr_tp_mult":     2.5,
+        # Parámetros de estrategia auto-ajustados
+        "min_rr":           1.9,
+        "min_scan_score":   58,
+        "ai_min_score":     58,
+        "ai_min_atr_pct":   0.18,  # 5m ATR
+        "breakeven_pct":    35.0,
+        "profit_lock_pct":  58.0,
+        "trailing_pct":     72.0,
+        "ai_min_interval_s": 45,
+        "scan_interval_s":  15,
     },
     "standard": {
+        # Klines
         "fast": "15",  "fast_limit": 80,
         "slow": "60",  "slow_limit": 220,
         "tf_label": "15m",
         "label": "STANDARD",
         "desc": "Trades 20–120 min · ATR 15m",
-        "be_hold_s": 30,   # 30 s (valor original)
+        # Gestión de trade
+        "be_hold_s":       30,
+        "atr_sl_mult":     1.5,
+        "atr_tp_mult":     3.5,
+        # Parámetros de estrategia auto-ajustados
+        "min_rr":           2.0,
+        "min_scan_score":   62,
+        "ai_min_score":     62,
+        "ai_min_atr_pct":   0.35,  # 15m ATR
+        "breakeven_pct":    40.0,
+        "profit_lock_pct":  62.0,
+        "trailing_pct":     75.0,
+        "ai_min_interval_s": 60,
+        "scan_interval_s":  30,
     },
+}
+
+# Mapeo: campo de Settings → clave en SPEED_CONFIGS
+_SPEED_FIELD_MAP: Dict[str, str] = {
+    "min_rr":            "min_rr",
+    "min_scan_score":    "min_scan_score",
+    "ai_min_score":      "ai_min_score",
+    "ai_min_atr_pct":    "ai_min_atr_pct",
+    "breakeven_pct":     "breakeven_pct",
+    "profit_lock_pct":   "profit_lock_pct",
+    "trailing_pct":      "trailing_pct",
+    "ai_min_interval_s": "ai_min_interval_s",
+    "scan_interval_s":   "scan_interval_s",
 }
 
 
@@ -90,6 +157,7 @@ class Settings(BaseSettings):
     # Si auto_load_symbols=True, se reemplaza al iniciar con los top-N por volumen.
     symbols: str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"   # fallback mínimo
     default_symbol: str = "BTCUSDT"
+    focused_symbol: str = ""   # si no vacío, el scan solo busca estrategias en este par
 
     # Carga dinámica de símbolos desde Bybit
     auto_load_symbols: bool = True    # descarga top-N por volumen 24h al iniciar
@@ -175,12 +243,34 @@ class Settings(BaseSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Forzamos inicialización manual del flag privado en Pydantic v2
+        # Aplicar defaults del speed_level activo sin guardar (aún no inicializado)
+        self._apply_speed_defaults(save=False)
         object.__setattr__(self, "_initialized", True)
 
     def __setattr__(self, name, value):
         super().__setattr__(name, value)
         if getattr(self, "_initialized", False) and not name.startswith("_"):
+            if name == "speed_level":
+                # Al cambiar modo: aplicar todos los parámetros del nuevo modo y guardar una sola vez
+                self._apply_speed_defaults(save=True)
+            else:
+                self.save()
+
+    def _apply_speed_defaults(self, save: bool = True) -> None:
+        """
+        Copia los parámetros del speed_level activo en los campos de Settings.
+        Llama a save() una sola vez al final para evitar escrituras múltiples al .env.
+        """
+        cfg = SPEED_CONFIGS.get(self.speed_level, SPEED_CONFIGS["standard"])
+        # Suspender _initialized para que los setattr intermedios no disparen save()
+        object.__setattr__(self, "_initialized", False)
+        try:
+            for field_name, cfg_key in _SPEED_FIELD_MAP.items():
+                if cfg_key in cfg:
+                    super(Settings, self).__setattr__(field_name, cfg[cfg_key])
+        finally:
+            object.__setattr__(self, "_initialized", True)
+        if save:
             self.save()
 
     def save(self) -> None:

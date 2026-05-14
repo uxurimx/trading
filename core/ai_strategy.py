@@ -116,7 +116,7 @@ def _build_market_snapshot(
     Formato denso pero legible para el modelo.
     """
     # Filtrar y rankear
-    _MIN_VOL_24H = 5_000_000.0   # $5M USD — mínimo de liquidez para ejecución segura de SL
+    _MIN_VOL_24H = 5_000_000.0   # $5M USDT — mínimo de liquidez para ejecución segura de SL
     candidates = []
     for sym in symbols:
         opp  = opps.get(sym)
@@ -129,9 +129,11 @@ def _build_market_snapshot(
         price = ms.ticker.last_price
         if price <= 0:
             continue
-        # Filtro de liquidez: descartar símbolos con volumen 24h < $5M USD
-        vol_24h = ms.ticker.volume_24h
-        if vol_24h < _MIN_VOL_24H:
+        # Filtro de liquidez: usar turnover_24h (USDT) si disponible,
+        # fallback a volume_24h × price (base coin × precio = USDT aproximado)
+        tk = ms.ticker
+        vol_usdt = tk.turnover_24h if tk.turnover_24h > 0 else tk.volume_24h * price
+        if vol_usdt < _MIN_VOL_24H:
             continue
         atr_pct = tech.atr_15m / price * 100
         if atr_pct < settings.ai_min_atr_pct:
@@ -356,7 +358,9 @@ class AIStrategyAgent:
                 if opp.score < settings.ai_min_score:
                     n_low_score += 1
                     continue
-                if ms.ticker.volume_24h < _MIN_VOL_24H:
+                tk = ms.ticker
+                vol_usdt = tk.turnover_24h if tk.turnover_24h > 0 else tk.volume_24h * tk.last_price
+                if vol_usdt < _MIN_VOL_24H:
                     n_low_vol += 1
                     continue
                 if tech.atr_15m / ms.ticker.last_price * 100 < settings.ai_min_atr_pct:
@@ -371,7 +375,9 @@ class AIStrategyAgent:
                     ts, sym, tech, ms = top_all[0]
                     price = ms.ticker.last_price
                     atr_pct = tech.atr_15m / price * 100 if price > 0 else 0
-                    vol_m = ms.ticker.volume_24h / 1_000_000
+                    tk = ms.ticker
+                    vol_usdt = tk.turnover_24h if tk.turnover_24h > 0 else tk.volume_24h * price
+                    vol_m = vol_usdt / 1_000_000
                     _regime = getattr(ms, "regime", "")
                     regime = _regime.value if hasattr(_regime, "value") else str(_regime)
                     top_info = (

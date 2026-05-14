@@ -103,7 +103,8 @@ class Ticker:
     ask:              float = 0.0
     funding_rate:     float = 0.0   # en porcentaje (×100)
     open_interest:    float = 0.0
-    volume_24h:       float = 0.0
+    volume_24h:       float = 0.0   # volumen 24h en base coin (BTC, XRP…)
+    turnover_24h:     float = 0.0   # turnover 24h en USDT (para filtros de liquidez)
     price_change_pct: float = 0.0   # en porcentaje (×100)
 
 
@@ -508,6 +509,7 @@ class MarketStream:
                 tk.open_interest = oi
                 state._oi_history.append((time.time(), oi))
             if "volume24h"         in d: tk.volume_24h        = float(d["volume24h"])
+            if "turnover24h"       in d: tk.turnover_24h      = float(d["turnover24h"])
             if "price24hPcnt"      in d: tk.price_change_pct  = float(d["price24hPcnt"]) * 100
             state.last_update = time.time()
 

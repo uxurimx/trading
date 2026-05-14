@@ -1706,6 +1706,28 @@ class CommandCenter(Gtk.Box):
             mode_box.append(btn)
         ctrl_row.append(mode_box)
 
+        vsep0 = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        vsep0.set_margin_start(4); vsep0.set_margin_end(4)
+        ctrl_row.append(vsep0)
+
+        # ── Selector de par ───────────────────────────────────────────────
+        self._focus_combo = Gtk.ComboBoxText()
+        self._focus_combo.set_size_request(90, -1)
+        self._focus_combo.set_tooltip_text(
+            "Par enfocado: el scan solo buscará estrategias para este par.\n"
+            "'Todos' = comportamiento normal (cualquier par del universo)."
+        )
+        self._focus_combo.append("", "Todos")
+        for sym in _settings.symbol_list:
+            short = sym.replace("USDT", "").replace("1000", "k")
+            self._focus_combo.append(sym, short)
+        # Restaurar valor guardado
+        saved = _settings.focused_symbol.strip()
+        self._focus_combo.set_active_id(saved if saved else "")
+        self._focus_combo.connect("changed", self._on_focus_symbol_changed)
+        self._focus_updating = False
+        ctrl_row.append(self._focus_combo)
+
         vsep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
         vsep.set_margin_start(4); vsep.set_margin_end(4)
         ctrl_row.append(vsep)
@@ -1907,6 +1929,26 @@ class CommandCenter(Gtk.Box):
     def _on_mode_toggled(self, btn: Gtk.ToggleButton, mode: AutoMode) -> None:
         if btn.get_active():
             self._controller.set_mode(mode)
+
+    def _on_focus_symbol_changed(self, combo: Gtk.ComboBoxText) -> None:
+        if self._focus_updating:
+            return
+        sym = combo.get_active_id() or ""
+        _settings.focused_symbol = sym
+        # Actualizar el scan inmediatamente
+        self._controller.force_scan()
+
+    def refresh_focus_combo(self) -> None:
+        """Recarga la lista de símbolos en el combo (llamar cuando cambie el universo)."""
+        self._focus_updating = True
+        current = self._focus_combo.get_active_id() or ""
+        self._focus_combo.remove_all()
+        self._focus_combo.append("", "Todos")
+        for sym in _settings.symbol_list:
+            short = sym.replace("USDT", "").replace("1000", "k")
+            self._focus_combo.append(sym, short)
+        self._focus_combo.set_active_id(current if current else "")
+        self._focus_updating = False
 
     def _on_goal_changed(self, sp: Gtk.SpinButton) -> None:
         self._controller.set_goal(sp.get_value())
