@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QTS — Quantum Trading System</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- ── TOPBAR ────────────────────────────────────────────────────────────── -->
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="logo">QTS</span>
+    <span class="logo-sub">QUANTUM TRADING</span>
+    <div id="conn-badge" class="badge badge-connecting">● CONECTANDO</div>
+  </div>
+  <div class="topbar-right">
+    <!-- Moneda -->
+    <button id="btn-currency" class="ctrl-btn" title="Cambiar moneda">USD</button>
+    <span id="mxn-rate-lbl" style="font-size:10px;color:var(--text-dim);display:none"></span>
+    <!-- Tema -->
+    <button id="btn-theme" class="ctrl-btn" title="Cambiar tema">☀</button>
+    <span class="topbar-time" id="clock">--:--:--</span>
+  </div>
+</header>
+
+<!-- ── ACCOUNT OVERVIEW ──────────────────────────────────────────────────── -->
+<section class="account-strip">
+  <div class="metric-card">
+    <div class="metric-label">EQUITY</div>
+    <div class="metric-value" id="equity">—</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">DISPONIBLE</div>
+    <div class="metric-value" id="available">—</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">MARGEN USADO</div>
+    <div class="metric-value" id="used-margin">—</div>
+    <div class="metric-sub"   id="margin-pct">—</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">UNREALIZED PnL</div>
+    <div class="metric-value" id="unrealized-pnl">—</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">PnL HOY (REALIZADO)</div>
+    <div class="metric-value" id="daily-pnl">—</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">POSICIONES</div>
+    <div class="metric-value" id="open-count">—</div>
+  </div>
+</section>
+
+<!-- ── MARGIN BAR ────────────────────────────────────────────────────────── -->
+<div class="margin-bar-wrap">
+  <div class="margin-bar-track">
+    <div class="margin-bar-fill" id="margin-bar-fill"></div>
+  </div>
+  <span class="margin-bar-label" id="margin-bar-label">Margen 0%</span>
+</div>
+
+<!-- ── POSICIONES ABIERTAS ───────────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-header">
+    <span class="section-title">POSICIONES ABIERTAS</span>
+    <span class="section-hint" id="pos-count"></span>
+  </div>
+  <div id="positions-container">
+    <div class="empty-state">Sin posiciones abiertas</div>
+  </div>
+</section>
+
+<!-- ── PnL POR SÍMBOLO (HOY) ─────────────────────────────────────────────── -->
+<section class="section">
+  <div class="section-header">
+    <span class="section-title">PnL POR SÍMBOLO — HOY</span>
+  </div>
+  <div id="symbol-pnl-container" class="symbol-pnl-row"></div>
+</section>
+
+<!-- ── FOOTER ────────────────────────────────────────────────────────────── -->
+<footer class="footer">
+  QTS Dashboard · 1s refresh ·
+  <span id="last-update">—</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

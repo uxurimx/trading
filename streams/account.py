@@ -104,8 +104,21 @@ class AccountBalance:
 
 
 @dataclass
+class Order:
+    order_id:    str
+    symbol:      str
+    side:        str    # "Buy" | "Sell"
+    order_type:  str    # "Limit" | "Market"
+    qty:         float
+    price:       float  # precio límite (0 para market)
+    status:      str    # "New" | "PartiallyFilled" | etc.
+    created_time: int   # ms epoch
+
+
+@dataclass
 class AccountState:
     positions:        Dict[str, Position]  = field(default_factory=dict)
+    open_orders:      Dict[str, Order]     = field(default_factory=dict)  # keyed by order_id
     balance:          AccountBalance       = field(default_factory=AccountBalance)
     daily_pnl:        float                = 0.0   # PnL realizado acumulado hoy (todos los símbolos)
     symbol_pnl:       Dict[str, float]     = field(default_factory=dict)  # PnL por símbolo (hoy)
@@ -189,6 +202,7 @@ class AccountStream:
                     self._fetch_positions(session),
                     self._fetch_balance(session),
                     self._fetch_daily_pnl(session),
+                    self._fetch_orders(session),
                 )
             self.state.connected = True
             self.state.error     = ""
@@ -243,6 +257,19 @@ class AccountStream:
                 
                 if b.wallet_balance > 0:
                     return # Éxito
+
+    async def _fetch_orders(self, session: aiohttp.ClientSession) -> None:
+        data = await self._get(session, "/v5/order/realtime", {
+            "category":   "linear",
+            "settleCoin": "USDT",
+            "limit":      "50",
+        })
+        if data.get("retCode") != 0:
+            return
+        for item in data.get("result", {}).get("list", []):
+            oid = item.get("orderId", "")
+            if oid:
+                self.state.open_orders[oid] = self._parse_order(item)
 
     async def _fetch_daily_pnl(self, session: aiohttp.ClientSession) -> None:
         """PnL realizado del día (posiciones cerradas desde 00:00 UTC)."""
@@ -354,6 +381,17 @@ class AccountStream:
                     log.debug("execution %s: execPnl=%.5g fee=%.5g net=%.5g daily=%.5g",
                               sym, realized, fee, net, self.state.daily_pnl)
 
+        elif topic == "order":
+            for item in data:
+                oid    = item.get("orderId", "")
+                status = item.get("orderStatus", "")
+                if not oid:
+                    continue
+                if status in ("Cancelled", "Filled", "Rejected", "Deactivated"):
+                    self.state.open_orders.pop(oid, None)
+                elif status in ("New", "PartiallyFilled", "Untriggered"):
+                    self.state.open_orders[oid] = self._parse_order(item)
+
         elif topic == "wallet":
             for item in data:
                 if item.get("accountType") in ("UNIFIED", "CONTRACT"):
@@ -372,6 +410,18 @@ class AccountStream:
                     b.available_balance = float(item.get("totalAvailableBalance") or item.get("availableBalance") or b.available_balance)
                     b.used_margin       = float(item.get("totalInitialMargin") or item.get("marginBalance") or b.used_margin)
                     b.unrealized_pnl    = float(item.get("totalUnrealisedPnl") or item.get("unrealisedPnl") or b.unrealized_pnl)
+
+    def _parse_order(self, item: dict) -> Order:
+        return Order(
+            order_id     = item.get("orderId", ""),
+            symbol       = item.get("symbol", ""),
+            side         = item.get("side", "Buy"),
+            order_type   = item.get("orderType", "Limit"),
+            qty          = float(item.get("qty", 0) or 0),
+            price        = float(item.get("price", 0) or 0),
+            status       = item.get("orderStatus", "New"),
+            created_time = int(item.get("createdTime", 0) or 0),
+        )
 
     def _parse_position(self, item: dict) -> Position:
         def f(key: str, default: float = 0.0) -> float:

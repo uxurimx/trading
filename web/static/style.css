@@ -1,0 +1,380 @@
+/* ── Themes: VSCode-style (no blues) ──────────────────────────────────────── */
+[data-theme="dark"] {
+  --bg:          #1e1e1e;
+  --bg-card:     #252526;
+  --bg-panel:    #2d2d30;
+  --bg-input:    #3c3c3c;
+  --border:      #3c3c3c;
+  --border2:     #505050;
+  --text:        #d4d4d4;
+  --text-dim:    #858585;
+  --text-sub:    #4e4e4e;
+  --green:       #4ec9b0;
+  --green-dim:   #3a9a7f;
+  --green-bg:    rgba(78,201,176,.08);
+  --red:         #f44747;
+  --red-dim:     #c43333;
+  --red-bg:      rgba(244,71,71,.08);
+  --yellow:      #dcdcaa;
+  --yellow-dim:  #b0b080;
+  --orange:      #ce9178;
+  --teal:        #4ec9b0;
+  --logo-color:  #dcdcaa;
+  --accent:      #dcdcaa;
+  --shadow:      0 2px 8px rgba(0,0,0,.4);
+}
+
+[data-theme="light"] {
+  --bg:          #f5f5f5;
+  --bg-card:     #ffffff;
+  --bg-panel:    #ebebeb;
+  --bg-input:    #e0e0e0;
+  --border:      #d0d0d0;
+  --border2:     #b8b8b8;
+  --text:        #1f1f1f;
+  --text-dim:    #5f5f5f;
+  --text-sub:    #a0a0a0;
+  --green:       #008000;
+  --green-dim:   #005c00;
+  --green-bg:    rgba(0,128,0,.06);
+  --red:         #c00000;
+  --red-dim:     #900000;
+  --red-bg:      rgba(192,0,0,.06);
+  --yellow:      #6d6000;
+  --yellow-dim:  #9a8600;
+  --orange:      #795e26;
+  --teal:        #267f74;
+  --logo-color:  #795e26;
+  --accent:      #795e26;
+  --shadow:      0 2px 8px rgba(0,0,0,.12);
+}
+
+/* ── Reset ───────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 100vh;
+  transition: background .2s, color .2s;
+}
+
+/* ── Topbar ──────────────────────────────────────────────────────────────── */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  height: 42px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: var(--shadow);
+}
+.topbar-left  { display: flex; align-items: center; gap: 12px; }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+
+.logo     { font-size: 16px; font-weight: 700; letter-spacing: 3px; color: var(--logo-color); }
+.logo-sub { font-size: 9px; letter-spacing: 2px; color: var(--text-dim); }
+
+/* ── Badges ──────────────────────────────────────────────────────────────── */
+.badge {
+  font-size: 10px; letter-spacing: .8px;
+  padding: 2px 8px; border-radius: 3px; font-weight: 600;
+}
+.badge-ok         { background: var(--green-bg);  color: var(--green); border: 1px solid var(--green-dim); }
+.badge-connecting { background: rgba(220,220,170,.1); color: var(--yellow); border: 1px solid var(--yellow-dim); }
+.badge-error      { background: var(--red-bg);    color: var(--red);   border: 1px solid var(--red-dim); }
+
+/* ── Controls (theme, currency) ─────────────────────────────────────────── */
+.ctrl-btn {
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: .8px;
+  padding: 3px 9px;
+  border-radius: 3px;
+  border: 1px solid var(--border2);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.ctrl-btn:hover { color: var(--text); border-color: var(--accent); }
+.ctrl-btn.active { color: var(--accent); border-color: var(--accent); }
+
+.topbar-time { font-size: 12px; color: var(--text-dim); letter-spacing: .5px; }
+
+/* ── Account strip ───────────────────────────────────────────────────────── */
+.account-strip {
+  display: flex;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+}
+.metric-card {
+  flex: 1;
+  padding: 10px 14px;
+  border-right: 1px solid var(--border);
+  min-width: 110px;
+}
+.metric-card:last-child { border-right: none; }
+.metric-label {
+  font-size: 9px; letter-spacing: 1.2px;
+  color: var(--text-dim); text-transform: uppercase; margin-bottom: 3px;
+}
+.metric-value { font-size: 15px; font-weight: 600; color: var(--text); }
+.metric-sub   { font-size: 10px; color: var(--text-dim); margin-top: 1px; }
+
+/* ── Margin bar ──────────────────────────────────────────────────────────── */
+.margin-bar-wrap {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+}
+.margin-bar-track {
+  flex: 1; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
+}
+.margin-bar-fill {
+  height: 100%; border-radius: 2px;
+  transition: width .5s, background .3s;
+}
+.margin-bar-label { font-size: 10px; color: var(--text-dim); min-width: 90px; text-align: right; }
+
+/* ── Sections ─────────────────────────────────────────────────────────────── */
+.section { padding: 14px 16px; }
+.section-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.section-title  { font-size: 9px; letter-spacing: 2px; color: var(--text-dim); text-transform: uppercase; }
+.section-hint   { font-size: 10px; color: var(--text-sub); }
+
+/* ── Position card ───────────────────────────────────────────────────────── */
+.pos-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.pos-card:hover { border-color: var(--border2); }
+
+.pos-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+.pos-symbol   { font-size: 15px; font-weight: 700; color: var(--text); letter-spacing: 1px; }
+.pos-dir      {
+  font-size: 9px; font-weight: 700; letter-spacing: 1.5px;
+  padding: 2px 7px; border-radius: 3px;
+}
+.pos-dir.long  { background: var(--green-bg);  color: var(--green); border: 1px solid var(--green-dim); }
+.pos-dir.short { background: var(--red-bg);    color: var(--red);   border: 1px solid var(--red-dim); }
+.pos-leverage  {
+  font-size: 10px; color: var(--text-dim);
+  background: var(--bg-input); padding: 2px 6px; border-radius: 3px;
+}
+.pos-time { margin-left: auto; font-size: 10px; color: var(--text-dim); }
+
+/* Prices grid */
+.pos-body   { padding: 10px 12px; }
+.pos-prices {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px; margin-bottom: 10px;
+}
+.price-cell .lbl  {
+  font-size: 9px; color: var(--text-dim);
+  letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px;
+}
+.price-cell .val  { font-size: 12px; font-weight: 600; color: var(--text); }
+.price-cell.mark .val { color: var(--yellow); }
+.price-cell.sl   .val { color: var(--red-dim); }
+.price-cell.tp   .val { color: var(--green-dim); }
+.price-cell.liq  .val { color: var(--orange); font-size: 10px; }
+
+/* ── Progress bar: SL → TP con indicador de precio actual ─────────────────── */
+.prog-wrap    { margin-bottom: 18px; }
+.prog-labels  {
+  display: flex; justify-content: space-between;
+  font-size: 9px; color: var(--text-dim); margin-bottom: 4px;
+}
+.prog-labels .prog-pct { color: var(--text-sub); font-size: 9px; }
+
+.prog-track {
+  position: relative;
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: visible;
+  margin: 14px 0 10px;   /* espacio para labels arriba y abajo */
+}
+
+/* Zona de riesgo (SL → entrada para LONG, entrada → SL para SHORT) */
+.prog-zone-loss {
+  position: absolute; top: 0; height: 100%;
+  background: var(--red-bg);
+  border-radius: 4px 0 0 4px;
+}
+/* Zona de profit (entrada → TP para LONG) */
+.prog-zone-profit {
+  position: absolute; top: 0; height: 100%;
+  background: var(--green-bg);
+  border-radius: 0 4px 4px 0;
+}
+/* Fill activo: cuánto se movió desde entrada */
+.prog-fill-profit {
+  position: absolute; top: 0; height: 100%;
+  background: var(--green); opacity: .7;
+  transition: left .4s, width .4s;
+}
+.prog-fill-loss {
+  position: absolute; top: 0; height: 100%;
+  background: var(--red); opacity: .7;
+  transition: left .4s, width .4s;
+}
+/* Línea de entrada */
+.prog-entry-line {
+  position: absolute; top: -3px; bottom: -3px; width: 2px;
+  background: var(--text-dim);
+  transform: translateX(-50%);
+  border-radius: 1px;
+}
+/* Label de precio de entrada (abajo de la barra) */
+.prog-entry-label {
+  position: absolute;
+  top: 12px;
+  transform: translateX(-50%);
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* Indicador de precio actual (punto + label de precio) */
+.prog-mark-wrap {
+  position: absolute; top: -9px;
+  transform: translateX(-50%);
+  transition: left .3s;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.prog-mark-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--yellow);
+  border: 2px solid var(--bg-card);
+  box-shadow: 0 0 6px rgba(220,220,170,.6);
+  flex-shrink: 0;
+}
+/* Label del precio actual (arriba del punto) */
+.prog-mark-label {
+  position: absolute;
+  bottom: 14px;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--yellow);
+  white-space: nowrap;
+  background: var(--bg-card);
+  padding: 1px 4px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  pointer-events: none;
+}
+[data-theme="light"] .prog-mark-dot {
+  box-shadow: 0 0 6px rgba(109,96,0,.5);
+}
+[data-theme="light"] .prog-mark-label {
+  border-color: var(--border2);
+}
+
+/* ── Marcadores de órdenes límite sobre la barra ─────────────────────────── */
+.prog-order-marker {
+  position: absolute; top: -3px; bottom: -3px; width: 3px;
+  border-radius: 2px;
+  transform: translateX(-50%);
+  z-index: 1;
+  cursor: help;
+}
+.prog-order-buy  { background: var(--green); opacity: .85; }
+.prog-order-sell { background: var(--red);   opacity: .85; }
+
+/* ── PnL metrics ─────────────────────────────────────────────────────────── */
+.pos-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px; margin-bottom: 8px;
+}
+.pnl-cell {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 7px 9px;
+}
+.pnl-cell .lbl  { font-size: 9px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px; }
+.pnl-cell .val  { font-size: 13px; font-weight: 700; }
+.pnl-cell .sub  { font-size: 9px; color: var(--text-dim); margin-top: 1px; }
+
+/* ── Signal chips ────────────────────────────────────────────────────────── */
+.pos-signals    { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.sig-chip {
+  font-size: 9px; padding: 2px 6px; border-radius: 3px;
+  border: 1px solid var(--border); color: var(--text-dim); letter-spacing: .5px;
+}
+.sig-chip.bull { color: var(--green); border-color: var(--green-dim); background: var(--green-bg); }
+.sig-chip.bear { color: var(--red);   border-color: var(--red-dim);   background: var(--red-bg); }
+.sig-chip.warn { color: var(--orange); border-color: var(--orange); }
+
+/* ── Fee footer ──────────────────────────────────────────────────────────── */
+.pos-fees {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  font-size: 10px; color: var(--text-dim);
+  padding-top: 7px; border-top: 1px solid var(--border);
+}
+.pos-fees .key { color: var(--text-sub); }
+
+/* ── PnL color helpers ───────────────────────────────────────────────────── */
+.c-green { color: var(--green); }
+.c-red   { color: var(--red); }
+.c-dim   { color: var(--text-dim); }
+.c-text  { color: var(--text); }
+
+/* ── Symbol PnL row ──────────────────────────────────────────────────────── */
+.symbol-pnl-row { display: flex; flex-wrap: wrap; gap: 7px; }
+.sym-pnl-chip {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 10px;
+  display: flex; gap: 8px; align-items: center;
+}
+.sym-pnl-chip .sym-name { font-size: 10px; color: var(--text-dim); letter-spacing: 1px; }
+.sym-pnl-chip .sym-val  { font-size: 11px; font-weight: 600; }
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.empty-state {
+  text-align: center; padding: 36px;
+  color: var(--text-sub); font-size: 12px; letter-spacing: 1px;
+}
+
+/* ── Footer ──────────────────────────────────────────────────────────────── */
+.footer {
+  text-align: center; padding: 10px;
+  color: var(--text-sub); font-size: 10px;
+  border-top: 1px solid var(--border); letter-spacing: .4px;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+@media (max-width: 860px) {
+  .account-strip { flex-wrap: wrap; }
+  .metric-card   { min-width: calc(50% - 1px); }
+  .pos-prices    { grid-template-columns: repeat(2, 1fr); }
+  .pos-metrics   { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 540px) {
+  .pos-prices  { grid-template-columns: repeat(2, 1fr); }
+  .pos-metrics { grid-template-columns: 1fr 1fr; }
+  .topbar-right .ctrl-btn:not(#btn-theme) { display: none; }
+}
