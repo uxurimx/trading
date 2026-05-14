@@ -211,7 +211,7 @@ body {
   background: var(--border);
   border-radius: 4px;
   overflow: visible;
-  margin: 14px 0 10px;   /* espacio para labels arriba y abajo */
+  margin: 18px 0 22px;   /* espacio para BE label arriba y milestone labels abajo */
 }
 
 /* Zona de riesgo (SL → entrada para LONG, entrada → SL para SHORT) */
@@ -294,16 +294,44 @@ body {
   border-color: var(--border2);
 }
 
-/* ── Marcadores de órdenes límite sobre la barra ─────────────────────────── */
+/* ── Marcadores sobre la barra de progreso ───────────────────────────────── */
 .prog-order-marker {
   position: absolute; top: -3px; bottom: -3px; width: 3px;
-  border-radius: 2px;
-  transform: translateX(-50%);
-  z-index: 1;
-  cursor: help;
+  border-radius: 2px; transform: translateX(-50%);
+  z-index: 1; cursor: help;
 }
 .prog-order-buy  { background: var(--green); opacity: .85; }
 .prog-order-sell { background: var(--red);   opacity: .85; }
+
+/* Breakeven (naranja) */
+.prog-be-marker {
+  position: absolute; top: -6px; bottom: -6px; width: 2px;
+  background: var(--orange); opacity: .95;
+  border-radius: 1px; transform: translateX(-50%);
+  z-index: 3; cursor: help;
+}
+.prog-be-label {
+  position: absolute; top: -22px;
+  transform: translateX(-50%);
+  font-size: 8px; font-weight: 700; color: var(--orange);
+  white-space: nowrap; letter-spacing: .3px;
+  pointer-events: none;
+}
+
+/* Hitos 25/50/75 (verde) */
+.prog-milestone {
+  position: absolute; top: -4px; bottom: -4px; width: 2px;
+  background: var(--green); opacity: .6;
+  border-radius: 1px; transform: translateX(-50%);
+  z-index: 2; cursor: help;
+}
+.prog-milestone-label {
+  position: absolute; bottom: -20px;
+  transform: translateX(-50%);
+  font-size: 8px; color: var(--green-dim);
+  white-space: nowrap; letter-spacing: .3px;
+  pointer-events: none;
+}
 
 /* ── PnL metrics ─────────────────────────────────────────────────────────── */
 .pos-metrics {
@@ -377,4 +405,6 @@ body {
   .pos-prices  { grid-template-columns: repeat(2, 1fr); }
   .pos-metrics { grid-template-columns: 1fr 1fr; }
   .topbar-right .ctrl-btn:not(#btn-theme) { display: none; }
+  .prog-be-label, .prog-milestone-label, .prog-entry-label { display: none; }
+  .prog-track { margin: 6px 0 8px; }
 }

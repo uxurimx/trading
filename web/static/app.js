@@ -164,14 +164,28 @@ function buildProgressBar(pos) {
   const tpLbl   = pos.tp > 0 ? fmtPrice(pos.tp) : '—';
   const markLbl = fmtPrice(pos.mark);
 
-  // Marcadores de órdenes límite pendientes
+  // Órdenes límite pendientes
   const orderMarkers = (pos.orders || []).map(o => {
     if (!o.price || !pos.sl || !pos.tp || pos.tp === pos.sl) return '';
-    const pct     = (o.price - pos.sl) / (pos.tp - pos.sl) * 100;
-    const clamped = Math.max(0, Math.min(100, pct));
-    const cls     = o.side === 'Buy' ? 'prog-order-buy' : 'prog-order-sell';
-    const tip     = `${o.side} ${o.qty} @ ${fmtPrice(o.price)} (${o.status})`;
-    return `<div class="prog-order-marker ${cls}" style="left:${clamped.toFixed(1)}%" title="${esc(tip)}"></div>`;
+    const pct  = (o.price - pos.sl) / (pos.tp - pos.sl) * 100;
+    const cls  = o.side === 'Buy' ? 'prog-order-buy' : 'prog-order-sell';
+    const tip  = `${o.side} ${o.qty} @ ${fmtPrice(o.price)} (${o.status})`;
+    return `<div class="prog-order-marker ${cls}" style="left:${Math.max(0,Math.min(100,pct)).toFixed(1)}%" title="${esc(tip)}"></div>`;
+  }).join('');
+
+  // Breakeven marker (naranja)
+  const beMarker = (pos.be_pct_bar != null && pos.breakeven_price)
+    ? `<div class="prog-be-marker" style="left:${pos.be_pct_bar.toFixed(1)}%" title="Breakeven: ${esc(fmtPrice(pos.breakeven_price))}"></div>
+       <div class="prog-be-label"  style="left:${pos.be_pct_bar.toFixed(1)}%">BE</div>`
+    : '';
+
+  // Hitos 25/50/75 (verde)
+  const milestoneMarkers = (pos.milestones || []).map(m => {
+    const tip = `${m.pct}% → ${fmtPrice(m.price)} | ROI ${m.roi >= 0 ? '+' : ''}${fmt(m.roi, 2)}%`;
+    const grossStr = m.gross != null ? ` (${fmtMoneyAbs(m.gross)})` : '';
+    return `
+      <div class="prog-milestone" style="left:${m.bar_pct.toFixed(1)}%" title="${esc(tip)}"></div>
+      <div class="prog-milestone-label" style="left:${m.bar_pct.toFixed(1)}%">${m.pct}% ${fmtPrice(m.price)}${grossStr}</div>`;
   }).join('');
 
   return `
@@ -186,6 +200,8 @@ function buildProgressBar(pos) {
       <div class="prog-zone-profit" style="${profitStyle}"></div>
       <div class="${fillClass}"     style="left:${fillLeft.toFixed(1)}%;width:${fillWidth.toFixed(1)}%"></div>
       ${orderMarkers}
+      ${beMarker}
+      ${milestoneMarkers}
       <div class="prog-entry-line"  style="left:${entryPct.toFixed(1)}%"></div>
       <div class="prog-entry-label" style="left:${entryPct.toFixed(1)}%">Entrada ${esc(fmtPrice(pos.entry))}</div>
       <div class="prog-mark-wrap"   style="left:${markPct.toFixed(1)}%">

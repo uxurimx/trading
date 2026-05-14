@@ -48,8 +48,9 @@ _trend_an = TrendAnalyzer()
 _regime   = RegimeClassifier()
 _scorer   = OpportunityScorer()
 
-_signals:     dict = {}
-_mark_prices: dict = {}   # sym → float, actualizado por WS público (tick a tick)
+_signals:        dict = {}
+_mark_prices:    dict = {}   # sym → float, actualizado por WS público (tick a tick)
+_pos_first_seen: dict = {}   # pos_key → server timestamp when first observed
 
 # ─── Tipo de cambio MXN ───────────────────────────────────────────────────────
 
@@ -172,7 +173,18 @@ def _build_snapshot() -> dict:
                 ms_price  = ms.ticker.last_price if (ms and ms.connected and ms.ticker.last_price > 0) else 0.0
                 live_mark = _mark_prices.get(sym) or ms_price or 0.0
 
-                metrics = calc_position_metrics(pos, live_mark=live_mark)
+                # Duración: usa tiempo del servidor para evitar created_time corrupto de Bybit
+                pos_key      = f"{sym}_{pos.side}"
+                server_elapsed = time.time() - _pos_first_seen.setdefault(pos_key, time.time())
+                bybit_elapsed  = max(0.0, time.time() - pos.created_time / 1000) if pos.created_time > 0 else 0.0
+                # Si Bybit da un timestamp razonable (< 30 días), usamos el menor; sino solo servidor
+                if 0 < bybit_elapsed < 30 * 24 * 3600:
+                    elapsed_override = min(bybit_elapsed, server_elapsed)
+                else:
+                    elapsed_override = server_elapsed
+
+                metrics = calc_position_metrics(pos, live_mark=live_mark,
+                                                elapsed_override=elapsed_override)
 
                 sig = _signals.get(sym, {})
                 opp = sig.get("opp")
@@ -218,6 +230,12 @@ def _build_snapshot() -> dict:
                 })
             except Exception as e:
                 log.error("snapshot pos %s: %s", getattr(pos, "symbol", "?"), e)
+
+        # Limpiar entradas de posiciones cerradas del tracker de duración
+        active_keys = {f"{pos.symbol}_{pos.side}" for pos in st.open_positions()}
+        for k in list(_pos_first_seen):
+            if k not in active_keys:
+                del _pos_first_seen[k]
 
         symbol_pnl = sorted(
             [{"symbol": k.replace("USDT", ""), "pnl": round(v, 4)}
