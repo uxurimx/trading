@@ -59,38 +59,37 @@ function esc(s) {
 // ── Render account ────────────────────────────────────────────────────────────
 
 function renderAccount(a) {
-  const badge = document.getElementById('conn-badge');
-  if (a.error) {
-    badge.className   = 'badge badge-error';
-    badge.textContent = `● ${a.error}`;
-  } else if (a.connected) {
-    badge.className   = 'badge badge-ok';
-    badge.textContent = '● EN VIVO';
-  } else {
-    badge.className   = 'badge badge-connecting';
-    badge.textContent = '● CONECTANDO';
-  }
+  // Actualiza badge en sidenav (desktop) y mobile-topstrip
+  const badgeText = a.error ? `● ${a.error}` : a.connected ? '● EN VIVO' : '● CONECTANDO';
+  const badgeCls  = a.error ? 'badge badge-error' : a.connected ? 'badge badge-ok' : 'badge badge-connecting';
+  ['conn-badge', 'conn-badge-mob'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.className = badgeCls; el.textContent = badgeText; }
+  });
 
-  document.getElementById('equity').textContent      = fmtMoneyAbs(a.equity);
-  document.getElementById('available').textContent   = fmtMoneyAbs(a.available);
-  document.getElementById('used-margin').textContent = fmtMoneyAbs(a.used_margin);
-  document.getElementById('margin-pct').textContent  = `${fmt(a.margin_pct)}% del equity`;
-  document.getElementById('open-count').textContent  = a.open_count;
+  // Equity en sidenav
+  const sev = document.getElementById('sidenav-equity');
+  if (sev) sev.textContent = fmtMoneyAbs(a.equity);
+
+  // Métricas del dashboard
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set('equity',      fmtMoneyAbs(a.equity));
+  set('available',   fmtMoneyAbs(a.available));
+  set('used-margin', fmtMoneyAbs(a.used_margin));
+  set('margin-pct',  `${fmt(a.margin_pct)}% del equity`);
+  set('open-count',  a.open_count);
 
   const upnl = document.getElementById('unrealized-pnl');
-  upnl.textContent = fmtMoney(a.unrealized_pnl);
-  upnl.className   = `metric-value ${pnlClass(a.unrealized_pnl)}`;
+  if (upnl) { upnl.textContent = fmtMoney(a.unrealized_pnl); upnl.className = `metric-value ${pnlClass(a.unrealized_pnl)}`; }
 
   const dpnl = document.getElementById('daily-pnl');
-  dpnl.textContent = fmtMoney(a.daily_pnl);
-  dpnl.className   = `metric-value ${pnlClass(a.daily_pnl)}`;
+  if (dpnl) { dpnl.textContent = fmtMoney(a.daily_pnl); dpnl.className = `metric-value ${pnlClass(a.daily_pnl)}`; }
 
   const pct  = Math.min(100, Math.max(0, a.margin_pct || 0));
   const fill = document.getElementById('margin-bar-fill');
   const lbl  = document.getElementById('margin-bar-label');
-  fill.style.width      = `${pct}%`;
-  fill.style.background = pct > 80 ? 'var(--red)' : pct > 60 ? 'var(--orange)' : 'var(--green)';
-  lbl.textContent       = `Margen ${fmt(pct, 1)}%`;
+  if (fill) { fill.style.width = `${pct}%`; fill.style.background = pct > 80 ? 'var(--red)' : pct > 60 ? 'var(--orange)' : 'var(--green)'; }
+  if (lbl)  lbl.textContent = `Margen ${fmt(pct, 1)}%`;
 }
 
 // ── Momentum del mercado (para el anillo del marcador) ────────────────────────
@@ -326,25 +325,21 @@ function buildPositionCard(pos) {
   </div>`;
 }
 
-// ── Render posiciones (desktop + mobile container) ────────────────────────────
+// ── Render posiciones ─────────────────────────────────────────────────────────
 
 function renderPositions(positions) {
-  const html  = positions && positions.length
-    ? positions.map(buildPositionCard).join('')
-    : '<div class="empty-state">Sin posiciones abiertas</div>';
-  const label = positions && positions.length
-    ? `${positions.length} activa${positions.length > 1 ? 's' : ''}`
-    : '';
+  const n     = positions ? positions.length : 0;
+  const html  = n ? positions.map(buildPositionCard).join('') : '<div class="empty-state">Sin posiciones abiertas</div>';
+  const label = n ? `${n} activa${n > 1 ? 's' : ''}` : '';
 
-  const c1 = document.getElementById('positions-container');
-  const c2 = document.getElementById('positions-container-mob');
-  if (c1) { c1.innerHTML = html; }
-  if (c2) { c2.innerHTML = html; }
+  const c  = document.getElementById('positions-container');
+  const pc = document.getElementById('pos-count');
+  if (c)  c.innerHTML    = html;
+  if (pc) pc.textContent = label;
 
-  const pc1 = document.getElementById('pos-count');
-  const pc2 = document.getElementById('pos-count-mob');
-  if (pc1) pc1.textContent = label;
-  if (pc2) pc2.textContent = label;
+  // Badge en side-tab "Trades"
+  const sb = document.getElementById('side-pos-count');
+  if (sb) sb.textContent = n > 0 ? String(n) : '';
 }
 
 // ── Render PnL por símbolo ────────────────────────────────────────────────────
@@ -482,18 +477,18 @@ function switchTab(name) {
   localStorage.setItem('qts_tab', name);
 
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
+  // Sincroniza ambos tipos de botones (sidenav + mobile-nav)
+  document.querySelectorAll('[data-tab]').forEach(b => b.classList.remove('active'));
 
   const view = document.getElementById(`view-${name}`);
   if (view) view.classList.add('active');
 
-  const btn = document.querySelector(`.nav-tab[data-tab="${name}"]`);
-  if (btn) btn.classList.add('active');
+  document.querySelectorAll(`[data-tab="${name}"]`).forEach(b => b.classList.add('active'));
 
   if (name === 'historial' && !_historyLoaded) loadHistory();
 }
 
-document.querySelectorAll('.nav-tab').forEach(btn => {
+document.querySelectorAll('[data-tab]').forEach(btn => {
   btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
 
@@ -502,7 +497,6 @@ document.getElementById('btn-refresh-history')?.addEventListener('click', () => 
   loadHistory();
 });
 
-// Restaurar tab activo al cargar
 switchTab(_activeTab);
 
 // ── Config tab: controles ─────────────────────────────────────────────────────
@@ -555,15 +549,15 @@ document.getElementById('btn-currency')?.addEventListener('click', () => {
 applyThemeCfg();
 applyCurrencyCfg();
 
-// ── Clock (topbar + mobile topbar) ────────────────────────────────────────────
+// ── Clock (sidenav desktop + mobile-topstrip) ─────────────────────────────────
 function tickClock() {
-  const d  = new Date();
-  const p  = n => String(n).padStart(2, '0');
-  const t  = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-  const c1 = document.getElementById('clock');
-  const c2 = document.getElementById('clock-mob');
-  if (c1) c1.textContent = t;
-  if (c2) c2.textContent = t;
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const t = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  ['clock', 'clock-mob'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = t;
+  });
 }
 setInterval(tickClock, 1000);
 tickClock();

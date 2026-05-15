@@ -52,6 +52,7 @@
 /* ── Reset ───────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ── Layout base: sidenav + main ─────────────────────────────────────────── */
 body {
   background: var(--bg);
   color: var(--text);
@@ -59,28 +60,124 @@ body {
   font-size: 12px;
   line-height: 1.5;
   min-height: 100vh;
+  display: flex;
   transition: background .2s, color .2s;
 }
 
-/* ── Topbar ──────────────────────────────────────────────────────────────── */
-.topbar {
+/* Views — tab system (both desktop + mobile) */
+.view         { display: none; }
+.view.active  { display: block; }
+
+/* ── Sidenav ─────────────────────────────────────────────────────────────── */
+.sidenav {
+  width: 210px;
+  flex-shrink: 0;
+  position: fixed;
+  top: 0; left: 0;
+  height: 100vh;
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  z-index: 100;
+  overflow: hidden;
+}
+
+.sidenav-brand {
+  padding: 20px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.logo     { font-size: 18px; font-weight: 700; letter-spacing: 3px; color: var(--logo-color); display: block; }
+.logo-sub { font-size: 8px;  letter-spacing: 2.5px; color: var(--text-sub); display: block; margin-top: 2px; }
+
+.sidenav-account {
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.sidenav-equity-label {
+  font-size: 8px; letter-spacing: 1.5px; color: var(--text-sub);
+  text-transform: uppercase; margin-bottom: 3px;
+}
+.sidenav-equity-val {
+  font-size: 20px; font-weight: 700; color: var(--text);
+  margin-bottom: 8px; letter-spacing: -.3px;
+}
+#conn-badge { display: inline-flex; }
+
+.sidenav-nav {
+  flex: 1;
+  padding: 10px 0;
+  overflow-y: auto;
+}
+
+.side-tab {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  height: 42px;
-  background: var(--bg-card);
-  border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  box-shadow: var(--shadow);
+  gap: 10px;
+  width: 100%;
+  padding: 10px 18px;
+  background: none;
+  border: none;
+  border-left: 3px solid transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: .5px;
+  text-align: left;
+  cursor: pointer;
+  transition: color .15s, background .15s, border-color .15s;
+  -webkit-tap-highlight-color: transparent;
 }
-.topbar-left  { display: flex; align-items: center; gap: 12px; }
-.topbar-right { display: flex; align-items: center; gap: 10px; }
+.side-tab:hover {
+  background: var(--bg-panel);
+  color: var(--text);
+}
+.side-tab.active {
+  color: var(--accent);
+  background: rgba(220,220,170,.06);
+  border-left-color: var(--accent);
+}
+[data-theme="light"] .side-tab.active {
+  background: rgba(121,94,38,.06);
+}
+.side-tab svg {
+  width: 15px; height: 15px;
+  stroke: currentColor; fill: none;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+  flex-shrink: 0;
+}
+.side-tab-badge {
+  margin-left: auto;
+  font-size: 9px; min-width: 16px; height: 16px;
+  background: var(--accent); color: var(--bg);
+  border-radius: 8px; padding: 0 5px;
+  display: none; align-items: center; justify-content: center;
+  font-weight: 700;
+}
+.side-tab-badge:not(:empty) { display: flex; }
 
-.logo     { font-size: 16px; font-weight: 700; letter-spacing: 3px; color: var(--logo-color); }
-.logo-sub { font-size: 9px; letter-spacing: 2px; color: var(--text-dim); }
+.sidenav-footer {
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+#clock        { font-size: 13px; color: var(--text-dim); letter-spacing: .5px; }
+.sidenav-update { font-size: 9px; color: var(--text-sub); }
+
+/* Main content (offset by sidenav width) */
+.main-content {
+  flex: 1;
+  margin-left: 210px;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Mobile-only elements (ocultos en desktop) ───────────────────────────── */
+.mobile-topstrip { display: none; }
+.mobile-nav      { display: none; }
+.topbar-time { font-size: 11px; color: var(--text-dim); letter-spacing: .5px; }
 
 /* ── Badges ──────────────────────────────────────────────────────────────── */
 .badge {
@@ -91,23 +188,18 @@ body {
 .badge-connecting { background: rgba(220,220,170,.1); color: var(--yellow); border: 1px solid var(--yellow-dim); }
 .badge-error      { background: var(--red-bg);    color: var(--red);   border: 1px solid var(--red-dim); }
 
-/* ── Controls (theme, currency) ─────────────────────────────────────────── */
+/* ── Controls ────────────────────────────────────────────────────────────── */
 .ctrl-btn {
   font-family: inherit;
-  font-size: 10px;
-  letter-spacing: .8px;
-  padding: 3px 9px;
-  border-radius: 3px;
+  font-size: 10px; letter-spacing: .8px;
+  padding: 3px 9px; border-radius: 3px;
   border: 1px solid var(--border2);
-  background: var(--bg-panel);
-  color: var(--text-dim);
+  background: var(--bg-panel); color: var(--text-dim);
   cursor: pointer;
   transition: color .15s, border-color .15s;
 }
-.ctrl-btn:hover { color: var(--text); border-color: var(--accent); }
+.ctrl-btn:hover  { color: var(--text); border-color: var(--accent); }
 .ctrl-btn.active { color: var(--accent); border-color: var(--accent); }
-
-.topbar-time { font-size: 12px; color: var(--text-dim); letter-spacing: .5px; }
 
 /* ── Account strip ───────────────────────────────────────────────────────── */
 .account-strip {
@@ -396,25 +488,36 @@ body {
   border-top: 1px solid var(--border); letter-spacing: .4px;
 }
 
-/* ── Desktop responsive ──────────────────────────────────────────────────── */
-@media (max-width: 860px) {
-  .account-strip { flex-wrap: wrap; }
-  .metric-card   { min-width: calc(50% - 1px); }
-  .pos-prices    { grid-template-columns: repeat(2, 1fr); }
-  .pos-metrics   { grid-template-columns: repeat(2, 1fr); }
-}
-
 /* ══════════════════════════════════════════════════════════════════════════ */
-/* MOBILE NAV — ocultar/mostrar                                             */
+/* MOBILE — sin sidenav, con bottom nav                                      */
 /* ══════════════════════════════════════════════════════════════════════════ */
-
-/* Desktop: nav oculto, todas las vistas visibles */
-.mobile-nav  { display: none; }
-.desktop-only { }
-.mobile-only  { display: none; }
-
 @media (max-width: 860px) {
-  /* Mostrar nav inferior */
+  body {
+    display: block;
+    padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Ocultar sidenav */
+  .sidenav { display: none; }
+
+  /* Main sin offset */
+  .main-content { margin-left: 0; }
+
+  /* Mobile top strip visible */
+  .mobile-topstrip {
+    display: flex;
+    position: sticky;
+    top: 0; z-index: 50;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    height: 40px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+
+  /* Bottom nav visible */
   .mobile-nav {
     display: flex;
     position: fixed;
@@ -423,23 +526,18 @@ body {
     border-top: 1px solid var(--border);
     z-index: 200;
     padding-bottom: env(safe-area-inset-bottom, 0px);
-    box-shadow: 0 -2px 12px rgba(0,0,0,.3);
+    box-shadow: 0 -2px 12px rgba(0,0,0,.25);
   }
 
-  /* Body tiene padding para no quedar debajo del nav */
-  body { padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px)); }
+  /* Account strip: 2 por fila en mobile */
+  .account-strip { flex-wrap: wrap; }
+  .metric-card   { min-width: calc(50% - 1px); }
 
-  /* Vistas: solo la activa se muestra */
-  .view         { display: none; }
-  .view.active  { display: block; }
-
-  /* Ocultar/mostrar elementos según breakpoint */
-  .desktop-only { display: none !important; }
-  .mobile-only  { display: flex !important; }
-
-  /* Ajustes internos en mobile */
+  /* Posiciones y métricas: 2 columnas */
   .pos-prices  { grid-template-columns: repeat(2, 1fr); }
   .pos-metrics { grid-template-columns: 1fr 1fr; }
+
+  /* Barra de progreso: ocultar labels para no romper layout */
   .prog-be-label, .prog-milestone-label, .prog-entry-label { display: none; }
   .prog-track  { margin: 6px 0 8px; }
   .section     { padding: 12px 12px; }

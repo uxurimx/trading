@@ -8,188 +8,197 @@
 </head>
 <body>
 
-<!-- ── TOPBAR ────────────────────────────────────────────────────────────── -->
-<header class="topbar">
-  <div class="topbar-left">
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!-- SIDENAV — visible solo en desktop                                      -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<aside class="sidenav">
+
+  <div class="sidenav-brand">
     <span class="logo">QTS</span>
-    <span class="logo-sub desktop-only">QUANTUM TRADING</span>
+    <span class="logo-sub">QUANTUM TRADING</span>
+  </div>
+
+  <div class="sidenav-account">
+    <div class="sidenav-equity-label">EQUITY</div>
+    <div class="sidenav-equity-val" id="sidenav-equity">—</div>
     <div id="conn-badge" class="badge badge-connecting">● CONECTANDO</div>
   </div>
-  <div class="topbar-right desktop-only">
-    <button id="btn-currency" class="ctrl-btn" title="Cambiar moneda">USD</button>
-    <span id="mxn-rate-lbl" style="font-size:10px;color:var(--text-dim);display:none"></span>
-    <button id="btn-theme" class="ctrl-btn" title="Cambiar tema">☀</button>
-    <span class="topbar-time" id="clock">--:--:--</span>
-  </div>
-  <div class="topbar-right mobile-only">
-    <span class="topbar-time" id="clock-mob">--:--:--</span>
-  </div>
-</header>
 
-<!-- ══════════════════════════════════════════════════════════════════════ -->
-<!-- VISTA: DASHBOARD                                                       -->
-<!-- ══════════════════════════════════════════════════════════════════════ -->
-<div class="view active" id="view-dashboard">
+  <nav class="sidenav-nav">
+    <button class="side-tab" data-tab="dashboard">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      Dashboard
+    </button>
+    <button class="side-tab" data-tab="trades">
+      <svg viewBox="0 0 24 24"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+      Trades
+      <span class="side-tab-badge" id="side-pos-count"></span>
+    </button>
+    <button class="side-tab" data-tab="historial">
+      <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      Historial
+    </button>
+    <button class="side-tab" data-tab="config">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      Config
+    </button>
+  </nav>
 
-  <!-- Account strip (desktop: horizontal / mobile: grid) -->
-  <section class="account-strip">
-    <div class="metric-card">
-      <div class="metric-label">EQUITY</div>
-      <div class="metric-value" id="equity">—</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">DISPONIBLE</div>
-      <div class="metric-value" id="available">—</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">MARGEN USADO</div>
-      <div class="metric-value" id="used-margin">—</div>
-      <div class="metric-sub"   id="margin-pct">—</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">UNREALIZED PnL</div>
-      <div class="metric-value" id="unrealized-pnl">—</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">PnL HOY</div>
-      <div class="metric-value" id="daily-pnl">—</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">POSICIONES</div>
-      <div class="metric-value" id="open-count">—</div>
-    </div>
-  </section>
-
-  <!-- Margin bar -->
-  <div class="margin-bar-wrap">
-    <div class="margin-bar-track">
-      <div class="margin-bar-fill" id="margin-bar-fill"></div>
-    </div>
-    <span class="margin-bar-label" id="margin-bar-label">Margen 0%</span>
+  <div class="sidenav-footer">
+    <span id="clock">--:--:--</span>
+    <span id="last-update" class="sidenav-update">—</span>
   </div>
 
-  <!-- PnL por símbolo (hoy realizado) -->
-  <section class="section">
-    <div class="section-header">
-      <span class="section-title">PnL REALIZADO HOY</span>
-    </div>
-    <div id="symbol-pnl-container" class="symbol-pnl-row">
-      <span class="c-dim" style="font-size:11px">Sin trades cerrados hoy</span>
-    </div>
-  </section>
+</aside>
 
-  <!-- Posiciones abiertas (solo visible en desktop dentro del dashboard) -->
-  <section class="section desktop-only" id="dash-positions-section">
-    <div class="section-header">
-      <span class="section-title">POSICIONES ABIERTAS</span>
-      <span class="section-hint" id="pos-count"></span>
-    </div>
-    <div id="positions-container">
-      <div class="empty-state">Sin posiciones abiertas</div>
-    </div>
-  </section>
-
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!-- MOBILE TOP STRIP — logo + badge (sin nav, solo en mobile)             -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div class="mobile-topstrip">
+  <div style="display:flex;align-items:center;gap:8px">
+    <span class="logo" style="font-size:14px;letter-spacing:2px">QTS</span>
+    <div id="conn-badge-mob" class="badge badge-connecting">● CONECTANDO</div>
+  </div>
+  <span id="clock-mob" class="topbar-time">--:--:--</span>
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════ -->
-<!-- VISTA: TRADES (posiciones abiertas — mobile)                          -->
+<!-- MAIN CONTENT                                                           -->
 <!-- ══════════════════════════════════════════════════════════════════════ -->
-<div class="view" id="view-trades">
-  <section class="section">
-    <div class="section-header">
-      <span class="section-title">POSICIONES ABIERTAS</span>
-      <span class="section-hint" id="pos-count-mob"></span>
+<main class="main-content">
+
+  <!-- ── DASHBOARD ───────────────────────────────────────────────────── -->
+  <div class="view" id="view-dashboard">
+
+    <section class="account-strip">
+      <div class="metric-card">
+        <div class="metric-label">EQUITY</div>
+        <div class="metric-value" id="equity">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">DISPONIBLE</div>
+        <div class="metric-value" id="available">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">MARGEN USADO</div>
+        <div class="metric-value" id="used-margin">—</div>
+        <div class="metric-sub"   id="margin-pct">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">UNREALIZED PnL</div>
+        <div class="metric-value" id="unrealized-pnl">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">PnL HOY</div>
+        <div class="metric-value" id="daily-pnl">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">POSICIONES</div>
+        <div class="metric-value" id="open-count">—</div>
+      </div>
+    </section>
+
+    <div class="margin-bar-wrap">
+      <div class="margin-bar-track">
+        <div class="margin-bar-fill" id="margin-bar-fill"></div>
+      </div>
+      <span class="margin-bar-label" id="margin-bar-label">Margen 0%</span>
     </div>
-    <div id="positions-container-mob">
-      <div class="empty-state">Sin posiciones abiertas</div>
-    </div>
-  </section>
-</div>
+
+    <section class="section">
+      <div class="section-header">
+        <span class="section-title">PnL REALIZADO HOY</span>
+      </div>
+      <div id="symbol-pnl-container" class="symbol-pnl-row">
+        <span class="c-dim" style="font-size:11px">Sin trades cerrados hoy</span>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ── TRADES ───────────────────────────────────────────────────────── -->
+  <div class="view" id="view-trades">
+    <section class="section">
+      <div class="section-header">
+        <span class="section-title">POSICIONES ABIERTAS</span>
+        <span class="section-hint" id="pos-count"></span>
+      </div>
+      <div id="positions-container">
+        <div class="empty-state">Sin posiciones abiertas</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ── HISTORIAL ─────────────────────────────────────────────────────── -->
+  <div class="view" id="view-historial">
+    <section class="section">
+      <div class="section-header">
+        <span class="section-title">HISTORIAL DE TRADES</span>
+        <button class="ctrl-btn" id="btn-refresh-history" style="font-size:9px;padding:2px 8px">↻ Actualizar</button>
+      </div>
+      <div id="history-container">
+        <div class="empty-state">Cargando historial…</div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ── CONFIG ────────────────────────────────────────────────────────── -->
+  <div class="view" id="view-config">
+    <section class="section">
+      <div class="section-header">
+        <span class="section-title">CONFIGURACIÓN</span>
+      </div>
+
+      <div class="cfg-group">
+        <div class="cfg-row">
+          <div class="cfg-info">
+            <div class="cfg-label">TEMA</div>
+            <div class="cfg-desc">Apariencia visual del dashboard</div>
+          </div>
+          <button id="btn-theme-cfg" class="cfg-toggle">OSCURO</button>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-info">
+            <div class="cfg-label">MONEDA</div>
+            <div class="cfg-desc">Mostrar valores en MXN (tipo de cambio automático)</div>
+          </div>
+          <button id="btn-currency-cfg" class="cfg-toggle">USD</button>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-info">
+            <div class="cfg-label">TIPO DE CAMBIO</div>
+            <div class="cfg-desc" id="cfg-mxn-rate">1 USD = — MXN</div>
+          </div>
+          <span class="cfg-badge">AUTO</span>
+        </div>
+      </div>
+
+      <div class="cfg-group" style="margin-top:16px">
+        <div class="cfg-group-title">CUENTA</div>
+        <div class="cfg-row">
+          <div class="cfg-info"><div class="cfg-label">ESTADO</div></div>
+          <div id="cfg-conn-badge" class="badge badge-connecting">● —</div>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-info"><div class="cfg-label">WALLET BALANCE</div></div>
+          <span class="cfg-val" id="cfg-wallet">—</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-info"><div class="cfg-label">ÚLTIMA ACTUALIZACIÓN</div></div>
+          <span class="cfg-val" id="cfg-last-update">—</span>
+        </div>
+      </div>
+
+    </section>
+  </div>
+
+</main>
 
 <!-- ══════════════════════════════════════════════════════════════════════ -->
-<!-- VISTA: HISTORIAL                                                       -->
+<!-- MOBILE BOTTOM NAV                                                      -->
 <!-- ══════════════════════════════════════════════════════════════════════ -->
-<div class="view" id="view-historial">
-  <section class="section">
-    <div class="section-header">
-      <span class="section-title">HISTORIAL DE TRADES</span>
-      <button class="ctrl-btn" id="btn-refresh-history" style="font-size:9px;padding:2px 8px">↻ Actualizar</button>
-    </div>
-    <div id="history-container">
-      <div class="empty-state">Cargando historial…</div>
-    </div>
-  </section>
-</div>
-
-<!-- ══════════════════════════════════════════════════════════════════════ -->
-<!-- VISTA: CONFIGURACIÓN                                                   -->
-<!-- ══════════════════════════════════════════════════════════════════════ -->
-<div class="view" id="view-config">
-  <section class="section">
-    <div class="section-header">
-      <span class="section-title">CONFIGURACIÓN</span>
-    </div>
-
-    <div class="cfg-group">
-      <div class="cfg-row">
-        <div class="cfg-info">
-          <div class="cfg-label">TEMA</div>
-          <div class="cfg-desc">Apariencia visual del dashboard</div>
-        </div>
-        <button id="btn-theme-cfg" class="cfg-toggle" data-on="OSCURO" data-off="CLARO">OSCURO</button>
-      </div>
-
-      <div class="cfg-row">
-        <div class="cfg-info">
-          <div class="cfg-label">MONEDA</div>
-          <div class="cfg-desc">Muestra valores en MXN (tipo de cambio automático)</div>
-        </div>
-        <button id="btn-currency-cfg" class="cfg-toggle">USD</button>
-      </div>
-
-      <div class="cfg-row">
-        <div class="cfg-info">
-          <div class="cfg-label">TIPO DE CAMBIO</div>
-          <div class="cfg-desc" id="cfg-mxn-rate">1 USD = — MXN</div>
-        </div>
-        <span class="cfg-badge">AUTO</span>
-      </div>
-    </div>
-
-    <div class="cfg-group" style="margin-top:16px">
-      <div class="cfg-group-title">CUENTA</div>
-      <div class="cfg-row">
-        <div class="cfg-info">
-          <div class="cfg-label">ESTADO</div>
-        </div>
-        <div id="cfg-conn-badge" class="badge badge-connecting">● —</div>
-      </div>
-      <div class="cfg-row">
-        <div class="cfg-info">
-          <div class="cfg-label">WALLET BALANCE</div>
-        </div>
-        <span class="cfg-val" id="cfg-wallet">—</span>
-      </div>
-      <div class="cfg-row">
-        <div class="cfg-info">
-          <div class="cfg-label">ÚLTIMA ACTUALIZACIÓN</div>
-        </div>
-        <span class="cfg-val" id="cfg-last-update">—</span>
-      </div>
-    </div>
-
-  </section>
-</div>
-
-<!-- ── FOOTER (desktop) ───────────────────────────────────────────────── -->
-<footer class="footer desktop-only">
-  QTS Dashboard · 1s refresh ·
-  <span id="last-update">—</span>
-</footer>
-
-<!-- ── MOBILE BOTTOM NAV ─────────────────────────────────────────────── -->
-<nav class="mobile-nav" id="mobile-nav">
-  <button class="nav-tab active" data-tab="dashboard">
+<nav class="mobile-nav">
+  <button class="nav-tab" data-tab="dashboard">
     <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
     Dashboard
   </button>
@@ -198,11 +207,11 @@
     Trades
   </button>
   <button class="nav-tab" data-tab="historial">
-    <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+    <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
     Historial
   </button>
   <button class="nav-tab" data-tab="config">
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     Config
   </button>
 </nav>
