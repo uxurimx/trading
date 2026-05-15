@@ -55,6 +55,17 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function fmtElapsedShort(s) {
+  s = Math.max(0, s | 0);
+  if (s < 60)    return s + 's';
+  if (s < 3600)  return Math.round(s / 60) + 'm';
+  if (s < 86400) {
+    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    return m ? `${h}h ${m}m` : `${h}h`;
+  }
+  return Math.floor(s / 86400) + 'd';
+}
+
 // (theme/currency/clock init is at the bottom after DOM is ready)
 
 // ── Render account ────────────────────────────────────────────────────────────
@@ -112,85 +123,89 @@ function calcMomentum(pos) {
   return { color, strength };
 }
 
-// ── Barra de progreso SL→TP ───────────────────────────────────────────────────
+// ── Estado de zoom por posición (persistido en localStorage) ─────────────────
+// Key: `${full_sym}_${side}` → { levelIdx: -1..4, anchor: 'mark'|'entry'|'be'|'mid' }
+const _zoomState = (() => {
+  try { return JSON.parse(localStorage.getItem('qts_zoom') || '{}'); }
+  catch (e) { return {}; }
+})();
+
+function _getZoom(key) {
+  return _zoomState[key] || { levelIdx: 0, anchor: 'mark' };
+}
+function _setZoom(key, patch) {
+  _zoomState[key] = { ..._getZoom(key), ...patch };
+  try { localStorage.setItem('qts_zoom', JSON.stringify(_zoomState)); } catch (e) {}
+}
+
+// ── Barra de progreso SL→TP — reproyectable con zoom telescópico ────────────
 
 function buildProgressBar(pos) {
-  const isLong   = pos.direction === 'LONG';
-  const entryPct = pos.entry_pct_bar;
-  const markPct  = pos.mark_pct_bar;
-  const progress = pos.progress_pct;
-  const bePct    = pos.be_pct_bar ?? entryPct;
+  const isLong = pos.direction === 'LONG';
+  const key    = `${pos.full_sym}_${pos.side}`;
+  const z      = _getZoom(key);
 
-  // ── Zonas de fondo ────────────────────────────────────────────────────────
-  // Pérdida: SL → entrada
-  const lossStyle = isLong
-    ? `left:0%;width:${entryPct.toFixed(1)}%`
-    : `left:${entryPct.toFixed(1)}%;width:${(100 - entryPct).toFixed(1)}%`;
+  // Geometría cruda. Si el backend aún no la manda, la reconstruimos.
+  const geom = pos.geometry || {
+    sl: pos.sl, entry: pos.entry, tp: pos.tp,
+    be: pos.breakeven_price || pos.entry,
+    mark: pos.mark, is_long: isLong,
+    milestones: (pos.milestones || []).map(m => ({ pct: m.pct, price: m.price })),
+  };
 
-  // Zona amarilla: entrada → BE (recuperación de fees)
-  let beZoneStyle = '';
-  if (pos.be_pct_bar != null) {
-    if (isLong) {
-      const w = Math.max(0, bePct - entryPct);
-      beZoneStyle = `left:${entryPct.toFixed(1)}%;width:${w.toFixed(1)}%`;
-    } else {
-      const w = Math.max(0, entryPct - bePct);
-      beZoneStyle = `left:${bePct.toFixed(1)}%;width:${w.toFixed(1)}%`;
-    }
-  }
+  // Ventana visible. L0 → SL↔TP literal. L≠0 → centrada en el ancla.
+  const view = QtsScale.viewport(z.levelIdx, z.anchor, geom);
 
-  // Zona verde: BE → TP
-  const profitStyle = isLong
-    ? `left:${bePct.toFixed(1)}%;width:${(100 - bePct).toFixed(1)}%`
-    : `left:0%;width:${bePct.toFixed(1)}%`;
+  // % de cada precio crítico dentro de la ventana (puede caer fuera)
+  const entryPct = QtsScale.T(geom.entry, view);
+  const markPct  = QtsScale.T(geom.mark,  view);
+  const bePct    = QtsScale.T(geom.be,    view);
+  const slPct    = QtsScale.T(geom.sl,    view);
+  const tpPct    = QtsScale.T(geom.tp,    view);
 
-  // ── Fill activo — tricolor: rojo / naranja(BE) / verde ───────────────────
-  // Estado según posición del mark respecto a entry y breakeven
-  const mark  = pos.mark;
-  const bePx  = pos.breakeven_price || pos.entry;
+  // ── Zonas de fondo (recortadas al viewport) ──────────────────────────────
+  const lossR   = QtsScale.clipRange(geom.sl,    geom.entry, view);
+  const beZoneR = QtsScale.clipRange(geom.entry, geom.be,    view);
+  const profR   = QtsScale.clipRange(geom.be,    geom.tp,    view);
+
+  const lossStyle   = `left:${lossR.left.toFixed(1)}%;width:${lossR.width.toFixed(1)}%`;
+  const beZoneStyle = `left:${beZoneR.left.toFixed(1)}%;width:${beZoneR.width.toFixed(1)}%`;
+  const profitStyle = `left:${profR.left.toFixed(1)}%;width:${profR.width.toFixed(1)}%`;
+
+  // ── Estado del fill (tricolor según mark vs entry vs be) ─────────────────
+  const mark = geom.mark;
+  const bePx = geom.be || geom.entry;
   let fillState;
   if (isLong) {
-    if (mark >= bePx)        fillState = 'profit';  // verde: pasó el BE
-    else if (mark >= pos.entry) fillState = 'be';   // naranja: entre entry y BE
-    else                     fillState = 'loss';    // rojo: debajo de entry
+    if      (mark >= bePx)       fillState = 'profit';
+    else if (mark >= geom.entry) fillState = 'be';
+    else                         fillState = 'loss';
   } else {
-    if (mark <= bePx)        fillState = 'profit';
-    else if (mark <= pos.entry) fillState = 'be';
-    else                     fillState = 'loss';
+    if      (mark <= bePx)       fillState = 'profit';
+    else if (mark <= geom.entry) fillState = 'be';
+    else                         fillState = 'loss';
   }
 
-  let fillLeft, fillWidth;
-  if (fillState === 'loss') {
-    // Relleno va del mark hacia la entrada (zona de pérdida)
-    if (isLong) { fillLeft = Math.max(0, markPct); fillWidth = Math.max(0, entryPct - Math.max(0, markPct)); }
-    else        { fillLeft = entryPct; fillWidth = Math.max(0, Math.min(100, markPct) - entryPct); }
-  } else {
-    // Relleno va de la entrada hacia el mark (zona BE o profit)
-    if (isLong) { fillLeft = entryPct; fillWidth = Math.max(0, markPct - entryPct); }
-    else        { fillLeft = Math.max(0, markPct); fillWidth = Math.max(0, entryPct - Math.max(0, markPct)); }
-  }
+  // Fill como rango [entry↔mark] (loss invierte sentido). Recortar al viewport.
+  const fillR = (fillState === 'loss')
+    ? QtsScale.clipRange(geom.mark, geom.entry, view)
+    : QtsScale.clipRange(geom.entry, geom.mark, view);
   const fillClass = fillState === 'profit' ? 'prog-fill-profit'
                   : fillState === 'be'     ? 'prog-fill-be'
                   :                          'prog-fill-loss';
 
-  const pctLbl = `${progress >= 0 ? '+' : ''}${fmt(progress, 1)}%`;
-  const slLbl  = pos.sl > 0 ? fmtPrice(pos.sl) : '—';
-  const tpLbl  = pos.tp > 0 ? fmtPrice(pos.tp) : '—';
+  // ── Marcador del mark con anillo de momentum ─────────────────────────────
+  const mom    = calcMomentum(pos);
+  const circ   = 37.7;
+  const offset = 9.4;
+  const filled = ((0.15 + 0.85 * mom.strength) * circ).toFixed(1);
 
-  // ── Marcador de precio actual: SVG con anillo de momentum ─────────────────
-  const mom     = calcMomentum(pos);
-  const circ    = 37.7;   // 2π × r=6
-  const offset  = 9.4;    // empieza desde arriba (circ/4)
-  const filled  = ((0.15 + 0.85 * mom.strength) * circ).toFixed(1);
-
-  // Label: PnL neto desde BE — color sigue el estado del fill
   const fnPct = pos.full_net_pct ?? 0;
   const fnUsd = pos.full_net_pnl ?? 0;
   const fnCls = fillState === 'profit' ? 'c-green'
               : fillState === 'be'     ? 'c-orange'
               :                          'c-red';
   const markLbl = `${fmtPct(fnPct)} ${fmtMoney(fnUsd)}`;
-
   const markSvg = `
     <svg class="prog-mark-svg" viewBox="0 0 18 18" width="18" height="18">
       <circle cx="9" cy="9" r="8" fill="var(--bg-card)"/>
@@ -203,45 +218,176 @@ function buildProgressBar(pos) {
       <circle cx="9" cy="9" r="3" fill="var(--yellow)"/>
     </svg>`;
 
-  // ── Órdenes límite pendientes ─────────────────────────────────────────────
+  // ── Helper: render de un marcador con manejo de fuera-de-ventana ─────────
+  // type ∈ 'entry' | 'be' | 'mark' | 'milestone' | 'sl' | 'tp' | 'order'
+  function _renderInRange(pct, html) {
+    return pct >= 0 && pct <= 100 ? html(pct) : '';
+  }
+  function _oorChip(label, oor, tip, cls) {
+    const side = oor.side; // 'left' | 'right'
+    const arrow = side === 'left' ? '◀' : '▶';
+    const txt = side === 'left' ? `${arrow} ${label}` : `${label} ${arrow}`;
+    return `<div class="prog-oor ${side} ${cls || ''}" title="${esc(tip)}">${esc(txt)}</div>`;
+  }
+
+  // ── Marcadores fuera de ventana (flechas en el borde) ────────────────────
+  let oorEntry = '', oorBe = '', oorMark = '', oorSl = '', oorTp = '';
+  const oorE = QtsScale.outOfRange(geom.entry, view);
+  if (oorE) oorEntry = _oorChip(`E ${fmtPrice(geom.entry)}`, oorE,
+                                `Entrada · ${oorE.deltaPct.toFixed(1)}% fuera de vista`, 'entry');
+  const oorB = QtsScale.outOfRange(geom.be, view);
+  if (oorB) oorBe = _oorChip(`BE ${fmtPrice(geom.be)}`, oorB,
+                             `Breakeven · ${oorB.deltaPct.toFixed(1)}% fuera de vista`, 'be');
+  const oorM = QtsScale.outOfRange(geom.mark, view);
+  if (oorM) oorMark = _oorChip(`◉ ${fmtPrice(geom.mark)}`, oorM,
+                               `Mark · ${oorM.deltaPct.toFixed(1)}% fuera de vista`, 'mark');
+  const oorS = QtsScale.outOfRange(geom.sl, view);
+  if (oorS) oorSl = _oorChip(`SL ${fmtPrice(geom.sl)}`, oorS,
+                             `SL · ${oorS.deltaPct.toFixed(1)}% fuera de vista`, 'sl');
+  const oorT = QtsScale.outOfRange(geom.tp, view);
+  if (oorT) oorTp = _oorChip(`TP ${fmtPrice(geom.tp)}`, oorT,
+                             `TP · ${oorT.deltaPct.toFixed(1)}% fuera de vista`, 'tp');
+
+  // ── Órdenes límite (in-range) ────────────────────────────────────────────
   const orderMarkers = (pos.orders || []).map(o => {
-    if (!o.price || !pos.sl || !pos.tp || pos.tp === pos.sl) return '';
-    const pct = (o.price - pos.sl) / (pos.tp - pos.sl) * 100;
+    if (!o.price) return '';
+    const pct = QtsScale.T(o.price, view);
+    if (pct < 0 || pct > 100) return '';
     const cls = o.side === 'Buy' ? 'prog-order-buy' : 'prog-order-sell';
     const tip = `${o.side} ${o.qty} @ ${fmtPrice(o.price)} (${o.status})`;
-    return `<div class="prog-order-marker ${cls}" style="left:${Math.max(0,Math.min(100,pct)).toFixed(1)}%" title="${esc(tip)}"></div>`;
+    return `<div class="prog-order-marker ${cls}" style="left:${pct.toFixed(1)}%" title="${esc(tip)}"></div>`;
   }).join('');
 
-  // ── Breakeven marker (naranja) ────────────────────────────────────────────
-  const beMarker = (pos.be_pct_bar != null && pos.breakeven_price)
-    ? `<div class="prog-be-marker" style="left:${pos.be_pct_bar.toFixed(1)}%" title="Breakeven: ${esc(fmtPrice(pos.breakeven_price))}"></div>
-       <div class="prog-be-label"  style="left:${pos.be_pct_bar.toFixed(1)}%">BE</div>`
-    : '';
+  // ── BE marker + label (in-range) ─────────────────────────────────────────
+  const beMarker = _renderInRange(bePct, p =>
+    `<div class="prog-be-marker" style="left:${p.toFixed(1)}%" title="Breakeven: ${esc(fmtPrice(geom.be))}"></div>
+     <div class="prog-be-label"  style="left:${p.toFixed(1)}%">BE</div>`);
 
-  // ── Hitos 25/50/75 (verde) ────────────────────────────────────────────────
+  // ── Hitos 25/50/75 (in-range) ────────────────────────────────────────────
   const milestoneMarkers = (pos.milestones || []).map(m => {
+    const p = QtsScale.T(m.price, view);
+    if (p < 0 || p > 100) return '';
     const tip      = `${m.pct}% → ${fmtPrice(m.price)} | ROI ${m.roi >= 0 ? '+' : ''}${fmt(m.roi, 2)}%`;
     const grossStr = m.gross != null ? ` (${fmtMoneyAbs(m.gross)})` : '';
     return `
-      <div class="prog-milestone" style="left:${m.bar_pct.toFixed(1)}%" title="${esc(tip)}"></div>
-      <div class="prog-milestone-label" style="left:${m.bar_pct.toFixed(1)}%">${m.pct}% ${fmtPrice(m.price)}${grossStr}</div>`;
+      <div class="prog-milestone" style="left:${p.toFixed(1)}%" title="${esc(tip)}"></div>
+      <div class="prog-milestone-label" style="left:${p.toFixed(1)}%">${m.pct}% ${fmtPrice(m.price)}${grossStr}</div>`;
   }).join('');
+
+  // ── Marcador de entrada (in-range) ───────────────────────────────────────
+  const entryMarker = _renderInRange(entryPct, p =>
+    `<div class="prog-entry-line"  style="left:${p.toFixed(1)}%"></div>
+     <div class="prog-entry-label" style="left:${p.toFixed(1)}%">Entrada ${esc(fmtPrice(geom.entry))}</div>`);
+
+  // ── Mark + label (in-range) ──────────────────────────────────────────────
+  const markBlock = _renderInRange(markPct, p =>
+    `<div class="prog-mark-wrap"   style="left:${p.toFixed(1)}%" title="Mark: ${esc(fmtPrice(geom.mark))}">${markSvg}</div>
+     <div class="prog-mark-label ${fnCls}" style="left:${p.toFixed(1)}%">${esc(markLbl)}</div>`);
+
+  // ── Controles de zoom ────────────────────────────────────────────────────
+  const lv = QtsScale.level(z.levelIdx);
+  const atMin = z.levelIdx <= QtsScale.MIN_IDX;
+  const atMax = z.levelIdx >= QtsScale.MAX_IDX;
+  const anchorLbl = z.anchor === 'be' ? 'BE'
+                  : z.anchor === 'entry' ? 'entrada'
+                  : z.anchor === 'mid' ? 'centro'
+                  : 'mark';
+  const zoomCtrls = `
+    <div class="prog-zoom-bar" data-zoom-key="${esc(key)}">
+      <button class="prog-zoom-btn" data-zoom-act="dec" ${atMin ? 'disabled' : ''} title="Zoom out (−)">−</button>
+      <span class="prog-zoom-lbl">${esc(lv.label)}${lv.idx !== 0 ? ' · ' + anchorLbl : ''}</span>
+      <button class="prog-zoom-btn" data-zoom-act="inc" ${atMax ? 'disabled' : ''} title="Zoom in (+)">+</button>
+      <button class="prog-zoom-btn prog-zoom-reset" data-zoom-act="reset" ${lv.idx === 0 ? 'disabled' : ''} title="Reset (0)">⤬</button>
+      ${lv.idx !== 0 ? `
+        <select class="prog-zoom-anchor" data-zoom-act="anchor" title="Centro de la vista">
+          <option value="mark"  ${z.anchor === 'mark'  ? 'selected' : ''}>◉ mark</option>
+          <option value="entry" ${z.anchor === 'entry' ? 'selected' : ''}>E entrada</option>
+          <option value="be"    ${z.anchor === 'be'    ? 'selected' : ''}>BE</option>
+          <option value="mid"   ${z.anchor === 'mid'   ? 'selected' : ''}>centro</option>
+        </select>` : ''}
+    </div>`;
+
+  // ── Cronotopología: heatmap espacial + stack temporal + leyenda ─────────
+  // Las zonas vienen del backend (web/zone_tracker.py). Solo dibujamos si hay
+  // tiempo cocinado suficiente para que la visualización tenga señal (>5s).
+  const zonesData = pos.zones;
+  let timeLayer = '';
+  if (zonesData && (zonesData.total_seconds || 0) > 5 && Array.isArray(zonesData.zones)) {
+    const m = geom.milestones || [];
+    const m25p = m[0]?.price, m50p = m[1]?.price, m75p = m[2]?.price;
+    const rngTotal = Math.abs((geom.tp || 0) - (geom.sl || 0)) || 1;
+    // Rango de precios por zona. clipRange normaliza con min/max,
+    // así que el orden numérico (LONG/SHORT) no importa.
+    const zoneRange = {
+      below_sl: [geom.sl - rngTotal * 0.5, geom.sl],
+      sl_entry: [geom.sl,    geom.entry],
+      entry_be: [geom.entry, geom.be],
+      be_25:    [geom.be,    m25p],
+      '25_50':  [m25p,       m50p],
+      '50_75':  [m50p,       m75p],
+      '75_tp':  [m75p,       geom.tp],
+      above_tp: [geom.tp,    geom.tp + rngTotal * 0.5],
+    };
+    const totalS = zonesData.total_seconds || 1;
+    const logTot = Math.log(1 + totalS);
+
+    const heatSegs = zonesData.zones.map(z => {
+      const rng = zoneRange[z.key];
+      if (!rng || rng[0] == null || rng[1] == null) return '';
+      const r = QtsScale.clipRange(rng[0], rng[1], view);
+      if (r.width <= 0) return '';
+      const norm = logTot > 0 ? Math.log(1 + z.seconds) / logTot : 0;
+      const op = Math.max(0.08, Math.min(0.55, 0.08 + norm * 0.47));
+      const dur = fmtElapsedShort(z.seconds);
+      const tip = `${z.label} · cocinado ${dur} · ${z.visits} visita${z.visits===1?'':'s'} · racha máx ${fmtElapsedShort(z.max_streak)}`;
+      const inside = r.width > 5 ? `<span class="prog-heat-lbl">${esc(dur)}</span>` : '';
+      const cur = z.key === zonesData.current_zone ? ' is-current' : '';
+      return `<div class="prog-heat-seg${cur}" data-zone="${esc(z.key)}"
+                style="left:${r.left.toFixed(1)}%;width:${r.width.toFixed(1)}%;opacity:${op.toFixed(2)}"
+                title="${esc(tip)}">${inside}</div>`;
+    }).join('');
+
+    // Stack temporal: barra apilada de pct_of_life. Eje = tiempo, no precio.
+    let cur = 0;
+    const stack = zonesData.zones.map(z => {
+      if (!z.pct_of_life || z.pct_of_life <= 0) return '';
+      const left = cur; cur += z.pct_of_life;
+      const tip  = `${z.label}: ${z.pct_of_life.toFixed(1)}% del tiempo · ${fmtElapsedShort(z.seconds)}`;
+      return `<div class="prog-stack-seg prog-stack-${esc(z.key)}"
+                style="left:${left.toFixed(1)}%;width:${z.pct_of_life.toFixed(1)}%"
+                title="${esc(tip)}"></div>`;
+    }).join('');
+
+    // Leyenda: top 2 zonas más cocinadas + zona actual
+    const sorted = zonesData.zones.slice().sort((a, b) => b.seconds - a.seconds);
+    const top    = sorted.slice(0, 2)
+      .map(z => `<span class="prog-legend-item"><span class="prog-legend-dot prog-stack-${esc(z.key)}"></span>${esc(z.label)} ${z.pct_of_life.toFixed(0)}%</span>`)
+      .join(' · ');
+    const curZ = zonesData.zones.find(z => z.key === zonesData.current_zone);
+    const curHtml = curZ ? `<span class="prog-legend-current">ahora: ${esc(curZ.label)} (${fmtElapsedShort(curZ.max_streak)})</span>` : '';
+
+    timeLayer = `
+      <div class="prog-time-heat" title="Tiempo cocinado por zona — opacidad ∝ log(t)">${heatSegs}</div>
+      <div class="prog-time-stack" title="Proporción temporal por zona">${stack}</div>
+      <div class="prog-time-legend">Fases ${esc(fmtElapsedShort(totalS))}: ${top}${curHtml ? ' · ' + curHtml : ''}</div>`;
+  }
 
   return `
   <div class="prog-wrap">
+    ${zoomCtrls}
     <div class="prog-track">
       <div class="prog-zone-loss"   style="${lossStyle}"></div>
-      ${beZoneStyle ? `<div class="prog-zone-be" style="${beZoneStyle}"></div>` : ''}
+      ${beZoneR.width > 0 ? `<div class="prog-zone-be" style="${beZoneStyle}"></div>` : ''}
       <div class="prog-zone-profit" style="${profitStyle}"></div>
-      <div class="${fillClass}"     style="left:${fillLeft.toFixed(1)}%;width:${fillWidth.toFixed(1)}%"></div>
+      <div class="${fillClass}"     style="left:${fillR.left.toFixed(1)}%;width:${fillR.width.toFixed(1)}%"></div>
       ${orderMarkers}
       ${beMarker}
       ${milestoneMarkers}
-      <div class="prog-entry-line"  style="left:${entryPct.toFixed(1)}%"></div>
-      <div class="prog-entry-label" style="left:${entryPct.toFixed(1)}%">Entrada ${esc(fmtPrice(pos.entry))}</div>
-      <div class="prog-mark-wrap"   style="left:${markPct.toFixed(1)}%" title="Mark: ${esc(fmtPrice(pos.mark))}">${markSvg}</div>
-      <div class="prog-mark-label ${fnCls}" style="left:${markPct.toFixed(1)}%">${esc(markLbl)}</div>
+      ${entryMarker}
+      ${markBlock}
+      ${oorSl}${oorEntry}${oorBe}${oorMark}${oorTp}
     </div>
+    ${timeLayer}
   </div>`;
 }
 
@@ -474,7 +620,7 @@ function buildPosCardPro(pos) {
   }
 
   return `
-  <div class="pos-card">
+  <div class="pos-card" data-pos-key="${esc(key)}">
     <div class="pos-header">
       <span class="pos-symbol">${esc(pos.symbol)}</span>
       <span class="pos-dir ${dirClass}">${pos.direction}</span>
@@ -673,7 +819,7 @@ function buildPosCardLite(pos) {
        </div>`;
 
   return `
-  <div class="pos-card pos-card-lite">
+  <div class="pos-card pos-card-lite" data-pos-key="${esc(key)}">
     <div class="pos-header-lite">
       <span class="pos-symbol pos-sym-lite ${dirCls}">${esc(pos.symbol)}</span>
       <span class="pos-pct-lite ${pctCls}">${esc(pctStr)}</span>
@@ -1148,7 +1294,55 @@ applyProModeCfg();
 
 // ── Event delegation: botones de acción Lite (sobreviven re-renders) ──────────
 
+// ── Zoom telescópico: handlers (botones + select de ancla + teclado) ─────────
+
+let _hoveredPosKey = null;   // se actualiza con mouseover/out sobre cards
+
+function _applyZoomAction(key, act) {
+  const z = _getZoom(key);
+  if (act === 'inc')        _setZoom(key, { levelIdx: QtsScale.clampIdx(z.levelIdx + 1) });
+  else if (act === 'dec')   _setZoom(key, { levelIdx: QtsScale.clampIdx(z.levelIdx - 1) });
+  else if (act === 'reset') _setZoom(key, { levelIdx: 0, anchor: 'mark' });
+  if (lastSnap) renderPositions(lastSnap.positions || []);
+}
+
+document.getElementById('positions-container')?.addEventListener('change', e => {
+  const sel = e.target.closest('select[data-zoom-act="anchor"]');
+  if (!sel) return;
+  const bar = sel.closest('[data-zoom-key]');
+  if (!bar) return;
+  _setZoom(bar.dataset.zoomKey, { anchor: sel.value });
+  if (lastSnap) renderPositions(lastSnap.positions || []);
+});
+
+document.getElementById('positions-container')?.addEventListener('mouseover', e => {
+  const card = e.target.closest('[data-pos-key]');
+  _hoveredPosKey = card ? card.dataset.posKey : null;
+});
+document.getElementById('positions-container')?.addEventListener('mouseleave', () => {
+  _hoveredPosKey = null;
+});
+
+window.addEventListener('keydown', e => {
+  // Ignorar si se está escribiendo en un input/textarea/select
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (/INPUT|TEXTAREA|SELECT/.test(tag)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!_hoveredPosKey) return;
+  if (e.key === '+' || e.key === '=') { e.preventDefault(); _applyZoomAction(_hoveredPosKey, 'inc'); }
+  else if (e.key === '-' || e.key === '_') { e.preventDefault(); _applyZoomAction(_hoveredPosKey, 'dec'); }
+  else if (e.key === '0') { e.preventDefault(); _applyZoomAction(_hoveredPosKey, 'reset'); }
+});
+
 document.getElementById('positions-container')?.addEventListener('click', async e => {
+  // Zoom: −/+/reset
+  const zoomBtn = e.target.closest('button[data-zoom-act]');
+  if (zoomBtn) {
+    const bar = zoomBtn.closest('[data-zoom-key]');
+    if (bar) _applyZoomAction(bar.dataset.zoomKey, zoomBtn.dataset.zoomAct);
+    return;
+  }
+
   // Toggle detalles Pro (abrir → tab detalles por defecto; cerrar)
   const toggleBtn = e.target.closest('[data-toggle-details]');
   if (toggleBtn) {

@@ -108,6 +108,19 @@ def calc_position_metrics(pos, live_mark: float = 0.0, elapsed_override: float |
             })
 
     r = lambda v, d=4: round(v, d) if v is not None else None
+
+    # ── Geometría cruda (para reproyección con zoom en el frontend) ─────────
+    # Mantiene los precios invariantes; el frontend transforma con scale.js
+    geometry = {
+        "sl":      r(sl, 6),
+        "entry":   r(entry, 6),
+        "tp":      r(tp, 6),
+        "be":      r(be_price, 6),
+        "mark":    r(mark, 6),
+        "is_long": bool(pos.is_long),
+        "milestones": [{"pct": m["pct"], "price": m["price"]} for m in milestones],
+    }
+
     return {
         "gross_pnl":        r(gross_now),
         "net_pnl_now":      r(net_pnl_now),
@@ -132,4 +145,5 @@ def calc_position_metrics(pos, live_mark: float = 0.0, elapsed_override: float |
         "elapsed_s":        int(elapsed_display),
         "elapsed_fmt":      format_elapsed(elapsed_display),
         "mark_used":        r(mark, 6),
+        "geometry":         geometry,
     }

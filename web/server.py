@@ -34,6 +34,7 @@ from streams.market import MarketStream
 from streams.account import AccountStream
 from streams.klines import KlineStream
 from web.calculator import calc_position_metrics, format_elapsed
+from web.zone_tracker import tracker as _zone_tracker
 
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger("qts.web")
@@ -269,6 +270,12 @@ def _build_snapshot() -> dict:
                 metrics = calc_position_metrics(pos, live_mark=live_mark,
                                                 elapsed_override=elapsed_override)
 
+                # Sampler de zona (cronotopología): clasifica el mark y acumula tiempo.
+                # Corre dentro del snapshot loop (1 Hz) — suficiente para zonas con
+                # duración de minutos/horas; el sampler dedicado complementa a 0.5 Hz.
+                _zone_tracker().sample(pos_key, metrics["geometry"], live_mark or pos.entry_price)
+                zones_summary = _zone_tracker().summary(pos_key)
+
                 sig = _signals.get(sym, {})
                 opp = sig.get("opp")
                 ab  = sig.get("absorption")
@@ -309,16 +316,20 @@ def _build_snapshot() -> dict:
                     "atr":       round(sig.get("atr", 0), 6),
                     "rsi":       round(sig.get("rsi", 50), 1),
                     "orders":    orders_data,
+                    "zones":     zones_summary,
                     **metrics,
                 })
             except Exception as e:
                 log.error("snapshot pos %s: %s", getattr(pos, "symbol", "?"), e)
 
-        # Limpiar entradas de posiciones cerradas del tracker de duración
+        # Limpiar entradas de posiciones cerradas del tracker de duración + zonas
         active_keys = {f"{pos.symbol}_{pos.side}" for pos in st.open_positions()}
         for k in list(_pos_first_seen):
             if k not in active_keys:
                 del _pos_first_seen[k]
+        for k in _zone_tracker().known_keys():
+            if k not in active_keys:
+                _zone_tracker().forget(k)
 
         symbol_pnl = sorted(
             [{"symbol": k.replace("USDT", ""), "pnl": round(v, 4)}

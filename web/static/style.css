@@ -499,6 +499,147 @@ body {
   pointer-events: none;
 }
 
+/* ── Zoom telescópico: controles + flechas fuera de ventana ──────────────── */
+.prog-zoom-bar {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 6px;
+  font-size: 10px; color: var(--text-dim);
+  user-select: none;
+}
+.prog-zoom-btn {
+  background: var(--bg); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 3px;
+  width: 22px; height: 20px; line-height: 1;
+  font-size: 13px; font-weight: 700;
+  cursor: pointer; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.prog-zoom-btn:hover:not(:disabled) {
+  background: var(--bg-panel); color: var(--text); border-color: var(--border2);
+}
+.prog-zoom-btn:disabled { opacity: .4; cursor: not-allowed; }
+.prog-zoom-btn.prog-zoom-reset { font-size: 11px; }
+.prog-zoom-lbl {
+  min-width: 64px; text-align: center;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .3px;
+}
+.prog-zoom-anchor {
+  background: var(--bg); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 3px;
+  font-size: 10px; padding: 1px 3px;
+  margin-left: auto; cursor: pointer;
+}
+
+/* Flecha "fuera de ventana" pegada al borde de la barra */
+.prog-oor {
+  position: absolute; top: 50%;
+  transform: translateY(-50%);
+  font-size: 9px; font-weight: 700;
+  padding: 2px 5px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: auto; cursor: help;
+  z-index: 5;
+  letter-spacing: .2px;
+  opacity: .9;
+}
+.prog-oor.left  { left: 0; }
+.prog-oor.right { right: 0; }
+.prog-oor.entry { color: var(--text-dim); border-color: var(--border2); }
+.prog-oor.be    { color: var(--orange); border-color: var(--orange); }
+.prog-oor.mark  { color: var(--yellow); border-color: var(--yellow-dim); background: var(--bg-panel); }
+.prog-oor.sl    { color: var(--red);   border-color: var(--red-dim); }
+.prog-oor.tp    { color: var(--green); border-color: var(--green-dim); }
+/* Apilamiento vertical cuando hay varios OOR del mismo lado */
+.prog-oor.left  + .prog-oor.left,
+.prog-oor.right + .prog-oor.right { top: calc(50% + 18px); }
+
+/* ── Cronotopología: heatmap espacial + stack temporal ───────────────────── */
+.prog-time-heat {
+  position: relative;
+  height: 14px;
+  margin-top: 24px;     /* respeta milestone-labels en bottom:-20px del prog-track */
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: visible;
+}
+.prog-heat-seg {
+  position: absolute; top: 0; bottom: 0;
+  background: var(--yellow);
+  border-left: 1px solid rgba(0,0,0,.18);
+  cursor: help;
+  transition: left .35s cubic-bezier(.4,0,.2,1),
+              width .35s cubic-bezier(.4,0,.2,1),
+              opacity .35s;
+  overflow: hidden;
+}
+.prog-heat-seg.is-current {
+  box-shadow: inset 0 0 0 1px var(--yellow), 0 0 6px rgba(220,220,170,.35);
+}
+.prog-heat-seg:hover { filter: brightness(1.15); }
+.prog-heat-lbl {
+  display: block;
+  font-size: 9px; font-weight: 700;
+  color: #111;
+  line-height: 14px;
+  text-align: center;
+  white-space: nowrap;
+  letter-spacing: .2px;
+  user-select: none;
+}
+[data-theme="light"] .prog-heat-lbl { color: #222; }
+
+.prog-time-stack {
+  position: relative;
+  height: 5px;
+  margin-top: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.prog-stack-seg {
+  position: absolute; top: 0; bottom: 0;
+  transition: left .35s, width .35s;
+  cursor: help;
+}
+.prog-stack-below_sl { background: var(--red);    opacity: .95; }
+.prog-stack-sl_entry { background: var(--red);    opacity: .55; }
+.prog-stack-entry_be { background: var(--orange); opacity: .80; }
+.prog-stack-be_25    { background: var(--green-dim); }
+.prog-stack-25_50    { background: var(--green);  opacity: .65; }
+.prog-stack-50_75    { background: var(--green);  opacity: .85; }
+.prog-stack-75_tp    { background: var(--green); }
+.prog-stack-above_tp { background: var(--yellow); }
+
+.prog-time-legend {
+  font-size: 9px; color: var(--text-dim);
+  margin-top: 5px; letter-spacing: .3px;
+  display: flex; flex-wrap: wrap; gap: 2px 4px;
+}
+.prog-legend-item {
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.prog-legend-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+}
+.prog-legend-current { color: var(--yellow); margin-left: 4px; }
+
+/* Transición suave al reproyectar la vista (zoom in/out) */
+.prog-zone-loss, .prog-zone-be, .prog-zone-profit,
+.prog-entry-line, .prog-entry-label,
+.prog-be-marker, .prog-be-label,
+.prog-milestone, .prog-milestone-label,
+.prog-order-marker {
+  transition: left .35s cubic-bezier(.4,0,.2,1),
+              width .35s cubic-bezier(.4,0,.2,1);
+}
+
 /* ── PnL metrics ─────────────────────────────────────────────────────────── */
 .pos-metrics {
   display: grid;
