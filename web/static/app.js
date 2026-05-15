@@ -455,7 +455,8 @@ function buildProgressBarLite(pos) {
 
 // ── Lite card ─────────────────────────────────────────────────────────────────
 
-const _pendingClose = new Set(); // "BTCUSDT_Buy" — confirming state persiste entre renders
+const _pendingClose   = new Set(); // "BTCUSDT_Buy" — confirming state persiste entre renders
+const _closingPos     = new Set(); // en vuelo hacia /api/close — bloquea nuevos clics
 
 function buildPosCardLite(pos) {
   const isLong = pos.direction === 'LONG';
@@ -492,7 +493,11 @@ function buildPosCardLite(pos) {
        </button>`
     : `<button class="pos-act-btn" disabled title="Ningún marcador superado aún">SL →</button>`;
 
-  const actionsHtml = _pendingClose.has(key)
+  const actionsHtml = _closingPos.has(key)
+    ? `<div class="pos-actions confirming">
+         <button class="pos-act-btn danger" disabled>⏳ Cerrando…</button>
+       </div>`
+    : _pendingClose.has(key)
     ? `<div class="pos-actions confirming">
          <span class="pos-confirm-lbl">Cerrar ${esc(pos.symbol)} @ ${fmtPrice(mark)}?</span>
          <button class="pos-act-btn secondary" data-cancel-close="${esc(key)}">CANCELAR</button>
@@ -523,6 +528,12 @@ function buildPosCardLite(pos) {
 
 function renderPositions(positions) {
   const n    = positions ? positions.length : 0;
+
+  // Limpiar _closingPos y _pendingClose de posiciones que ya desaparecieron del snapshot
+  const activeKeys = new Set((positions || []).map(p => `${p.full_sym}_${p.side}`));
+  for (const k of [..._closingPos])   if (!activeKeys.has(k)) _closingPos.delete(k);
+  for (const k of [..._pendingClose]) if (!activeKeys.has(k)) _pendingClose.delete(k);
+
   const html = n ? positions.map(buildPositionCard).join('') : '<div class="empty-state">Sin posiciones abiertas</div>';
 
   const c  = document.getElementById('positions-container');
@@ -788,20 +799,22 @@ document.getElementById('positions-container')?.addEventListener('click', async 
     const key  = confirmBtn.dataset.confirmClose;
     const sym  = confirmBtn.dataset.sym;
     const side = confirmBtn.dataset.side;
-    confirmBtn.disabled = true;
-    confirmBtn.textContent = '…';
+    if (_closingPos.has(key)) return;   // ya hay una llamada en vuelo
+    _pendingClose.delete(key);
+    _closingPos.add(key);
+    if (lastSnap) renderPositions(lastSnap.positions || []);   // muestra "Cerrando…"
     try {
       const res  = await fetch(`/api/close/${sym}/${side}`, { method: 'POST' });
       const data = await res.json();
       if (!data.success) {
         alert(`No se pudo cerrar: ${data.error}`);
-        _pendingClose.delete(key);
+        _closingPos.delete(key);
         if (lastSnap) renderPositions(lastSnap.positions || []);
       }
-      // Si hay éxito, el WS snapshot actualizará las posiciones automáticamente
+      // Éxito: el WS + refresh server eliminarán la posición del snapshot pronto
     } catch (err) {
-      alert(`Error: ${err}`);
-      _pendingClose.delete(key);
+      alert(`Error de red: ${err}`);
+      _closingPos.delete(key);
       if (lastSnap) renderPositions(lastSnap.positions || []);
     }
     return;

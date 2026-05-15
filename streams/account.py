@@ -217,13 +217,20 @@ class AccountStream:
         })
         if data.get("retCode") != 0:
             return
+        active_keys: set[str] = set()
         for item in data.get("result", {}).get("list", []):
             size = float(item.get("size", 0))
             if size <= 0:
                 continue
             sym = item.get("symbol", "")
             idx = int(item.get("positionIdx", 0))
-            self.state.positions[f"{sym}_{idx}"] = self._parse_position(item)
+            key = f"{sym}_{idx}"
+            active_keys.add(key)
+            self.state.positions[key] = self._parse_position(item)
+        # Eliminar posiciones que ya no existen en Bybit (cerradas)
+        for key in list(self.state.positions):
+            if key not in active_keys:
+                del self.state.positions[key]
 
     async def _fetch_balance(self, session: aiohttp.ClientSession) -> None:
         # Intentar UNIFIED primero (Standard en Bybit v5 a veces requiere CONTRACT)

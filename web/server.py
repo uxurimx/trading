@@ -367,6 +367,26 @@ def _build_snapshot() -> dict:
             "analyses":   [],
         }
 
+async def _account_refresh_loop_once() -> None:
+    """Un solo refresh REST de posiciones y balance (usado como trigger on-demand)."""
+    import aiohttp as _aio
+    await asyncio.sleep(1)   # pequeño delay para que Bybit actualice su estado
+    try:
+        async with _aio.ClientSession() as session:
+            await _account._fetch_positions(session)
+            await _account._fetch_balance(session)
+    except Exception as e:
+        log.debug("account_refresh_once: %s", e)
+
+
+async def _account_refresh_loop() -> None:
+    """Refresca posiciones y balance via REST cada 15 s como respaldo al WS privado."""
+    await asyncio.sleep(15)   # primera corrida: dejar que el WS arranque primero
+    while True:
+        await _account_refresh_loop_once()
+        await asyncio.sleep(15)
+
+
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -385,6 +405,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_signal_loop(),       name="signals"),
         asyncio.create_task(_mxn_loop(),          name="mxn"),
         asyncio.create_task(_ticker_ws_loop(),    name="ticker_ws"),
+        asyncio.create_task(_account_refresh_loop(), name="account_refresh"),
     ]
     log.warning("QTS Web Dashboard → http://0.0.0.0:%s", WEB_PORT)
     yield
@@ -606,6 +627,8 @@ async def api_close_position(symbol: str, side: str):
         data = await _exec._post("/v5/order/create", body)
         if data.get("retCode") == 0:
             log.warning("Position closed: %s %s", sym, side)
+            # Refresh inmediato: no esperar al WS privado para actualizar el estado
+            asyncio.create_task(_account_refresh_loop_once())
             return JSONResponse({"success": True, "order_id": data["result"].get("orderId", "")})
         return JSONResponse({"success": False, "error": data.get("retMsg", "error")})
     except Exception as e:
