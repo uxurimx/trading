@@ -131,23 +131,58 @@ function renderAccount(a) {
   lbl.textContent       = `Margen ${fmt(pct, 1)}%`;
 }
 
+// ── Momentum del mercado (para el anillo del marcador) ────────────────────────
+
+function calcMomentum(pos) {
+  const bull = (pos.ab_side === 'BUY'  ? 1 : 0) + (pos.trend_dir === 'UP'   ? 1 : 0);
+  const bear = (pos.ab_side === 'SELL' ? 1 : 0) + (pos.trend_dir === 'DOWN' ? 1 : 0);
+  const rsi   = pos.rsi   || 50;
+  const score = pos.score || 0;
+  const rsiStr   = Math.abs(rsi - 50) / 50;          // 0→1
+  const scoreStr = Math.min(score, 100) / 100;        // 0→1
+  const strength = Math.min(1, 0.5 * rsiStr + 0.5 * scoreStr);
+
+  let color;
+  if      (bull > bear) color = 'var(--green)';
+  else if (bear > bull) color = 'var(--red)';
+  else                  color = 'var(--yellow-dim)';
+
+  return { color, strength };
+}
+
 // ── Barra de progreso SL→TP ───────────────────────────────────────────────────
 
 function buildProgressBar(pos) {
-  const isLong    = pos.direction === 'LONG';
-  const entryPct  = pos.entry_pct_bar;
-  const markPct   = pos.mark_pct_bar;
-  const progress  = pos.progress_pct;
+  const isLong   = pos.direction === 'LONG';
+  const entryPct = pos.entry_pct_bar;
+  const markPct  = pos.mark_pct_bar;
+  const progress = pos.progress_pct;
+  const bePct    = pos.be_pct_bar ?? entryPct;
 
-  // Zonas de fondo
-  const lossStyle   = isLong
-    ? `left:0%;width:${entryPct}%`
-    : `left:${entryPct}%;width:${100 - entryPct}%`;
+  // ── Zonas de fondo ────────────────────────────────────────────────────────
+  // Pérdida: SL → entrada
+  const lossStyle = isLong
+    ? `left:0%;width:${entryPct.toFixed(1)}%`
+    : `left:${entryPct.toFixed(1)}%;width:${(100 - entryPct).toFixed(1)}%`;
+
+  // Zona amarilla: entrada → BE (recuperación de fees)
+  let beZoneStyle = '';
+  if (pos.be_pct_bar != null) {
+    if (isLong) {
+      const w = Math.max(0, bePct - entryPct);
+      beZoneStyle = `left:${entryPct.toFixed(1)}%;width:${w.toFixed(1)}%`;
+    } else {
+      const w = Math.max(0, entryPct - bePct);
+      beZoneStyle = `left:${bePct.toFixed(1)}%;width:${w.toFixed(1)}%`;
+    }
+  }
+
+  // Zona verde: BE → TP
   const profitStyle = isLong
-    ? `left:${entryPct}%;width:${100 - entryPct}%`
-    : `left:0%;width:${entryPct}%`;
+    ? `left:${bePct.toFixed(1)}%;width:${(100 - bePct).toFixed(1)}%`
+    : `left:0%;width:${bePct.toFixed(1)}%`;
 
-  // Fill activo
+  // ── Fill activo ───────────────────────────────────────────────────────────
   const inProfit = progress >= 0;
   let fillLeft, fillWidth, fillClass;
   if (isLong) {
@@ -159,29 +194,52 @@ function buildProgressBar(pos) {
   }
   fillClass = inProfit ? 'prog-fill-profit' : 'prog-fill-loss';
 
-  const pctLbl  = `${progress >= 0 ? '+' : ''}${fmt(progress, 1)}%`;
-  const slLbl   = pos.sl > 0 ? fmtPrice(pos.sl) : '—';
-  const tpLbl   = pos.tp > 0 ? fmtPrice(pos.tp) : '—';
-  const markLbl = fmtPrice(pos.mark);
+  const pctLbl = `${progress >= 0 ? '+' : ''}${fmt(progress, 1)}%`;
+  const slLbl  = pos.sl > 0 ? fmtPrice(pos.sl) : '—';
+  const tpLbl  = pos.tp > 0 ? fmtPrice(pos.tp) : '—';
 
-  // Órdenes límite pendientes
+  // ── Marcador de precio actual: SVG con anillo de momentum ─────────────────
+  const mom     = calcMomentum(pos);
+  const circ    = 37.7;   // 2π × r=6
+  const offset  = 9.4;    // empieza desde arriba (circ/4)
+  const filled  = ((0.15 + 0.85 * mom.strength) * circ).toFixed(1);
+
+  // Label: PnL neto desde BE (positivo después del breakeven)
+  const fnPct = pos.full_net_pct ?? 0;
+  const fnUsd = pos.full_net_pnl ?? 0;
+  const fnCls = fnPct >= 0 ? 'c-green' : 'c-red';
+  const markLbl = `${fmtPct(fnPct)} ${fmtMoney(fnUsd)}`;
+
+  const markSvg = `
+    <svg class="prog-mark-svg" viewBox="0 0 18 18" width="18" height="18">
+      <circle cx="9" cy="9" r="8" fill="var(--bg-card)"/>
+      <circle class="prog-mark-outer" cx="9" cy="9" r="8" fill="none" stroke-width="1.5"/>
+      <circle cx="9" cy="9" r="6" fill="none"
+        stroke="${mom.color}" stroke-width="3.5"
+        stroke-dasharray="${filled} ${circ}"
+        stroke-dashoffset="${offset}"
+        stroke-linecap="round"/>
+      <circle cx="9" cy="9" r="3" fill="var(--yellow)"/>
+    </svg>`;
+
+  // ── Órdenes límite pendientes ─────────────────────────────────────────────
   const orderMarkers = (pos.orders || []).map(o => {
     if (!o.price || !pos.sl || !pos.tp || pos.tp === pos.sl) return '';
-    const pct  = (o.price - pos.sl) / (pos.tp - pos.sl) * 100;
-    const cls  = o.side === 'Buy' ? 'prog-order-buy' : 'prog-order-sell';
-    const tip  = `${o.side} ${o.qty} @ ${fmtPrice(o.price)} (${o.status})`;
+    const pct = (o.price - pos.sl) / (pos.tp - pos.sl) * 100;
+    const cls = o.side === 'Buy' ? 'prog-order-buy' : 'prog-order-sell';
+    const tip = `${o.side} ${o.qty} @ ${fmtPrice(o.price)} (${o.status})`;
     return `<div class="prog-order-marker ${cls}" style="left:${Math.max(0,Math.min(100,pct)).toFixed(1)}%" title="${esc(tip)}"></div>`;
   }).join('');
 
-  // Breakeven marker (naranja)
+  // ── Breakeven marker (naranja) ────────────────────────────────────────────
   const beMarker = (pos.be_pct_bar != null && pos.breakeven_price)
     ? `<div class="prog-be-marker" style="left:${pos.be_pct_bar.toFixed(1)}%" title="Breakeven: ${esc(fmtPrice(pos.breakeven_price))}"></div>
        <div class="prog-be-label"  style="left:${pos.be_pct_bar.toFixed(1)}%">BE</div>`
     : '';
 
-  // Hitos 25/50/75 (verde)
+  // ── Hitos 25/50/75 (verde) ────────────────────────────────────────────────
   const milestoneMarkers = (pos.milestones || []).map(m => {
-    const tip = `${m.pct}% → ${fmtPrice(m.price)} | ROI ${m.roi >= 0 ? '+' : ''}${fmt(m.roi, 2)}%`;
+    const tip      = `${m.pct}% → ${fmtPrice(m.price)} | ROI ${m.roi >= 0 ? '+' : ''}${fmt(m.roi, 2)}%`;
     const grossStr = m.gross != null ? ` (${fmtMoneyAbs(m.gross)})` : '';
     return `
       <div class="prog-milestone" style="left:${m.bar_pct.toFixed(1)}%" title="${esc(tip)}"></div>
@@ -197,6 +255,7 @@ function buildProgressBar(pos) {
     </div>
     <div class="prog-track">
       <div class="prog-zone-loss"   style="${lossStyle}"></div>
+      ${beZoneStyle ? `<div class="prog-zone-be" style="${beZoneStyle}"></div>` : ''}
       <div class="prog-zone-profit" style="${profitStyle}"></div>
       <div class="${fillClass}"     style="left:${fillLeft.toFixed(1)}%;width:${fillWidth.toFixed(1)}%"></div>
       ${orderMarkers}
@@ -204,9 +263,9 @@ function buildProgressBar(pos) {
       ${milestoneMarkers}
       <div class="prog-entry-line"  style="left:${entryPct.toFixed(1)}%"></div>
       <div class="prog-entry-label" style="left:${entryPct.toFixed(1)}%">Entrada ${esc(fmtPrice(pos.entry))}</div>
-      <div class="prog-mark-wrap"   style="left:${markPct.toFixed(1)}%">
-        <div class="prog-mark-label">${esc(markLbl)}</div>
-        <div class="prog-mark-dot"  title="Mark: ${esc(markLbl)}"></div>
+      <div class="prog-mark-wrap" style="left:${markPct.toFixed(1)}%" title="Mark: ${esc(fmtPrice(pos.mark))}">
+        <div class="prog-mark-label ${fnCls}">${esc(markLbl)}</div>
+        ${markSvg}
       </div>
     </div>
   </div>`;
@@ -248,8 +307,6 @@ function buildPositionCard(pos) {
   const isLong   = pos.direction === 'LONG';
   const dirClass = isLong ? 'long' : 'short';
 
-  const netNow  = pos.net_pnl_now;
-  const roiStr  = fmtPct(pos.roi_pct);
   const chgStr  = fmtPct(pos.roi_entry_pct);
 
   // Absoluto total en SL/TP (directo desde el servidor)
@@ -290,11 +347,6 @@ function buildPositionCard(pos) {
 
       <div class="pos-metrics">
         <div class="pnl-cell">
-          <div class="lbl">UNREALIZED PnL</div>
-          <div class="val ${pnlClass(pos.gross_pnl)}">${fmtMoney(pos.gross_pnl)}</div>
-          <div class="sub">ROI <span class="${pnlClass(pos.roi_pct)}">${esc(roiStr)}</span> · −fee cierre ${fmtMoneyAbs(pos.exit_fee_now, 4)}</div>
-        </div>
-        <div class="pnl-cell">
           <div class="lbl">EN SL <span style="color:var(--text-sub);font-size:8px">(${fmtPrice(pos.sl)})</span></div>
           <div class="val ${pnlClass(netAtSL)}">${fmtMoney(netAtSL)}</div>
           <div class="sub">bruto · −fee ${fmtMoneyAbs(pos.exit_fee_sl, 4)}</div>
@@ -308,17 +360,6 @@ function buildPositionCard(pos) {
 
       ${buildOrdersRow(pos.orders)}
       ${buildSignalChips(pos)}
-
-      <div class="pos-fees">
-        <span><span class="key">R:R</span> ${fmt(pos.rr_ratio)}</span>
-        <span><span class="key">Fee entrada (pagado):</span> ${fmtMoneyAbs(pos.entry_fee, 4)}</span>
-        <span><span class="key">Fee salida est:</span> ${fmtMoneyAbs(pos.exit_fee_now, 4)}</span>
-        <span><span class="key">Funding est:</span> ${fmtMoneyAbs(pos.funding_est, 4)}</span>
-        <span><span class="key">Notional:</span> ${fmtMoneyAbs(pos.notional, 2)}</span>
-        <span><span class="key">Margen:</span> ${fmtMoneyAbs(pos.margin, 2)}</span>
-        <span><span class="key">Liq:</span> ${fmtPrice(pos.liq)}</span>
-        <span><span class="key">ATR:</span> ${fmtPrice(pos.atr)}</span>
-      </div>
     </div>
   </div>`;
 }

@@ -50,8 +50,10 @@ def calc_position_metrics(pos, live_mark: float = 0.0, elapsed_override: float |
     # ── PnL bruto y ROI ───────────────────────────────────────────────────────
     gross_now     = (mark - entry) * qty * dirn
     net_pnl_now   = gross_now - exit_fee_mark
+    full_net_pnl  = gross_now - entry_fee - exit_fee_mark  # incluye fee entrada; = 0 en BE
     roi_pct       = gross_now / margin * 100
     roi_entry_pct = (mark - entry) / entry * 100 * dirn if entry > 0 else 0.0
+    full_net_pct  = full_net_pnl / margin * 100
 
     # ── EN SL / EN TP: bruto sin fees (igual que Bybit) ──────────────────────
     net_at_sl = (sl - entry) * qty * dirn if sl > 0 else None
@@ -107,6 +109,8 @@ def calc_position_metrics(pos, live_mark: float = 0.0, elapsed_override: float |
     return {
         "gross_pnl":        r(gross_now),
         "net_pnl_now":      r(net_pnl_now),
+        "full_net_pnl":     r(full_net_pnl),
+        "full_net_pct":     r(full_net_pct, 2),
         "roi_pct":          r(roi_pct, 2),
         "roi_entry_pct":    r(roi_entry_pct, 4),
         "net_at_sl":        r(net_at_sl),

@@ -211,16 +211,24 @@ body {
   background: var(--border);
   border-radius: 4px;
   overflow: visible;
-  margin: 18px 0 22px;   /* espacio para BE label arriba y milestone labels abajo */
+  margin: 26px 0 22px;   /* espacio para label marcador arriba y milestone labels abajo */
 }
 
-/* Zona de riesgo (SL → entrada para LONG, entrada → SL para SHORT) */
+/* Zona de riesgo (SL → entrada) */
 .prog-zone-loss {
   position: absolute; top: 0; height: 100%;
   background: var(--red-bg);
   border-radius: 4px 0 0 4px;
 }
-/* Zona de profit (entrada → TP para LONG) */
+/* Zona amarilla: entrada → BE (recuperación de fees) */
+.prog-zone-be {
+  position: absolute; top: 0; height: 100%;
+  background: rgba(220, 220, 170, 0.11);
+}
+[data-theme="light"] .prog-zone-be {
+  background: rgba(109, 96, 0, 0.08);
+}
+/* Zona de profit (BE → TP) */
 .prog-zone-profit {
   position: absolute; top: 0; height: 100%;
   background: var(--green-bg);
@@ -254,45 +262,39 @@ body {
   white-space: nowrap;
   pointer-events: none;
 }
-/* Indicador de precio actual (punto + label de precio) */
+/* Indicador de precio actual — centrado en la barra + anillo SVG de momentum */
 .prog-mark-wrap {
-  position: absolute; top: -9px;
-  transform: translateX(-50%);
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
   transition: left .3s;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
+  z-index: 4;
 }
-.prog-mark-dot {
-  width: 10px; height: 10px;
-  border-radius: 50%;
-  background: var(--yellow);
-  border: 2px solid var(--bg-card);
-  box-shadow: 0 0 6px rgba(220,220,170,.6);
-  flex-shrink: 0;
+.prog-mark-svg {
+  display: block;
 }
-/* Label del precio actual (arriba del punto) */
+/* Borde separador del anillo: negro en dark, blanco en light */
+.prog-mark-outer { stroke: #0d0d0d; }
+[data-theme="light"] .prog-mark-outer { stroke: #f0f0f0; }
+
+/* Label PnL desde BE (arriba del círculo) */
 .prog-mark-label {
   position: absolute;
-  bottom: 14px;
+  bottom: calc(100% + 3px);
+  left: 50%;
+  transform: translateX(-50%);
   font-size: 9px;
   font-weight: 600;
-  color: var(--yellow);
   white-space: nowrap;
   background: var(--bg-card);
-  padding: 1px 4px;
+  padding: 1px 5px;
   border-radius: 2px;
   border: 1px solid var(--border);
   pointer-events: none;
+  letter-spacing: .2px;
 }
-[data-theme="light"] .prog-mark-dot {
-  box-shadow: 0 0 6px rgba(109,96,0,.5);
-}
-[data-theme="light"] .prog-mark-label {
-  border-color: var(--border2);
-}
+.prog-mark-label.c-green { color: var(--green); border-color: var(--green-dim); }
+.prog-mark-label.c-red   { color: var(--red);   border-color: var(--red-dim); }
 
 /* ── Marcadores sobre la barra de progreso ───────────────────────────────── */
 .prog-order-marker {
@@ -336,7 +338,7 @@ body {
 /* ── PnL metrics ─────────────────────────────────────────────────────────── */
 .pos-metrics {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 6px; margin-bottom: 8px;
 }
 .pnl-cell {
