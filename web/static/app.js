@@ -489,12 +489,12 @@ function buildPosCardPro(pos) {
         <div class="pnl-cell">
           <div class="lbl">EN SL <span style="color:var(--text-sub);font-size:8px">(${fmtPrice(pos.sl)})</span></div>
           <div class="val ${pnlClass(netAtSL)}">${fmtMoney(netAtSL)}</div>
-          <div class="sub">bruto · −fee ${fmtMoneyAbs(pos.exit_fee_sl, 4)}</div>
+          <div class="sub">neto · fees incl.</div>
         </div>
         <div class="pnl-cell">
           <div class="lbl">EN TP <span style="color:var(--text-sub);font-size:8px">(${fmtPrice(pos.tp)})</span></div>
           <div class="val ${pnlClass(netAtTP)}">${fmtMoney(netAtTP)}</div>
-          <div class="sub">bruto · −fee ${fmtMoneyAbs(pos.exit_fee_tp, 4)}</div>
+          <div class="sub">neto · fees incl.</div>
         </div>
       </div>
       ${buildOrdersRow(pos.orders)}
@@ -760,12 +760,12 @@ function buildAnalysisCard(a) {
         <div class="pnl-cell">
           <div class="lbl">EN SL <span style="color:var(--text-sub);font-size:8px">(${fmtPrice(a.sl)})</span></div>
           <div class="val ${pnlClass(netAtSL)}">${fmtMoney(netAtSL)}</div>
-          <div class="sub">bruto · −fee ${fmtMoneyAbs(a.exit_fee_sl, 4)}</div>
+          <div class="sub">neto · fees incl.</div>
         </div>
         <div class="pnl-cell">
           <div class="lbl">EN TP <span style="color:var(--text-sub);font-size:8px">(${fmtPrice(a.tp)})</span></div>
           <div class="val ${pnlClass(netAtTP)}">${fmtMoney(netAtTP)}</div>
-          <div class="sub">bruto · −fee ${fmtMoneyAbs(a.exit_fee_tp, 4)}</div>
+          <div class="sub">neto · fees incl.</div>
         </div>
       </div>
     </div>
@@ -864,60 +864,269 @@ function fmtTs(ms) {
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// ── Historia: estado global ───────────────────────────────────────────────────
+let _historyData    = [];          // todos los trades cargados
+let _histExpanded   = new Set();   // ids de cards expandidas
+let _histAICache    = new Map();   // id → analysis result
+let _histAILoading  = new Set();   // ids con análisis en curso
+let _histFilterDir  = 'all';       // 'all' | 'long' | 'short'
+let _histFilterRes  = 'all';       // 'all' | 'win' | 'loss'
+let _histFilterSym  = '';          // texto de búsqueda
+
+function _histId(t) {
+  return `${t.full_sym}_${t.open_ts}_${t.close_ts}`;
+}
+
+function _histFiltered() {
+  return _historyData.filter(t => {
+    if (_histFilterDir === 'long'  && t.direction !== 'LONG')  return false;
+    if (_histFilterDir === 'short' && t.direction !== 'SHORT') return false;
+    if (_histFilterRes === 'win'   && t.closed_pnl <= 0)       return false;
+    if (_histFilterRes === 'loss'  && t.closed_pnl > 0)        return false;
+    if (_histFilterSym && !t.symbol.toLowerCase().includes(_histFilterSym.toLowerCase())) return false;
+    return true;
+  });
+}
+
+function _renderHistDashboard(trades) {
+  if (!trades.length) return;
+  const wins   = trades.filter(t => t.closed_pnl > 0);
+  const losses = trades.filter(t => t.closed_pnl <= 0);
+  const total  = trades.reduce((s, t) => s + t.closed_pnl, 0);
+  const best   = Math.max(...trades.map(t => t.closed_pnl));
+  const worst  = Math.min(...trades.map(t => t.closed_pnl));
+  const wr     = trades.length ? (wins.length / trades.length * 100).toFixed(0) : 0;
+
+  document.getElementById('hstat-total').textContent  = fmtMoney(total);
+  document.getElementById('hstat-total').className    = 'hist-stat-val ' + pnlClass(total);
+  document.getElementById('hstat-wins').textContent   = `${wins.length}`;
+  document.getElementById('hstat-losses').textContent = `${losses.length}`;
+  document.getElementById('hstat-wr').textContent     = `${wr}%`;
+  document.getElementById('hstat-wr').className       = 'hist-stat-val ' + (wr >= 50 ? 'c-green' : 'c-red');
+  document.getElementById('hstat-best').textContent   = fmtMoney(best);
+  document.getElementById('hstat-worst').textContent  = fmtMoney(worst);
+  document.getElementById('hist-dashboard').style.display = 'grid';
+  document.getElementById('hist-filters').style.display   = 'flex';
+}
+
 function buildHistoryCard(t) {
-  const isLong  = (t.side || '').toLowerCase() === 'buy';
-  const dirCls  = isLong ? 'long' : 'short';
-  const dirLbl  = isLong ? 'LONG' : 'SHORT';
-  const pnlCls  = pnlClass(t.closed_pnl);
-  const roi     = t.entry_price > 0
-    ? ((t.exit_price - t.entry_price) / t.entry_price * 100 * (isLong ? 1 : -1) * t.leverage)
+  const isLong   = t.direction === 'LONG';
+  const dirCls   = isLong ? 'long' : 'short';
+  const pnlCls   = pnlClass(t.closed_pnl);
+  const roi      = t.entry_price > 0
+    ? (t.exit_price - t.entry_price) / t.entry_price * 100 * (isLong ? 1 : -1) * t.leverage
     : 0;
+  const id       = _histId(t);
+  const expanded = _histExpanded.has(id);
+
+  // Panel expandido
+  let detailHtml = '';
+  if (expanded) {
+    const gross   = (t.exit_price - t.entry_price) * t.qty * (isLong ? 1 : -1);
+    const aiRes   = _histAICache.get(id);
+    const aiLoading = _histAILoading.has(id);
+
+    let aiBlock = '';
+    if (aiRes) {
+      const v = aiRes;
+      const scoreColor = v.score >= 7 ? 'var(--green)' : v.score >= 4 ? 'var(--orange)' : 'var(--red)';
+      const fmtList = arr => (arr || []).map(s => `<li>${esc(s)}</li>`).join('');
+      aiBlock = `<div class="hist-ai-result">
+        <div class="hist-ai-score" style="border-color:${scoreColor};color:${scoreColor}">${v.score||'?'}</div>
+        <div class="hist-ai-section">
+          <div class="hist-ai-section-title">Resumen</div>
+          <div>${esc(v.resumen || '')}</div>
+        </div>
+        ${v.fortalezas?.length ? `<div class="hist-ai-section">
+          <div class="hist-ai-section-title">Fortalezas</div>
+          <ul class="hist-ai-list">${fmtList(v.fortalezas)}</ul></div>` : ''}
+        ${v.debilidades?.length ? `<div class="hist-ai-section">
+          <div class="hist-ai-section-title">Debilidades</div>
+          <ul class="hist-ai-list">${fmtList(v.debilidades)}</ul></div>` : ''}
+        ${v.lecciones?.length ? `<div class="hist-ai-section">
+          <div class="hist-ai-section-title">Lecciones</div>
+          <ul class="hist-ai-list">${fmtList(v.lecciones)}</ul></div>` : ''}
+        ${v.patron ? `<div class="hist-ai-patron">Patrón detectado: ${esc(v.patron)}</div>` : ''}
+      </div>`;
+    }
+
+    detailHtml = `<div class="hist-detail-panel">
+      <div class="hist-detail-grid">
+        <div class="hist-detail-cell">
+          <div class="lbl">PnL BRUTO</div>
+          <div class="val ${pnlClass(gross)}">${fmtMoney(gross)}</div>
+        </div>
+        <div class="hist-detail-cell">
+          <div class="lbl">FEES TOTALES</div>
+          <div class="val c-red">−${fmtMoney(t.total_fees || 0)}</div>
+        </div>
+        <div class="hist-detail-cell">
+          <div class="lbl">PnL NETO</div>
+          <div class="val ${pnlCls}">${fmtMoney(t.closed_pnl)}</div>
+        </div>
+        <div class="hist-detail-cell">
+          <div class="lbl">CONTRATOS</div>
+          <div class="val">${t.qty}</div>
+        </div>
+        <div class="hist-detail-cell">
+          <div class="lbl">APERTURA</div>
+          <div class="val">${fmtTs(t.open_ts)}</div>
+        </div>
+        <div class="hist-detail-cell">
+          <div class="lbl">CIERRE</div>
+          <div class="val">${fmtTs(t.close_ts)}</div>
+        </div>
+      </div>
+      <button class="hist-ai-btn" ${aiLoading ? 'disabled' : ''}
+        data-analyze-trade="${esc(id)}"
+        data-trade-idx="${_historyData.indexOf(t)}">
+        ${aiLoading ? '⏳ Analizando…' : aiRes ? '↺ Re-analizar con IA' : '✦ Analizar con IA'}
+      </button>
+      ${aiBlock}
+    </div>`;
+  }
 
   return `
-  <div class="hist-card">
-    <div class="hist-header">
-      <span class="pos-symbol">${esc(t.symbol)}</span>
-      <span class="pos-dir ${dirCls}">${dirLbl}</span>
-      <span class="pos-leverage">${t.leverage}x</span>
-      <span class="hist-pnl ${pnlCls}">${fmtMoney(t.closed_pnl)}</span>
-    </div>
-    <div class="hist-prices">
-      <div class="hist-price-pair">
-        <span class="lbl">ENTRADA</span>
-        <span class="val">${fmtPrice(t.entry_price)}</span>
+  <div class="hist-card ${expanded ? 'expanded' : ''}" data-hist-toggle="${esc(id)}">
+    <div class="hist-card-summary">
+      <div class="hist-header">
+        <span class="pos-symbol">${esc(t.symbol)}</span>
+        <span class="pos-dir ${dirCls}">${t.direction}</span>
+        <span class="pos-leverage">${t.leverage}x</span>
+        <span class="hist-pnl ${pnlCls}">${fmtMoney(t.closed_pnl)}</span>
+        <span class="hist-expand-icon">${expanded ? '▲' : '▼'}</span>
       </div>
-      <div class="hist-arrow">→</div>
-      <div class="hist-price-pair">
-        <span class="lbl">SALIDA</span>
-        <span class="val">${fmtPrice(t.exit_price)}</span>
+      <div class="hist-prices">
+        <div class="hist-price-pair">
+          <span class="lbl">ENTRADA</span>
+          <span class="val">${fmtPrice(t.entry_price)}</span>
+        </div>
+        <div class="hist-arrow">→</div>
+        <div class="hist-price-pair">
+          <span class="lbl">SALIDA</span>
+          <span class="val">${fmtPrice(t.exit_price)}</span>
+        </div>
+        <div class="hist-roi ${pnlCls}">${roi >= 0 ? '+' : ''}${roi.toFixed(2)}% ROI</div>
       </div>
-      <div class="hist-roi ${pnlCls}">${roi >= 0 ? '+' : ''}${roi.toFixed(2)}% ROI</div>
+      <div class="hist-meta">
+        <span>📅 ${fmtTs(t.open_ts)}</span>
+        <span>⏱ ${esc(t.duration_fmt || '—')}</span>
+        <span>${t.qty} @ ${t.leverage}x</span>
+      </div>
     </div>
-    <div class="hist-meta">
-      <span>📅 ${fmtTs(t.open_ts)}</span>
-      <span>⏱ ${esc(t.duration_fmt || '—')}</span>
-      <span>${t.qty} contratos</span>
-    </div>
+    ${detailHtml}
   </div>`;
+}
+
+function _renderHistoryList() {
+  const c      = document.getElementById('history-container');
+  const trades = _histFiltered();
+  if (!trades.length) {
+    c.innerHTML = '<div class="empty-state">Sin trades que coincidan con los filtros</div>';
+    return;
+  }
+  c.innerHTML = trades.map(buildHistoryCard).join('');
+}
+
+async function _analyzeTradeWithAI(id, tradeIdx) {
+  const t = _historyData[tradeIdx];
+  if (!t) return;
+  _histAILoading.add(id);
+  _renderHistoryList();
+  try {
+    // Intentar obtener velas del período del trade
+    let klines = [];
+    try {
+      const elapsed = t.duration_s || 0;
+      const tf = elapsed < 7200 ? '5' : elapsed < 43200 ? '15' : '60';
+      const kr = await fetch(`/api/klines/${t.full_sym}?tf=${tf}&limit=60`);
+      const kd = await kr.json();
+      klines = kd.klines || [];
+    } catch (_) {}
+
+    const res  = await fetch('/api/trade-analysis', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ trade: t, klines }),
+    });
+    const data = await res.json();
+    if (data.ok && data.analysis) {
+      _histAICache.set(id, data.analysis);
+    } else {
+      _histAICache.set(id, { resumen: data.error || 'Error al analizar', score: null });
+    }
+  } catch (e) {
+    _histAICache.set(id, { resumen: String(e), score: null });
+  }
+  _histAILoading.delete(id);
+  _renderHistoryList();
 }
 
 async function loadHistory() {
   const c = document.getElementById('history-container');
   c.innerHTML = '<div class="empty-state">Cargando…</div>';
   try {
-    const res  = await fetch('/api/history');
+    const res  = await fetch('/api/history?limit=100');
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     if (!data.history || data.history.length === 0) {
       c.innerHTML = '<div class="empty-state">Sin trades cerrados recientes</div>';
       return;
     }
-    c.innerHTML = data.history.map(buildHistoryCard).join('');
+    _historyData   = data.history;
+    _histExpanded  = new Set();
+    _histAICache   = new Map();
+    _histAILoading = new Set();
+    _renderHistDashboard(_historyData);
+    _renderHistoryList();
     _historyLoaded = true;
   } catch (e) {
     c.innerHTML = `<div class="empty-state c-red">Error: ${esc(String(e))}</div>`;
   }
 }
+
+// ── Event delegation para historial ──────────────────────────────────────────
+document.getElementById('history-container')?.addEventListener('click', async e => {
+  // Toggle expand card
+  const card = e.target.closest('[data-hist-toggle]');
+  const analyzeBtn = e.target.closest('[data-analyze-trade]');
+
+  if (analyzeBtn) {
+    e.stopPropagation();
+    const id  = analyzeBtn.dataset.analyzeTrade;
+    const idx = parseInt(analyzeBtn.dataset.tradeIdx, 10);
+    if (!_histAILoading.has(id)) await _analyzeTradeWithAI(id, idx);
+    return;
+  }
+
+  if (card) {
+    const id = card.dataset.histToggle;
+    if (_histExpanded.has(id)) _histExpanded.delete(id);
+    else _histExpanded.add(id);
+    _renderHistoryList();
+  }
+});
+
+// Filtros
+document.getElementById('hist-filters')?.addEventListener('click', e => {
+  const dirBtn = e.target.closest('[data-filter-dir]');
+  if (dirBtn) {
+    _histFilterDir = dirBtn.dataset.filterDir;
+    document.querySelectorAll('[data-filter-dir]').forEach(b => b.classList.toggle('active', b === dirBtn));
+    _renderHistoryList();
+  }
+  const resBtn = e.target.closest('[data-filter-result]');
+  if (resBtn) {
+    _histFilterRes = resBtn.dataset.filterResult;
+    document.querySelectorAll('[data-filter-result]').forEach(b => b.classList.toggle('active', b === resBtn));
+    _renderHistoryList();
+  }
+});
+
+document.getElementById('hist-search')?.addEventListener('input', e => {
+  _histFilterSym = e.target.value.trim();
+  _renderHistoryList();
+});
 
 // ── Pro / Lite switch ─────────────────────────────────────────────────────────
 

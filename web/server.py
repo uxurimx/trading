@@ -457,12 +457,12 @@ async def api_snapshot():
 
 
 @app.get("/api/history")
-async def api_history():
+async def api_history(limit: int = 50):
     """Historial de trades cerrados vía Bybit closed-pnl."""
     try:
         data = await _exec._get("/v5/position/closed-pnl", {
             "category": "linear",
-            "limit":    "50",
+            "limit":    str(min(limit, 200)),
         })
         items = data.get("result", {}).get("list", [])
         history = []
@@ -471,14 +471,33 @@ async def api_history():
             open_ts    = int(x.get("createdTime")  or 0)
             close_ts   = int(x.get("updatedTime")  or 0)
             duration_s = max(0, (close_ts - open_ts) // 1000) if open_ts and close_ts else 0
+            pnl        = float(x.get("closedPnl")     or 0)
+            avg_entry  = float(x.get("avgEntryPrice") or 0)
+            avg_exit   = float(x.get("avgExitPrice")  or 0)
+            cum_entry  = float(x.get("cumEntryValue") or 0)
+            cum_exit   = float(x.get("cumExitValue")  or 0)
+            total_fees = abs(cum_entry - cum_exit - pnl) if (cum_entry or cum_exit) else 0.0
+
+            # ── Dirección: derivada del movimiento de precio + signo del PnL ─────
+            # Bybit puede devolver el lado de la orden de cierre (invertido).
+            # La fuente de verdad es: si precio subió y ganaste → LONG; si bajó → SHORT.
+            price_delta = avg_exit - avg_entry
+            if avg_entry > 0 and abs(price_delta) / avg_entry > 0.0001:
+                is_long = (price_delta > 0) == (pnl >= 0)
+            else:
+                # Fallback al campo side cuando el movimiento es despreciable
+                is_long = (x.get("side", "Buy").lower() == "buy")
+
             history.append({
                 "symbol":      sym.replace("USDT", ""),
                 "full_sym":    sym,
-                "side":        x.get("side", ""),
+                "side":        "Buy" if is_long else "Sell",
+                "direction":   "LONG" if is_long else "SHORT",
                 "qty":         float(x.get("qty") or 0),
-                "entry_price": float(x.get("avgEntryPrice") or 0),
-                "exit_price":  float(x.get("avgExitPrice")  or 0),
-                "closed_pnl":  float(x.get("closedPnl")     or 0),
+                "entry_price": avg_entry,
+                "exit_price":  avg_exit,
+                "closed_pnl":  pnl,
+                "total_fees":  round(total_fees, 4),
                 "leverage":    int(float(x.get("leverage") or 1)),
                 "open_ts":     open_ts,
                 "close_ts":    close_ts,
@@ -489,6 +508,80 @@ async def api_history():
     except Exception as e:
         log.error("api_history: %s", e)
         return JSONResponse({"history": [], "error": str(e)})
+
+
+@app.post("/api/trade-analysis")
+async def api_trade_analysis(req: Request):
+    """Análisis IA de un trade cerrado. Devuelve pepitas de oro."""
+    try:
+        body   = await req.json()
+        trade  = body.get("trade", {})
+        klines = body.get("klines", [])   # opcional: velas durante el trade
+
+        direction  = trade.get("direction", "LONG")
+        symbol     = trade.get("symbol", "?")
+        entry      = trade.get("entry_price", 0)
+        exit_price = trade.get("exit_price", 0)
+        pnl        = trade.get("closed_pnl", 0)
+        leverage   = trade.get("leverage", 1)
+        duration   = trade.get("duration_fmt", "?")
+        fees       = trade.get("total_fees", 0)
+        price_chg  = ((exit_price - entry) / entry * 100) if entry > 0 else 0
+
+        kline_summary = ""
+        if klines:
+            highs = [k["h"] for k in klines]
+            lows  = [k["l"] for k in klines]
+            kline_summary = (
+                f"\nVelas durante el trade ({len(klines)} velas): "
+                f"máximo={max(highs):.4f}, mínimo={min(lows):.4f}, "
+                f"rango={max(highs)-min(lows):.4f}"
+            )
+
+        prompt = f"""Eres un coach de trading de futuros perpetuos (Bybit). Analiza este trade cerrado y extrae insights accionables.
+
+TRADE:
+- Par: {symbol} {direction} {leverage}x
+- Entrada: {entry:.4f} → Salida: {exit_price:.4f} ({price_chg:+.3f}%)
+- PnL neto: {pnl:+.4f} USDT
+- Fees totales: {fees:.4f} USDT
+- Duración: {duration}{kline_summary}
+
+Responde SOLO con este JSON (sin markdown, sin texto extra):
+{{
+  "veredicto": "win|loss|breakeven",
+  "resumen": "1 oración sobre qué pasó",
+  "fortalezas": ["punto 1", "punto 2"],
+  "debilidades": ["punto 1", "punto 2"],
+  "lecciones": ["lección accionable 1", "lección 2"],
+  "patron": "si detectas un patrón recurrente de comportamiento del trader en este trade",
+  "score": 1-10
+}}"""
+
+        from core.ai_strategy import AIStrategyAgent
+        agent = AIStrategyAgent()
+        client, model, use_json = agent._make_client_and_model()
+
+        kwargs: dict = {"model": model, "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.4, "max_tokens": 600}
+        if use_json:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        resp = await client.chat.completions.create(**kwargs)
+        raw  = resp.choices[0].message.content.strip()
+
+        import json as _json
+        try:
+            result = _json.loads(raw)
+        except Exception:
+            import re
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            result = _json.loads(m.group()) if m else {"resumen": raw}
+
+        return JSONResponse({"ok": True, "analysis": result})
+    except Exception as e:
+        log.error("api_trade_analysis: %s", e)
+        return JSONResponse({"ok": False, "error": str(e)})
 
 
 @app.get("/api/symbols")

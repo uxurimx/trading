@@ -152,6 +152,50 @@
         <span class="section-title">HISTORIAL DE TRADES</span>
         <button class="ctrl-btn" id="btn-refresh-history" style="font-size:9px;padding:2px 8px">↻ Actualizar</button>
       </div>
+
+      <!-- Mini dashboard -->
+      <div id="hist-dashboard" class="hist-dashboard" style="display:none">
+        <div class="hist-stat-card">
+          <div class="hist-stat-lbl">TOTAL PnL</div>
+          <div class="hist-stat-val" id="hstat-total">—</div>
+        </div>
+        <div class="hist-stat-card">
+          <div class="hist-stat-lbl">GANADOS</div>
+          <div class="hist-stat-val c-green" id="hstat-wins">—</div>
+        </div>
+        <div class="hist-stat-card">
+          <div class="hist-stat-lbl">PERDIDOS</div>
+          <div class="hist-stat-val c-red" id="hstat-losses">—</div>
+        </div>
+        <div class="hist-stat-card">
+          <div class="hist-stat-lbl">WIN RATE</div>
+          <div class="hist-stat-val" id="hstat-wr">—</div>
+        </div>
+        <div class="hist-stat-card">
+          <div class="hist-stat-lbl">MEJOR</div>
+          <div class="hist-stat-val c-green" id="hstat-best">—</div>
+        </div>
+        <div class="hist-stat-card">
+          <div class="hist-stat-lbl">PEOR</div>
+          <div class="hist-stat-val c-red" id="hstat-worst">—</div>
+        </div>
+      </div>
+
+      <!-- Filtros -->
+      <div class="hist-filters" id="hist-filters" style="display:none">
+        <div class="hist-filter-group">
+          <button class="hist-filter-btn active" data-filter-dir="all">Todos</button>
+          <button class="hist-filter-btn" data-filter-dir="long">LONG</button>
+          <button class="hist-filter-btn" data-filter-dir="short">SHORT</button>
+        </div>
+        <div class="hist-filter-group">
+          <button class="hist-filter-btn active" data-filter-result="all">Todos</button>
+          <button class="hist-filter-btn" data-filter-result="win">Ganados</button>
+          <button class="hist-filter-btn" data-filter-result="loss">Perdidos</button>
+        </div>
+        <input class="hist-filter-search" id="hist-search" type="text" placeholder="Filtrar símbolo…">
+      </div>
+
       <div id="history-container">
         <div class="empty-state">Cargando historial…</div>
       </div>

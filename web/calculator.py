@@ -55,9 +55,11 @@ def calc_position_metrics(pos, live_mark: float = 0.0, elapsed_override: float |
     roi_entry_pct = (mark - entry) / entry * 100 * dirn if entry > 0 else 0.0
     full_net_pct  = full_net_pnl / margin * 100
 
-    # ── EN SL / EN TP: bruto sin fees (igual que Bybit) ──────────────────────
-    net_at_sl = (sl - entry) * qty * dirn if sl > 0 else None
-    net_at_tp = (tp - entry) * qty * dirn if tp > 0 else None
+    # ── EN SL / EN TP: neto real = bruto − entry_fee − exit_fee ─────────────
+    # Mismo criterio que full_net_pnl: lo que realmente entraría/saldría al bolsillo.
+    # SL: el loss es peor por los fees. TP: la ganancia es menor por los fees.
+    net_at_sl = (sl - entry) * qty * dirn - entry_fee - exit_fee_sl if sl > 0 else None
+    net_at_tp = (tp - entry) * qty * dirn - entry_fee - exit_fee_tp if tp > 0 else None
 
     # ── Progreso ──────────────────────────────────────────────────────────────
     if tp > 0 and entry > 0:
