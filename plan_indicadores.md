@@ -405,3 +405,120 @@ QTS · Plan brutal para la cabina del piloto
   ¿Arrancamos con Fase 0 + 1 (refactor + zoom) ahora mismo, o prefieres que empiece por la cronotopología que tiene el
   mayor edge analítico?                                                                                                  
    
+
+
+
+
+
+
+hecho y explicacion:
+
+1) Progress bar con cronotopología (las dos franjas debajo)
+                                                                                                                         
+  Franja superior (heatmap) — opacidad ∝ log(tiempo cocinado en esa zona). La zona actual brilla con borde amarillo.
+  Franja inferior (stack) — proporción del tiempo total del trade pasado en cada fase.                                   
+                                                            
+  Casos reales:                                                                                                          
+  - Trade BTC LONG, 3 horas en E→BE (60% del stack) → el precio entra, no consolida arriba de BE, oscila contra ti.
+  Acción: no es un setup limpio, considera mover SL más cerca o cerrar y reentrar mejor.                                 
+  - 30 min BE→25% + 2 horas 25→50% (80% en zona profit) → trade saludable, está cocinando. Acción: trailing del SL al 25%
+   ya alcanzado.                                                                                                         
+  - Heatmap muestra picos en BE→25% y 50→75%, vacío en 25→50% → ese rango es un LVN (low volume node), el precio lo cruza
+   rápido. Insight: si vuelve, no esperes soporte ahí.                                                                   
+                                                                                                                         
+  2) Strip gravity (canvas con barras y dots)               
+                                                                                                                         
+  Eje X = precio (mismo viewport que el progress bar; el zoom afecta a los dos).                                         
+                                                                                                                         
+  Lo que ves:                                                                                                            
+  - Barras verdes hacia abajo = bids (compras en el libro). Más gruesas/opacas = más liquidez.
+  - Barras rojas hacia arriba = asks (ventas).                                                                           
+  - Halo gris de fondo = volumen histórico negociado (volume profile).
+  - Líneas verticales con etiquetas: HVN (cyan, alta participación), LVN (ámbar, vacío), EQ_H/EQ_L (rojo/verde, stops    
+  acumulados), ROUND (lila, números psicológicos).                                                                       
+  - Burbujas con glow = liquidaciones. Verde = shorts liquidados (alza brutal), rojo = longs liquidados (caída). Se      
+  desvanecen con la edad (~2 min).                                                                                       
+  - Triángulos = tus órdenes pendientes (verde = Buy, rojo = Sell).                                                      
+  - Línea blanca punteada vertical = precio actual.                
+                                                                                                                         
+  Casos reales:                                                                                                          
+  - Pared roja gruesa 0.3% arriba del precio → ask wall. Resistencia activa. Probable que el precio rebote o que un whale
+   la barra liquidándola. Acción: SL por encima de la pared, no debajo.                                                  
+  - Cluster de líneas lilas (ROUND) en $60,000 + EQ_H rojo justo encima → imán psicológico. Cuando el precio se acerca,
+  atrae stop hunts. Setup: si vas LONG, no pongas TP exactamente en 60000 — ponlo 0.1% antes.                            
+  - Liquidación verde grande en $59,900 con glow fuerte → acaban de barrer shorts. Combustible alcista de corto plazo    
+  (segundos a minutos). Acción: trailing rápido o no entrar SHORT en ese tramo.                                      
+  - HVN cyan a tu favor entre entry y TP → magnetismo, el precio quiere volver ahí. Buen soporte para mover BE.          
+  - LVN ámbar entre mark y TP → vacío de liquidez, el precio cruzará rápido. No esperes que se quede ahí; o llega a TP o
+  se devuelve veloz.                                                                                                     
+                                                                                                                         
+  3) Cabina del piloto (3 gauges)                                                                                        
+                                                                                                                         
+  Tacómetro de Presión (izquierda)                                                                                       
+                                                                                                                         
+  Score 0-100 + etiqueta FEAR/GREED/NEUTRAL.                                                                             
+                                                            
+  Mezcla: imbalance del libro (30%) + pulso CVD (30%) + liquidaciones recientes vs OI (25%) + funding (15%).             
+                                                            
+  - < 25 NEUTRAL = mercado dormido, sin convicción. No fuerces entradas.                                                 
+  - 40-65 GREED/FEAR = sesgo claro, momentum sano.          
+  - > 75 = extremo. Cuidado: o es la fase de aceleración final o el punto de reversión.                                  
+                                                                                                                         
+  Caso real: vas LONG y la aguja sube a 85 GREED → euforia. Probabilidad de pullback alta en 5-15min. Acción: cerrar     
+  parcial 50% o mover SL agresivo.                                                                                       
+                                                                                                                         
+  Caso real 2: estás SHORT, presión 70 FEAR → confirmación, pero si llega a 90+ con liquidaciones rojas masivas en el    
+  strip, es capitulación → reverso inminente. Acción: cerrar y voltear o salir.
+                                                                                                                         
+  Velocímetro (centro)                                      
+
+  % por minuto vs referencia ATR de las últimas 5 velas.                                                                 
+  
+  - Score 50 = velocidad normal (≈ el rango promedio del símbolo).                                                       
+  - 80-100 con color rojo = aceleración violenta. Cualquier setup técnico se rompe.
+  - < 20 = mercado quieto, scalping limitado.                                                                            
+  
+  Caso real: vas a entrar LONG, velocímetro 95 rojo → el precio está corriendo, tu entry probable que se ejecute peor    
+  (slippage) y el SL se barra. Acción: espera a que baje a 40-60.
+                                                                                                                         
+  Caso real 2: posición abierta, velocímetro saltó de 30 a 90 en segundos → news o liquidación en cadena. Acción: revisa 
+  el strip gravity para ver dirección (¿liquidaciones verdes o rojas?) y decide trailing/cierre.
+                                                                                                                         
+  Carretera (derecha)                                       
+
+  Régimen del mercado + leverage sugerido.                                                                               
+  
+  - ═══ Autopista (TRENDING, 10×) → tendencia clara, momentum unidireccional. Apalancamiento mayor justificado porque las
+   velas no se contradicen. Estrategia: trend-following, trailing wide.
+  - ∿∿∿ Curvas (RANGING, 3×) → mercado lateral, rebotes en S/R. Apalancamiento medio. Estrategia: comprar abajo, vender  
+  arriba; SL fuera del rango.                                                                                            
+  - ≈≈≈ Terracería (VOLATILE, 1×) → choppy, mecha arriba y abajo. Apalancamiento mínimo. Estrategia: no operar o tamaño
+  muy chico.                                                                                                             
+  - ▪▪▪ Atasco (ACCUMULATION, espera) → OI creciendo, precio sin moverse — alguien está cargando. Estrategia: no entres,
+  espera el breakout.                                                                                                    
+                                                            
+  Override defensivo: si estás en Autopista pero el velocímetro pasa 85, el sistema degrada a Terracería automáticamente 
+  (autopista a 200 km/h con neblina = peligro).             
+                                                                                                                         
+  ---                                                       
+  Lectura combinada — los 3 instrumentos juntos
+                                                                                                                         
+  ┌────────────┬──────────┬──────────────────────┬───────────────────────────────────────────────┐
+  │  Pressure  │ Velocity │         Road         │                    Lectura                    │                       
+  ├────────────┼──────────┼──────────────────────┼───────────────────────────────────────────────┤                       
+  │ 30 NEUTRAL │ 20       │ Curvas               │ Mercado dormido. Scalping si acaso.           │
+  ├────────────┼──────────┼──────────────────────┼───────────────────────────────────────────────┤                       
+  │ 75 GREED   │ 60       │ Autopista            │ Tendencia alcista sana. Mantén LONG, trail.   │                       
+  ├────────────┼──────────┼──────────────────────┼───────────────────────────────────────────────┤                       
+  │ 90 GREED   │ 95 rojo  │ Autopista→Terracería │ Euforia extrema. Cierra parcial, BE agresivo. │                       
+  ├────────────┼──────────┼──────────────────────┼───────────────────────────────────────────────┤                       
+  │ 80 FEAR    │ 70       │ Autopista bajista    │ SHORT con convicción.                         │
+  ├────────────┼──────────┼──────────────────────┼───────────────────────────────────────────────┤                       
+  │ 50 FEAR    │ 90       │ Terracería           │ Pánico errático. Fuera o tamaño mínimo.       │
+  ├────────────┼──────────┼──────────────────────┼───────────────────────────────────────────────┤                       
+  │ 20 NEUTRAL │ 15       │ Atasco               │ Acumulación. Espera el breakout, no fuerces.  │
+  └────────────┴──────────┴──────────────────────┴───────────────────────────────────────────────┘                       
+                                                            
+  La idea geométrica: la carretera te dice qué tipo de pista; el velocímetro, si vas demasiado rápido para esa pista; el 
+  tacómetro, qué tan tensa está la multitud. Tu posición sobre el progress bar es dónde estás en el tramo. El strip
+  gravity es el mapa del terreno (dónde hay árboles=stops, dónde hay precipicios=LVN).   

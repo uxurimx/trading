@@ -36,6 +36,7 @@ from streams.klines import KlineStream
 from web.calculator import calc_position_metrics, format_elapsed
 from web.zone_tracker import tracker as _zone_tracker
 from web.liquidity_map import build_liquidity_map
+from web.sentiment import compute_pilot
 
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger("qts.web")
@@ -670,6 +671,21 @@ async def api_liquidity(
         view_max=view_max,
         bucket_mult=max(0.25, min(8.0, bucket_mult)),
     )
+    if payload is None:
+        return JSONResponse({"error": "no data"}, status_code=503)
+    return JSONResponse(payload)
+
+
+@app.get("/api/pilot/{symbol}")
+async def api_pilot(symbol: str):
+    """Instrumentos del piloto: presión, velocidad y tipo de carretera."""
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    ms = _market.states.get(sym)
+    if not ms:
+        return JSONResponse({"error": "symbol not streaming"}, status_code=404)
+    payload = compute_pilot(ms, _signals.get(sym))
     if payload is None:
         return JSONResponse({"error": "no data"}, status_code=503)
     return JSONResponse(payload)

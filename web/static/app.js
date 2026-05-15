@@ -381,6 +381,14 @@ function buildProgressBar(pos) {
               data-grav-vmax="${view.max}"></canvas>
     </div>`;
 
+  // Cabina del piloto
+  const pilot = `
+    <div class="pilot-cockpit" data-pilot-sym="${esc(pos.full_sym)}">
+      <div class="pilot-gauge" data-gauge="pressure"></div>
+      <div class="pilot-gauge" data-gauge="velocity"></div>
+      <div class="pilot-gauge" data-gauge="road"></div>
+    </div>`;
+
   return `
   <div class="prog-wrap">
     ${zoomCtrls}
@@ -397,6 +405,7 @@ function buildProgressBar(pos) {
       ${oorSl}${oorEntry}${oorBe}${oorMark}${oorTp}
     </div>
     ${gravStrip}
+    ${pilot}
     ${timeLayer}
   </div>`;
 }
@@ -859,6 +868,11 @@ function renderPositions(positions) {
   const pc = document.getElementById('pos-count');
   if (c)  c.innerHTML    = html;
   if (pc) pc.textContent = n > 0 ? String(n) : '';
+
+  // Repintar gravity + pilot desde cache inmediatamente (evita parpadeo
+  // entre el snapshot WS @1Hz que reemplaza el HTML y el poller @2-3s)
+  if (typeof paintGravFromCache  === 'function') paintGravFromCache();
+  if (typeof paintPilotFromCache === 'function') paintPilotFromCache();
 
   // Badge en side-tab "Trades" (suma posiciones + análisis)
   const sb  = document.getElementById('side-pos-count');
@@ -2054,8 +2068,31 @@ setInterval(() => {
 // zoom de la progress bar). Para cada símbolo único, hace UNA petición con el
 // viewport más amplio y re-renderiza todos los canvases de ese símbolo con su
 // propio viewport.
-const _gravCache = new Map();  // sym → { ts, data }
-let   _gravBusy  = false;
+const _gravCache  = new Map();   // sym → { ts, data }
+const _pilotCache = new Map();
+let   _gravBusy   = false;
+let   _pilotBusy  = false;
+
+// Repintado síncrono desde cache — se llama tras cada re-render de pos cards
+function paintGravFromCache() {
+  document.querySelectorAll('canvas[data-grav-sym]').forEach(c => {
+    const cached = _gravCache.get(c.dataset.gravSym);
+    if (!cached) return;
+    const lo = parseFloat(c.dataset.gravVmin);
+    const hi = parseFloat(c.dataset.gravVmax);
+    if (hi > lo) QtsGravity.render(c, cached.data, { vmin: lo, vmax: hi });
+  });
+}
+
+function paintPilotFromCache() {
+  document.querySelectorAll('.pilot-cockpit[data-pilot-sym]').forEach(el => {
+    const cached = _pilotCache.get(el.dataset.pilotSym);
+    if (cached) QtsGauges.renderAll(el, cached.data);
+  });
+}
+
+window.paintGravFromCache  = paintGravFromCache;
+window.paintPilotFromCache = paintPilotFromCache;
 
 async function _gravTick() {
   if (_gravBusy) return;
@@ -2064,51 +2101,70 @@ async function _gravTick() {
     const canvases = document.querySelectorAll('canvas[data-grav-sym]');
     if (!canvases.length) return;
 
-    // Agrupa por símbolo y calcula viewport envolvente
     const bySym = new Map();
     canvases.forEach(c => {
       const sym = c.dataset.gravSym;
       const lo  = parseFloat(c.dataset.gravVmin);
       const hi  = parseFloat(c.dataset.gravVmax);
       if (!sym || !(hi > lo)) return;
-      const cur = bySym.get(sym) || { vmin: lo, vmax: hi, canvases: [] };
+      const cur = bySym.get(sym) || { vmin: lo, vmax: hi };
       cur.vmin = Math.min(cur.vmin, lo);
       cur.vmax = Math.max(cur.vmax, hi);
-      cur.canvases.push(c);
       bySym.set(sym, cur);
     });
 
     const now = Date.now();
     await Promise.all(Array.from(bySym.entries()).map(async ([sym, grp]) => {
       const cached = _gravCache.get(sym);
-      let data = cached && (now - cached.ts < 1800) ? cached.data : null;
-      if (!data) {
-        try {
-          const url = `/api/liquidity/${encodeURIComponent(sym)}`
-            + `?view_min=${grp.vmin}&view_max=${grp.vmax}`;
-          const r = await fetch(url);
-          if (!r.ok) return;
-          data = await r.json();
-          _gravCache.set(sym, { ts: now, data });
-        } catch (_) { return; }
-      }
-      grp.canvases.forEach(c => {
-        const lo = parseFloat(c.dataset.gravVmin);
-        const hi = parseFloat(c.dataset.gravVmax);
-        QtsGravity.render(c, data, { vmin: lo, vmax: hi });
-      });
+      if (cached && now - cached.ts < 1800) return;
+      try {
+        const url = `/api/liquidity/${encodeURIComponent(sym)}`
+          + `?view_min=${grp.vmin}&view_max=${grp.vmax}`;
+        const r = await fetch(url);
+        if (!r.ok) return;
+        _gravCache.set(sym, { ts: now, data: await r.json() });
+      } catch (_) { /* swallow */ }
     }));
 
-    // Limpieza de cache para símbolos que ya no están en pantalla
+    paintGravFromCache();
+
     const active = new Set(bySym.keys());
-    Array.from(_gravCache.keys()).forEach(k => {
-      if (!active.has(k)) _gravCache.delete(k);
-    });
+    Array.from(_gravCache.keys()).forEach(k => { if (!active.has(k)) _gravCache.delete(k); });
   } finally {
     _gravBusy = false;
   }
 }
 
-setInterval(_gravTick, 2000);
-// Primer tick rápido para que aparezca en cuanto se monten las cards
-setTimeout(_gravTick, 400);
+async function _pilotTick() {
+  if (_pilotBusy) return;
+  _pilotBusy = true;
+  try {
+    const cockpits = document.querySelectorAll('.pilot-cockpit[data-pilot-sym]');
+    if (!cockpits.length) return;
+
+    const syms = new Set();
+    cockpits.forEach(el => { if (el.dataset.pilotSym) syms.add(el.dataset.pilotSym); });
+
+    const now = Date.now();
+    await Promise.all(Array.from(syms).map(async sym => {
+      const cached = _pilotCache.get(sym);
+      if (cached && now - cached.ts < 2500) return;
+      try {
+        const r = await fetch(`/api/pilot/${encodeURIComponent(sym)}`);
+        if (!r.ok) return;
+        _pilotCache.set(sym, { ts: now, data: await r.json() });
+      } catch (_) { /* swallow */ }
+    }));
+
+    paintPilotFromCache();
+
+    Array.from(_pilotCache.keys()).forEach(k => { if (!syms.has(k)) _pilotCache.delete(k); });
+  } finally {
+    _pilotBusy = false;
+  }
+}
+
+setInterval(_gravTick,  2000);
+setInterval(_pilotTick, 3000);
+setTimeout(_gravTick,   400);
+setTimeout(_pilotTick,  600);

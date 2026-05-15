@@ -558,6 +558,53 @@ body {
 .prog-oor.left  + .prog-oor.left,
 .prog-oor.right + .prog-oor.right { top: calc(50% + 18px); }
 
+/* ── Cabina del piloto: 3 gauges sobre el campo gravitacional ────────────── */
+.pilot-cockpit {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.pilot-gauge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 96px;
+}
+.g-svg { width: 100%; max-width: 130px; height: auto; display: block; }
+.g-num { fill: var(--text); font: 600 14px ui-monospace, Menlo, monospace; }
+.g-unit { fill: var(--text-sub); font-size: 8px; }
+.g-lbl {
+  display: flex; flex-direction: column; align-items: center;
+  margin-top: 2px;
+}
+.g-title { font-size: 9px; color: var(--text-sub); text-transform: uppercase; letter-spacing: .04em; }
+.g-side  { font-size: 10px; font-weight: 600; margin-top: 2px; }
+.g-sub   { font-size: 9px; color: var(--text-sub); margin-top: 2px; }
+.g-fear    { color: #ef4444; }
+.g-greed   { color: #22c55e; }
+.g-neutral { color: #94a3b8; }
+
+.g-road {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 2px;
+  color: var(--g-road-color, var(--text));
+  width: 100%;
+}
+.g-road-icon {
+  font: 700 22px ui-monospace, Menlo, monospace;
+  letter-spacing: 2px;
+  color: var(--g-road-color);
+}
+.g-road-tone { font-size: 11px; font-weight: 600; }
+.g-road-lev  { font-size: 10px; color: var(--text); }
+.g-road-reg  { font-size: 9px;  color: var(--text-sub); }
+
 /* ── Gravity strip: campo gravitacional de liquidez ──────────────────────── */
 .prog-gravity {
   position: relative;
