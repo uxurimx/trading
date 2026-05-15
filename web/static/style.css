@@ -270,7 +270,41 @@ body {
   font-size: 10px; color: var(--text-dim);
   background: var(--bg-input); padding: 2px 6px; border-radius: 3px;
 }
-.pos-time { margin-left: auto; font-size: 10px; color: var(--text-dim); }
+.pos-time { font-size: 10px; color: var(--text-dim); }
+
+/* Toggle detalles Pro */
+.pos-details-toggle {
+  margin-left: auto;
+  background: none; border: none; cursor: pointer;
+  font-size: 9px; color: var(--text-sub);
+  padding: 2px 6px; border-radius: 3px;
+  letter-spacing: .3px;
+  transition: color .15s, background .15s;
+}
+.pos-details-toggle:hover { color: var(--text); background: var(--bg-input); }
+
+/* Panel de detalles Pro (colapsable) */
+.pos-details {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px 6px;
+  margin-top: 4px;
+}
+.pos-details-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px 12px;
+}
+.pos-detail-cell .lbl {
+  font-size: 9px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: .5px; margin-bottom: 2px;
+}
+.pos-detail-cell .val {
+  font-size: 11px; font-weight: 600; color: var(--text);
+}
+.pos-detail-cell.mark .val { color: var(--yellow); }
+.pos-detail-cell.sl   .val { color: var(--red-dim); }
+.pos-detail-cell.tp   .val { color: var(--green-dim); }
+.pos-detail-cell.lev  .val { color: var(--text-sub); }
 
 /* Prices grid */
 .pos-body   { padding: 10px 12px; }
@@ -303,7 +337,7 @@ body {
   background: var(--border);
   border-radius: 4px;
   overflow: visible;
-  margin: 26px 0 22px;   /* espacio para label marcador arriba y milestone labels abajo */
+  margin: 14px 0 44px;   /* arriba: solo BE label (-22px); abajo: milestones + mark label */
 }
 
 /* Zona de riesgo (SL → entrada) */
@@ -355,13 +389,14 @@ body {
   white-space: nowrap;
   pointer-events: none;
 }
-/* Indicador de precio actual — centrado en la barra + anillo SVG de momentum */
+/* Indicador de precio actual — solo el SVG, centrado en la barra */
 .prog-mark-wrap {
   position: absolute;
   top: 50%;
   transform: translate(-50%, -50%);
   transition: left .3s;
   z-index: 4;
+  line-height: 0;
 }
 .prog-mark-svg {
   display: block;
@@ -370,11 +405,10 @@ body {
 .prog-mark-outer { stroke: #0d0d0d; }
 [data-theme="light"] .prog-mark-outer { stroke: #f0f0f0; }
 
-/* Label PnL desde BE (arriba del círculo) */
+/* Label PnL — debajo de la barra (no obstruye BE/milestone labels de arriba) */
 .prog-mark-label {
   position: absolute;
-  bottom: calc(100% + 3px);
-  left: 50%;
+  top: calc(100% + 22px);   /* debajo de milestone labels (bottom:-20px) */
   transform: translateX(-50%);
   font-size: 9px;
   font-weight: 600;
@@ -385,6 +419,8 @@ body {
   border: 1px solid var(--border);
   pointer-events: none;
   letter-spacing: .2px;
+  z-index: 4;
+  transition: left .3s;
 }
 .prog-mark-label.c-green  { color: var(--green);  border-color: var(--green-dim); }
 .prog-mark-label.c-red    { color: var(--red);    border-color: var(--red-dim); }
@@ -518,12 +554,15 @@ body {
   white-space: nowrap; pointer-events: none;
 }
 
-/* ── Action buttons (Lite) ────────────────────────────────────────────────── */
+/* ── Action buttons (Pro + Lite) ──────────────────────────────────────────── */
 .pos-actions {
   display: flex; align-items: center; gap: 6px;
-  padding: 10px 14px 12px;
+  padding: 8px 0 4px;
   border-top: 1px solid var(--border);
+  margin-top: 8px;
 }
+/* Lite: padding lateral propio del card */
+.pos-card-lite .pos-actions { padding: 10px 14px 12px; margin-top: 0; border-top: none; border-top: 1px solid var(--border); }
 .pos-actions.confirming { background: var(--red-bg); }
 .pos-act-btn {
   font-family: inherit;

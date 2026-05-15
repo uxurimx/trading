@@ -244,10 +244,8 @@ function buildProgressBar(pos) {
       ${milestoneMarkers}
       <div class="prog-entry-line"  style="left:${entryPct.toFixed(1)}%"></div>
       <div class="prog-entry-label" style="left:${entryPct.toFixed(1)}%">Entrada ${esc(fmtPrice(pos.entry))}</div>
-      <div class="prog-mark-wrap" style="left:${markPct.toFixed(1)}%" title="Mark: ${esc(fmtPrice(pos.mark))}">
-        <div class="prog-mark-label ${fnCls}">${esc(markLbl)}</div>
-        ${markSvg}
-      </div>
+      <div class="prog-mark-wrap"   style="left:${markPct.toFixed(1)}%" title="Mark: ${esc(fmtPrice(pos.mark))}">${markSvg}</div>
+      <div class="prog-mark-label ${fnCls}" style="left:${markPct.toFixed(1)}%">${esc(markLbl)}</div>
     </div>
   </div>`;
 }
@@ -288,7 +286,9 @@ function buildPositionCard(pos) {
   return _proMode ? buildPosCardPro(pos) : buildPosCardLite(pos);
 }
 
-// ── Pro card (sin cambios respecto al original) ───────────────────────────────
+// ── Pro card ──────────────────────────────────────────────────────────────────
+
+const _proDetailsOpen = new Set(); // keys con detalles expandidos, persiste entre renders
 
 function buildPosCardPro(pos) {
   const isLong   = pos.direction === 'LONG';
@@ -296,34 +296,92 @@ function buildPosCardPro(pos) {
   const chgStr   = fmtPct(pos.roi_entry_pct);
   const netAtSL  = pos.net_at_sl;
   const netAtTP  = pos.net_at_tp;
+  const key      = `${pos.full_sym}_${pos.side}`;
+  const detOpen  = _proDetailsOpen.has(key);
+
+  // Botones de acción — misma lógica que Lite
+  const slTarget  = _findSLTarget(pos);
+  const slBtnHtml = slTarget
+    ? `<button class="pos-act-btn warn"
+         data-move-sl="${esc(key)}"
+         data-sym="${esc(pos.full_sym)}" data-side="${esc(pos.side)}"
+         data-new-sl="${slTarget.price}"
+         title="Mover SL a ${esc(slTarget.label)}: ${fmtPrice(slTarget.price)}">
+         SL → ${esc(slTarget.label)}
+       </button>`
+    : `<button class="pos-act-btn" disabled title="Ningún marcador superado aún">SL →</button>`;
+
+  const actionsHtml = _closingPos.has(key)
+    ? `<div class="pos-actions confirming">
+         <button class="pos-act-btn danger" disabled>⏳ Cerrando…</button>
+       </div>`
+    : _pendingClose.has(key)
+    ? `<div class="pos-actions confirming">
+         <span class="pos-confirm-lbl">Cerrar ${esc(pos.symbol)} @ ${fmtPrice(pos.mark)}?</span>
+         <button class="pos-act-btn secondary" data-cancel-close="${esc(key)}">CANCELAR</button>
+         <button class="pos-act-btn danger" data-confirm-close="${esc(key)}"
+           data-sym="${esc(pos.full_sym)}" data-side="${esc(pos.side)}">✓ CERRAR</button>
+       </div>`
+    : `<div class="pos-actions">
+         <button class="pos-act-btn danger" data-close="${esc(key)}">Cerrar</button>
+         ${slBtnHtml}
+         <button class="pos-act-btn" disabled title="Próximamente">+ Más</button>
+       </div>`;
+
+  // Panel de detalles colapsable
+  const detailsHtml = detOpen ? `
+    <div class="pos-details">
+      <div class="pos-details-grid">
+        <div class="pos-detail-cell lev">
+          <div class="lbl">APALANCAMIENTO</div>
+          <div class="val">${pos.leverage}x</div>
+        </div>
+        <div class="pos-detail-cell">
+          <div class="lbl">TIEMPO</div>
+          <div class="val">⏱ ${esc(pos.elapsed_fmt)}</div>
+        </div>
+        <div class="pos-detail-cell">
+          <div class="lbl">MARGEN</div>
+          <div class="val">${fmtMoney(pos.margin)}</div>
+        </div>
+        <div class="pos-detail-cell entry">
+          <div class="lbl">ENTRADA</div>
+          <div class="val">${fmtPrice(pos.entry)}</div>
+        </div>
+        <div class="pos-detail-cell mark">
+          <div class="lbl">MARK <span class="${pnlClass(pos.roi_entry_pct)}" style="font-size:8px">${esc(chgStr)}</span></div>
+          <div class="val">${fmtPrice(pos.mark)}</div>
+        </div>
+        <div class="pos-detail-cell">
+          <div class="lbl">BREAKEVEN</div>
+          <div class="val">${fmtPrice(pos.breakeven_price)}</div>
+        </div>
+        <div class="pos-detail-cell sl">
+          <div class="lbl">STOP LOSS</div>
+          <div class="val">${fmtPrice(pos.sl) || '—'}</div>
+        </div>
+        <div class="pos-detail-cell tp">
+          <div class="lbl">TAKE PROFIT</div>
+          <div class="val">${fmtPrice(pos.tp) || '—'}</div>
+        </div>
+        <div class="pos-detail-cell">
+          <div class="lbl">R:R</div>
+          <div class="val">${fmt(pos.rr_ratio, 2)}</div>
+        </div>
+      </div>
+    </div>` : '';
 
   return `
   <div class="pos-card">
     <div class="pos-header">
       <span class="pos-symbol">${esc(pos.symbol)}</span>
       <span class="pos-dir ${dirClass}">${pos.direction}</span>
-      <span class="pos-leverage">${pos.leverage}x</span>
-      <span class="pos-time">⏱ ${pos.elapsed_fmt}</span>
+      <span class="pos-time">⏱ ${esc(pos.elapsed_fmt)}</span>
+      <button class="pos-details-toggle" data-toggle-details="${esc(key)}">
+        ${detOpen ? '▲ ocultar' : '▼ detalles'}
+      </button>
     </div>
     <div class="pos-body">
-      <div class="pos-prices">
-        <div class="price-cell entry">
-          <div class="lbl">ENTRADA</div>
-          <div class="val">${fmtPrice(pos.entry)}</div>
-        </div>
-        <div class="price-cell mark">
-          <div class="lbl">MARK &nbsp;<span class="${pnlClass(pos.roi_entry_pct)}">${esc(chgStr)}</span></div>
-          <div class="val">${fmtPrice(pos.mark)}</div>
-        </div>
-        <div class="price-cell sl">
-          <div class="lbl">STOP LOSS</div>
-          <div class="val">${fmtPrice(pos.sl) || '—'}</div>
-        </div>
-        <div class="price-cell tp">
-          <div class="lbl">TAKE PROFIT</div>
-          <div class="val">${fmtPrice(pos.tp) || '—'}</div>
-        </div>
-      </div>
       ${buildProgressBar(pos)}
       <div class="pos-metrics">
         <div class="pnl-cell">
@@ -339,7 +397,9 @@ function buildPosCardPro(pos) {
       </div>
       ${buildOrdersRow(pos.orders)}
       ${buildSignalChips(pos)}
+      ${actionsHtml}
     </div>
+    ${detailsHtml}
   </div>`;
 }
 
@@ -529,10 +589,11 @@ function buildPosCardLite(pos) {
 function renderPositions(positions) {
   const n    = positions ? positions.length : 0;
 
-  // Limpiar _closingPos y _pendingClose de posiciones que ya desaparecieron del snapshot
+  // Limpiar sets de estado de posiciones que ya desaparecieron del snapshot
   const activeKeys = new Set((positions || []).map(p => `${p.full_sym}_${p.side}`));
-  for (const k of [..._closingPos])   if (!activeKeys.has(k)) _closingPos.delete(k);
-  for (const k of [..._pendingClose]) if (!activeKeys.has(k)) _pendingClose.delete(k);
+  for (const k of [..._closingPos])     if (!activeKeys.has(k)) _closingPos.delete(k);
+  for (const k of [..._pendingClose])   if (!activeKeys.has(k)) _pendingClose.delete(k);
+  for (const k of [..._proDetailsOpen]) if (!activeKeys.has(k)) _proDetailsOpen.delete(k);
 
   const html = n ? positions.map(buildPositionCard).join('') : '<div class="empty-state">Sin posiciones abiertas</div>';
 
@@ -777,6 +838,16 @@ applyProModeCfg();
 // ── Event delegation: botones de acción Lite (sobreviven re-renders) ──────────
 
 document.getElementById('positions-container')?.addEventListener('click', async e => {
+  // Toggle detalles Pro
+  const toggleBtn = e.target.closest('[data-toggle-details]');
+  if (toggleBtn) {
+    const key = toggleBtn.dataset.toggleDetails;
+    if (_proDetailsOpen.has(key)) _proDetailsOpen.delete(key);
+    else _proDetailsOpen.add(key);
+    if (lastSnap) renderPositions(lastSnap.positions || []);
+    return;
+  }
+
   // Cerrar — primer clic: pedir confirmación
   const closeBtn = e.target.closest('[data-close]');
   if (closeBtn) {
