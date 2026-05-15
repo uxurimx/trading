@@ -44,6 +44,13 @@
     </button>
   </nav>
 
+  <div class="sidenav-trade-btn-wrap">
+    <button id="btn-open-trade" class="sidenav-trade-btn">
+      <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      NUEVA OPERACIÓN
+    </button>
+  </div>
+
   <div class="sidenav-footer">
     <span id="clock">--:--:--</span>
     <span id="last-update" class="sidenav-update">—</span>
@@ -215,6 +222,214 @@
     Config
   </button>
 </nav>
+
+<!-- FAB mobile -->
+<button id="btn-open-trade-fab" class="trade-fab">
+  <svg viewBox="0 0 24 24" width="22" height="22"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+</button>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!-- TRADE PANEL                                                            -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div id="trade-overlay" class="trade-overlay"></div>
+<div id="trade-panel" class="trade-panel">
+
+  <div class="trade-panel-hdr">
+    <span class="trade-panel-title">NUEVA OPERACIÓN</span>
+    <div class="trade-mode-toggle">
+      <button class="trade-mode-btn active" data-mode="manual">MANUAL</button>
+      <button class="trade-mode-btn" data-mode="analysis">ANÁLISIS</button>
+    </div>
+    <button id="trade-panel-close" class="trade-panel-close">✕</button>
+  </div>
+
+  <!-- ── Manual mode ─────────────────────────────────────────────────── -->
+  <div id="trade-manual" class="trade-section">
+
+    <div class="trade-form-grid">
+
+      <div class="trade-field">
+        <label>SÍMBOLO</label>
+        <div class="trade-sym-wrap">
+          <input id="tm-symbol" class="trade-input" placeholder="BTC" list="trade-sym-list" autocomplete="off">
+          <datalist id="trade-sym-list"></datalist>
+          <span id="tm-mark" class="trade-mark-lbl">—</span>
+        </div>
+      </div>
+
+      <div class="trade-field">
+        <label>DIRECCIÓN</label>
+        <div class="trade-dir-toggle">
+          <button class="trade-dir-btn active" data-dir="Buy">▲ LONG</button>
+          <button class="trade-dir-btn" data-dir="Sell">▼ SHORT</button>
+        </div>
+      </div>
+
+      <div class="trade-field">
+        <label>TIPO</label>
+        <div class="trade-dir-toggle">
+          <button class="trade-type-btn active" data-type="Market">MERCADO</button>
+          <button class="trade-type-btn" data-type="Limit">LÍMITE</button>
+        </div>
+      </div>
+
+      <div class="trade-field" id="tm-entry-wrap" style="display:none">
+        <label>PRECIO ENTRADA</label>
+        <input id="tm-entry" class="trade-input" type="number" step="any" placeholder="0.00">
+      </div>
+
+      <div class="trade-field">
+        <label>STOP LOSS</label>
+        <input id="tm-sl" class="trade-input" type="number" step="any" placeholder="0.00">
+      </div>
+
+      <div class="trade-field">
+        <label>TAKE PROFIT</label>
+        <input id="tm-tp" class="trade-input" type="number" step="any" placeholder="0.00">
+      </div>
+
+      <div class="trade-field">
+        <label>TAMAÑO (USDT)</label>
+        <input id="tm-size" class="trade-input" type="number" step="any" placeholder="100">
+      </div>
+
+      <div class="trade-field">
+        <label>APALANCAMIENTO</label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input id="tm-leverage" class="trade-input" type="number" min="1" max="100" value="10" style="width:70px">
+          <span class="c-dim">x</span>
+          <input id="tm-lev-range" type="range" min="1" max="100" value="10" style="flex:1">
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Live R:R preview -->
+    <div id="tm-preview" class="trade-preview">
+      <div class="trade-preview-row">
+        <span class="c-dim">R:R</span>
+        <span id="tm-rr">—</span>
+      </div>
+      <div class="trade-preview-row">
+        <span class="c-dim">Riesgo</span>
+        <span id="tm-risk" class="c-red">—</span>
+      </div>
+      <div class="trade-preview-row">
+        <span class="c-dim">Objetivo</span>
+        <span id="tm-reward" class="c-green">—</span>
+      </div>
+      <div class="trade-preview-row">
+        <span class="c-dim">Qty estimada</span>
+        <span id="tm-qty">—</span>
+      </div>
+      <div class="trade-preview-row">
+        <span class="c-dim">Fee entrada est.</span>
+        <span id="tm-fee">—</span>
+      </div>
+    </div>
+
+    <!-- Signals -->
+    <div id="tm-signals" class="trade-signals-row"></div>
+
+    <!-- Confirmation -->
+    <div id="tm-confirm" class="trade-confirm" style="display:none">
+      <div class="trade-confirm-title">⚠ CONFIRMAR ORDEN</div>
+      <div id="tm-confirm-body" class="trade-confirm-body"></div>
+      <div class="trade-confirm-actions">
+        <button id="tm-btn-cancel" class="trade-btn secondary">CANCELAR</button>
+        <button id="tm-btn-confirm" class="trade-btn primary">EJECUTAR</button>
+      </div>
+    </div>
+
+    <div id="tm-result" class="trade-result" style="display:none"></div>
+
+    <div id="tm-footer" class="trade-footer">
+      <button id="tm-btn-submit" class="trade-btn primary full">REVISAR ORDEN</button>
+    </div>
+
+  </div>
+
+  <!-- ── Analysis mode ───────────────────────────────────────────────── -->
+  <div id="trade-analysis" class="trade-section" style="display:none">
+
+    <div class="trade-form-grid">
+
+      <div class="trade-field">
+        <label>SÍMBOLO</label>
+        <div class="trade-sym-wrap">
+          <input id="ta-symbol" class="trade-input" placeholder="BTC" list="trade-sym-list" autocomplete="off">
+          <span id="ta-mark" class="trade-mark-lbl">—</span>
+        </div>
+      </div>
+
+      <div class="trade-field">
+        <label>DIRECCIÓN</label>
+        <div class="trade-dir-toggle">
+          <button class="trade-dir-btn active" data-dir="Buy" data-for="analysis">▲ LONG</button>
+          <button class="trade-dir-btn" data-dir="Sell" data-for="analysis">▼ SHORT</button>
+        </div>
+      </div>
+
+      <div class="trade-field">
+        <label>ENTRADA (mental)</label>
+        <input id="ta-entry" class="trade-input" type="number" step="any" placeholder="0.00">
+      </div>
+
+      <div class="trade-field">
+        <label>STOP LOSS</label>
+        <input id="ta-sl" class="trade-input" type="number" step="any" placeholder="0.00">
+      </div>
+
+      <div class="trade-field">
+        <label>TAKE PROFIT</label>
+        <input id="ta-tp" class="trade-input" type="number" step="any" placeholder="0.00">
+      </div>
+
+      <div class="trade-field">
+        <label>TAMAÑO (USDT)</label>
+        <input id="ta-size" class="trade-input" type="number" step="any" placeholder="100">
+      </div>
+
+    </div>
+
+    <!-- Live R:R preview -->
+    <div id="ta-preview" class="trade-preview">
+      <div class="trade-preview-row">
+        <span class="c-dim">R:R</span>
+        <span id="ta-rr">—</span>
+      </div>
+      <div class="trade-preview-row">
+        <span class="c-dim">PnL vs Mark actual</span>
+        <span id="ta-pnl-mark">—</span>
+      </div>
+      <div class="trade-preview-row">
+        <span class="c-dim">Riesgo</span>
+        <span id="ta-risk" class="c-red">—</span>
+      </div>
+      <div class="trade-preview-row">
+        <span class="c-dim">Objetivo</span>
+        <span id="ta-reward" class="c-green">—</span>
+      </div>
+    </div>
+
+    <!-- Signals from /api/analyze -->
+    <div id="ta-signals" class="trade-signals-row"></div>
+
+    <div class="trade-field" style="margin-top:8px">
+      <label>NOTAS</label>
+      <textarea id="ta-notes" class="trade-input trade-textarea" placeholder="Setup, razones, contexto..."></textarea>
+    </div>
+
+    <div class="trade-footer" style="gap:6px">
+      <button id="ta-btn-save" class="trade-btn primary full">GUARDAR ANÁLISIS</button>
+    </div>
+
+    <!-- Saved analyses -->
+    <div id="ta-saved-list" class="ta-saved-list"></div>
+
+  </div>
+
+</div>
 
 <script src="/static/app.js"></script>
 </body>

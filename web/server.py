@@ -14,7 +14,8 @@ from pathlib import Path
 import aiohttp
 import uvicorn
 import websockets as websockets_lib
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import uuid
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -27,6 +28,7 @@ from core.trend import TrendAnalyzer
 from core.regime import RegimeClassifier, OpportunityScorer
 from core.technicals import TechIndicators
 from core.executor import BybitExecutor
+from core.order_model import OrderRequest
 from streams.market import MarketStream
 from streams.account import AccountStream
 from streams.klines import KlineStream
@@ -243,9 +245,16 @@ def _build_snapshot() -> dict:
             key=lambda x: abs(x["pnl"]), reverse=True,
         )
 
+        # Mark prices de todos los símbolos monitoreados (para panel de análisis)
+        marks = dict(_mark_prices)
+        for sym, ms in _market.states.items():
+            if ms.connected and ms.ticker.last_price > 0 and sym not in marks:
+                marks[sym] = ms.ticker.last_price
+
         return {
             "ts":       int(time.time() * 1000),
             "mxn_rate": round(_mxn_rate, 4),
+            "marks":    {k: round(v, 6) for k, v in marks.items()},
             "account": {
                 "connected":      st.connected,
                 "equity":         round(b.total_equity, 2),
@@ -376,6 +385,117 @@ async def api_history():
     except Exception as e:
         log.error("api_history: %s", e)
         return JSONResponse({"history": [], "error": str(e)})
+
+
+@app.get("/api/symbols")
+async def api_symbols():
+    """Lista símbolos activos con mark price y score de señal."""
+    result = []
+    all_syms = set(_market.states) | set(_signals)
+    for sym in sorted(all_syms):
+        ms    = _market.states.get(sym)
+        mark  = _mark_prices.get(sym) or (ms.ticker.last_price if ms and ms.connected else 0)
+        sig   = _signals.get(sym, {})
+        opp   = sig.get("opp")
+        result.append({
+            "symbol": sym,
+            "label":  sym.replace("USDT", ""),
+            "mark":   round(mark, 6),
+            "score":  opp.score if opp else 0,
+        })
+    result.sort(key=lambda x: -x["score"])
+    return JSONResponse({"symbols": result})
+
+
+@app.get("/api/analyze/{symbol}")
+async def api_analyze(symbol: str):
+    """Señales de mercado para un símbolo."""
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    sig  = _signals.get(sym, {})
+    opp  = sig.get("opp")
+    ab   = sig.get("absorption")
+    tr   = sig.get("trend")
+    rg   = sig.get("regime")
+    mark = _mark_prices.get(sym) or 0.0
+    ms   = _market.states.get(sym)
+    if not mark and ms and ms.connected:
+        mark = ms.ticker.last_price
+    return JSONResponse({
+        "symbol":    sym,
+        "mark":      round(mark, 6),
+        "score":     opp.score    if opp else 0,
+        "ab_side":   ab.side      if ab  else "NEUTRAL",
+        "trend_dir": tr.direction if tr  else "NEUTRAL",
+        "regime":    rg.regime    if rg  else "UNKNOWN",
+        "atr":       round(sig.get("atr", 0), 6),
+        "rsi":       round(sig.get("rsi", 50), 1),
+    })
+
+
+@app.post("/api/trade")
+async def api_trade(req: Request):
+    """Ejecuta una orden de mercado o límite vía BybitExecutor."""
+    try:
+        body       = await req.json()
+        symbol     = str(body.get("symbol", "")).upper()
+        if not symbol.endswith("USDT"):
+            symbol += "USDT"
+        side       = str(body.get("side", "Buy"))        # "Buy" | "Sell"
+        order_type = str(body.get("order_type", "Market"))
+        entry      = float(body.get("entry", 0))
+        sl         = float(body.get("sl", 0))
+        tp         = float(body.get("tp", 0))
+        size_usdt  = float(body.get("size_usdt", 0))
+        leverage   = int(body.get("leverage", 10))
+
+        if not symbol or sl <= 0 or tp <= 0 or size_usdt <= 0:
+            return JSONResponse({"success": False, "error": "Parámetros incompletos"})
+
+        # Precio de referencia para calcular qty
+        mark = _mark_prices.get(symbol) or 0.0
+        ms   = _market.states.get(symbol)
+        if not mark and ms and ms.connected:
+            mark = ms.ticker.last_price
+        ref_price = entry if (order_type == "Limit" and entry > 0) else (mark or entry)
+        if ref_price <= 0:
+            return JSONResponse({"success": False, "error": "Precio de referencia no disponible"})
+
+        # Calcular qty según lotSizeFilter
+        info    = await _exec.load_instrument_info(symbol)
+        step    = float(info.qty_step)
+        raw_qty = size_usdt / ref_price
+        qty     = max(float(info.min_qty), round(round(raw_qty / step) * step, 8))
+
+        order = OrderRequest(
+            symbol     = symbol,
+            side       = side,
+            qty        = qty,
+            order_type = order_type,
+            price      = entry if order_type == "Limit" else 0.0,
+            sl_price   = sl,
+            tp_price   = tp,
+            entry_price= ref_price,
+            leverage   = leverage,
+            trace_id   = str(uuid.uuid4())[:8],
+            strategy_tag = "manual_web",
+        )
+
+        if order_type == "Market":
+            result = await _exec.place_market_bracket(order)
+        else:
+            result = await _exec.place_limit_bracket(order)
+
+        return JSONResponse({
+            "success":  result.success,
+            "order_id": result.order_id,
+            "qty":      qty,
+            "error":    result.error_msg,
+        })
+    except Exception as e:
+        log.error("api_trade: %s", e)
+        return JSONResponse({"success": False, "error": str(e)})
 
 
 WEB_PORT = int(getattr(settings, "web_port", 8080))

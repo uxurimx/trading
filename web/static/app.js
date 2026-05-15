@@ -143,17 +143,34 @@ function buildProgressBar(pos) {
     ? `left:${bePct.toFixed(1)}%;width:${(100 - bePct).toFixed(1)}%`
     : `left:0%;width:${bePct.toFixed(1)}%`;
 
-  // ── Fill activo ───────────────────────────────────────────────────────────
-  const inProfit = progress >= 0;
-  let fillLeft, fillWidth, fillClass;
+  // ── Fill activo — tricolor: rojo / naranja(BE) / verde ───────────────────
+  // Estado según posición del mark respecto a entry y breakeven
+  const mark  = pos.mark;
+  const bePx  = pos.breakeven_price || pos.entry;
+  let fillState;
   if (isLong) {
-    if (inProfit) { fillLeft = entryPct; fillWidth = Math.max(0, markPct - entryPct); }
-    else          { fillLeft = Math.max(0, markPct); fillWidth = Math.max(0, entryPct - Math.max(0, markPct)); }
+    if (mark >= bePx)        fillState = 'profit';  // verde: pasó el BE
+    else if (mark >= pos.entry) fillState = 'be';   // naranja: entre entry y BE
+    else                     fillState = 'loss';    // rojo: debajo de entry
   } else {
-    if (inProfit) { fillLeft = Math.max(0, markPct); fillWidth = Math.max(0, entryPct - Math.max(0, markPct)); }
-    else          { fillLeft = entryPct; fillWidth = Math.max(0, Math.min(100, markPct) - entryPct); }
+    if (mark <= bePx)        fillState = 'profit';
+    else if (mark <= pos.entry) fillState = 'be';
+    else                     fillState = 'loss';
   }
-  fillClass = inProfit ? 'prog-fill-profit' : 'prog-fill-loss';
+
+  let fillLeft, fillWidth;
+  if (fillState === 'loss') {
+    // Relleno va del mark hacia la entrada (zona de pérdida)
+    if (isLong) { fillLeft = Math.max(0, markPct); fillWidth = Math.max(0, entryPct - Math.max(0, markPct)); }
+    else        { fillLeft = entryPct; fillWidth = Math.max(0, Math.min(100, markPct) - entryPct); }
+  } else {
+    // Relleno va de la entrada hacia el mark (zona BE o profit)
+    if (isLong) { fillLeft = entryPct; fillWidth = Math.max(0, markPct - entryPct); }
+    else        { fillLeft = Math.max(0, markPct); fillWidth = Math.max(0, entryPct - Math.max(0, markPct)); }
+  }
+  const fillClass = fillState === 'profit' ? 'prog-fill-profit'
+                  : fillState === 'be'     ? 'prog-fill-be'
+                  :                          'prog-fill-loss';
 
   const pctLbl = `${progress >= 0 ? '+' : ''}${fmt(progress, 1)}%`;
   const slLbl  = pos.sl > 0 ? fmtPrice(pos.sl) : '—';
@@ -165,10 +182,12 @@ function buildProgressBar(pos) {
   const offset  = 9.4;    // empieza desde arriba (circ/4)
   const filled  = ((0.15 + 0.85 * mom.strength) * circ).toFixed(1);
 
-  // Label: PnL neto desde BE (positivo después del breakeven)
+  // Label: PnL neto desde BE — color sigue el estado del fill
   const fnPct = pos.full_net_pct ?? 0;
   const fnUsd = pos.full_net_pnl ?? 0;
-  const fnCls = fnPct >= 0 ? 'c-green' : 'c-red';
+  const fnCls = fillState === 'profit' ? 'c-green'
+              : fillState === 'be'     ? 'c-orange'
+              :                          'c-red';
   const markLbl = `${fmtPct(fnPct)} ${fmtMoney(fnUsd)}`;
 
   const markSvg = `
@@ -591,3 +610,507 @@ setInterval(() => {
 }, 15000);
 
 connect();
+
+// ── Trade Panel ───────────────────────────────────────────────────────────────
+
+const _lsKey = 'qts_analyses';
+
+// State
+let _tpOpen      = false;
+let _tpMode      = 'manual';      // 'manual' | 'analysis'
+let _tmDir       = 'Buy';
+let _tmType      = 'Market';
+let _taDir       = 'Buy';
+let _liveMarks   = {};            // sym → price from WS snapshot
+
+// ── Open / close ─────────────────────────────────────────────────────────────
+
+function openTradePanel() {
+  _tpOpen = true;
+  document.getElementById('trade-overlay').classList.add('open');
+  document.getElementById('trade-panel').classList.add('open');
+  _loadSymbolList();
+  _updateTradePreview();
+  _renderSavedAnalyses();
+}
+
+function closeTradePanel() {
+  _tpOpen = false;
+  document.getElementById('trade-overlay').classList.remove('open');
+  document.getElementById('trade-panel').classList.remove('open');
+}
+
+document.getElementById('trade-overlay')?.addEventListener('click', closeTradePanel);
+document.getElementById('trade-panel-close')?.addEventListener('click', closeTradePanel);
+document.getElementById('btn-open-trade')?.addEventListener('click', openTradePanel);
+document.getElementById('btn-open-trade-fab')?.addEventListener('click', openTradePanel);
+
+// ── Mode toggle ───────────────────────────────────────────────────────────────
+
+document.querySelectorAll('.trade-mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _tpMode = btn.dataset.mode;
+    document.querySelectorAll('.trade-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === _tpMode));
+    document.getElementById('trade-manual').style.display   = _tpMode === 'manual'   ? 'flex' : 'none';
+    document.getElementById('trade-analysis').style.display = _tpMode === 'analysis' ? 'flex' : 'none';
+    if (_tpMode === 'analysis') { _renderSavedAnalyses(); _updateAnalysisPreview(); }
+  });
+});
+
+// ── Symbol list from /api/symbols ────────────────────────────────────────────
+
+async function _loadSymbolList() {
+  try {
+    const res  = await fetch('/api/symbols');
+    const data = await res.json();
+    const dl   = document.getElementById('trade-sym-list');
+    if (!dl) return;
+    dl.innerHTML = (data.symbols || []).map(s =>
+      `<option value="${esc(s.label)}" data-full="${esc(s.symbol)}" label="${esc(s.label)} ${fmtPrice(s.mark)} (score ${s.score})">`
+    ).join('');
+    // Update live marks cache
+    (data.symbols || []).forEach(s => { _liveMarks[s.symbol] = s.mark; });
+  } catch { /* silent */ }
+}
+
+// ── Mark price updates from WS ────────────────────────────────────────────────
+
+function _updateMarkFromSnap(snap) {
+  if (snap.marks) Object.assign(_liveMarks, snap.marks);
+  if (!_tpOpen) return;
+  if (_tpMode === 'manual')   _updateMarkLabelManual();
+  if (_tpMode === 'analysis') _updateMarkLabelAnalysis();
+}
+
+function _symFull(label) {
+  // Convert label ("BTC") to full symbol ("BTCUSDT")
+  if (!label) return '';
+  const upper = label.toUpperCase().trim();
+  return upper.endsWith('USDT') ? upper : upper + 'USDT';
+}
+
+function _getMark(label) {
+  return _liveMarks[_symFull(label)] || 0;
+}
+
+function _updateMarkLabelManual() {
+  const sym  = document.getElementById('tm-symbol')?.value || '';
+  const mark = _getMark(sym);
+  const el   = document.getElementById('tm-mark');
+  if (el) el.textContent = mark ? fmtPrice(mark) : '—';
+}
+
+function _updateMarkLabelAnalysis() {
+  const sym  = document.getElementById('ta-symbol')?.value || '';
+  const mark = _getMark(sym);
+  const el   = document.getElementById('ta-mark');
+  if (el) el.textContent = mark ? fmtPrice(mark) : '—';
+}
+
+// ── Direction toggles ─────────────────────────────────────────────────────────
+
+document.querySelectorAll('#trade-manual .trade-dir-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _tmDir = btn.dataset.dir;
+    document.querySelectorAll('#trade-manual .trade-dir-btn').forEach(b => b.classList.toggle('active', b.dataset.dir === _tmDir));
+    _updateTradePreview();
+  });
+});
+
+document.querySelectorAll('#trade-analysis .trade-dir-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _taDir = btn.dataset.dir;
+    document.querySelectorAll('#trade-analysis .trade-dir-btn').forEach(b => b.classList.toggle('active', b.dataset.dir === _taDir));
+    _updateAnalysisPreview();
+  });
+});
+
+// ── Order type toggle ─────────────────────────────────────────────────────────
+
+document.querySelectorAll('.trade-type-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _tmType = btn.dataset.type;
+    document.querySelectorAll('.trade-type-btn').forEach(b => b.classList.toggle('active', b.dataset.type === _tmType));
+    const ew = document.getElementById('tm-entry-wrap');
+    if (ew) ew.style.display = _tmType === 'Limit' ? 'flex' : 'none';
+    _updateTradePreview();
+  });
+});
+
+// ── Live R:R preview (manual) ─────────────────────────────────────────────────
+
+function _calcRR(entry, sl, tp, dir, size, leverageVal) {
+  if (!entry || !sl || !tp || !size) return null;
+  const isLong = dir === 'Buy';
+  const slDist = isLong ? entry - sl : sl - entry;
+  const tpDist = isLong ? tp - entry : entry - tp;
+  if (slDist <= 0 || tpDist <= 0) return null;
+  const rr     = tpDist / slDist;
+  const qty    = size / entry;
+  const risk   = slDist * qty;
+  const reward = tpDist * qty;
+  const fee    = size * 0.00055;
+  return { rr, qty, risk, reward, fee };
+}
+
+function _updateTradePreview() {
+  if (!_tpOpen) return;
+  const sym  = document.getElementById('tm-symbol')?.value || '';
+  const slv  = parseFloat(document.getElementById('tm-sl')?.value) || 0;
+  const tpv  = parseFloat(document.getElementById('tm-tp')?.value) || 0;
+  const size = parseFloat(document.getElementById('tm-size')?.value) || 0;
+  const lev  = parseFloat(document.getElementById('tm-leverage')?.value) || 10;
+  const mark = _getMark(sym);
+  const entryRaw = parseFloat(document.getElementById('tm-entry')?.value) || 0;
+  const entry = _tmType === 'Limit' && entryRaw > 0 ? entryRaw : mark;
+
+  _updateMarkLabelManual();
+
+  const r = entry > 0 ? _calcRR(entry, slv, tpv, _tmDir, size, lev) : null;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+
+  if (r) {
+    const rrCls = r.rr >= 2 ? 'c-green' : r.rr >= 1.5 ? 'c-orange' : 'c-red';
+    const rrEl  = document.getElementById('tm-rr');
+    if (rrEl) { rrEl.textContent = `${r.rr.toFixed(2)}:1`; rrEl.className = rrCls; }
+    set('tm-risk',   `−$${r.risk.toFixed(2)}`);
+    set('tm-reward', `+$${r.reward.toFixed(2)}`);
+    set('tm-qty',    `${r.qty.toFixed(4)} contratos`);
+    set('tm-fee',    `~$${r.fee.toFixed(3)}`);
+  } else {
+    ['tm-rr','tm-risk','tm-reward','tm-qty','tm-fee'].forEach(id => set(id, '—'));
+  }
+
+  // Fetch signals if symbol changed
+  _loadSignalsManual(sym);
+}
+
+let _lastManualSym = '';
+async function _loadSignalsManual(rawSym) {
+  if (!rawSym) return;
+  const sym = _symFull(rawSym);
+  if (sym === _lastManualSym) return;
+  _lastManualSym = sym;
+  try {
+    const res  = await fetch(`/api/analyze/${sym}`);
+    const data = await res.json();
+    const el   = document.getElementById('tm-signals');
+    if (el) el.innerHTML = _buildSignalChipsRaw(data);
+  } catch { /* silent */ }
+}
+
+let _lastAnalysisSym = '';
+async function _loadSignalsAnalysis(rawSym) {
+  if (!rawSym) return;
+  const sym = _symFull(rawSym);
+  if (sym === _lastAnalysisSym) return;
+  _lastAnalysisSym = sym;
+  try {
+    const res  = await fetch(`/api/analyze/${sym}`);
+    const data = await res.json();
+    const el   = document.getElementById('ta-signals');
+    if (el) el.innerHTML = _buildSignalChipsRaw(data);
+  } catch { /* silent */ }
+}
+
+function _buildSignalChipsRaw(d) {
+  if (!d || !d.symbol) return '';
+  const tdMap  = { UP: 'bull', DOWN: 'bear', NEUTRAL: '' };
+  const tdIcon = { UP: '▲', DOWN: '▼', NEUTRAL: '—' };
+  const abMap  = { BUY: 'bull', SELL: 'bear', NEUTRAL: '' };
+  return `<div class="pos-signals" style="flex-wrap:wrap;gap:4px">
+    <span class="sig-chip ${tdMap[d.trend_dir]||''}">${tdIcon[d.trend_dir]||'—'} TREND</span>
+    <span class="sig-chip ${abMap[d.ab_side]||''}">ABS ${d.ab_side||'—'}</span>
+    <span class="sig-chip">${(d.regime||'UNKNOWN').replace('_',' ')}</span>
+    <span class="sig-chip ${d.score>=70?'bull':d.score>=40?'warn':''}">SCORE ${d.score}</span>
+    <span class="sig-chip ${d.rsi>=70?'bear':d.rsi<=30?'bull':''}">RSI ${fmt(d.rsi,1)}</span>
+    <span class="sig-chip">ATR ${fmtPrice(d.atr)}</span>
+  </div>`;
+}
+
+// Live preview (analysis)
+function _updateAnalysisPreview() {
+  if (!_tpOpen) return;
+  const sym   = document.getElementById('ta-symbol')?.value || '';
+  const entry = parseFloat(document.getElementById('ta-entry')?.value) || 0;
+  const slv   = parseFloat(document.getElementById('ta-sl')?.value)    || 0;
+  const tpv   = parseFloat(document.getElementById('ta-tp')?.value)    || 0;
+  const size  = parseFloat(document.getElementById('ta-size')?.value)  || 0;
+  const mark  = _getMark(sym);
+
+  _updateMarkLabelAnalysis();
+  _loadSignalsAnalysis(sym);
+
+  const r = entry > 0 ? _calcRR(entry, slv, tpv, _taDir, size, 1) : null;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+
+  if (r) {
+    const rrCls = r.rr >= 2 ? 'c-green' : r.rr >= 1.5 ? 'c-orange' : 'c-red';
+    const rrEl  = document.getElementById('ta-rr');
+    if (rrEl) { rrEl.textContent = `${r.rr.toFixed(2)}:1`; rrEl.className = rrCls; }
+    set('ta-risk',   `−$${r.risk.toFixed(2)}`);
+    set('ta-reward', `+$${r.reward.toFixed(2)}`);
+    // Virtual PnL vs mark
+    if (mark > 0 && entry > 0) {
+      const isLong = _taDir === 'Buy';
+      const qty    = size / entry;
+      const virPnl = (isLong ? mark - entry : entry - mark) * qty;
+      const pEl    = document.getElementById('ta-pnl-mark');
+      if (pEl) {
+        pEl.textContent = `${virPnl >= 0 ? '+' : ''}$${virPnl.toFixed(2)}`;
+        pEl.className   = virPnl >= 0 ? 'c-green' : 'c-red';
+      }
+    } else {
+      set('ta-pnl-mark', '—');
+    }
+  } else {
+    ['ta-rr','ta-risk','ta-reward','ta-pnl-mark'].forEach(id => set(id, '—'));
+  }
+}
+
+// Wire input listeners
+['tm-symbol','tm-sl','tm-tp','tm-size','tm-entry'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', _updateTradePreview);
+});
+['ta-symbol','ta-sl','ta-tp','ta-size','ta-entry'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', _updateAnalysisPreview);
+});
+
+// Leverage slider sync
+document.getElementById('tm-leverage')?.addEventListener('input', e => {
+  const r = document.getElementById('tm-lev-range');
+  if (r) r.value = e.target.value;
+  _updateTradePreview();
+});
+document.getElementById('tm-lev-range')?.addEventListener('input', e => {
+  const i = document.getElementById('tm-leverage');
+  if (i) i.value = e.target.value;
+  _updateTradePreview();
+});
+
+// ── Manual: Review → Confirm → Execute ───────────────────────────────────────
+
+document.getElementById('tm-btn-submit')?.addEventListener('click', () => {
+  const sym  = document.getElementById('tm-symbol')?.value || '';
+  const slv  = parseFloat(document.getElementById('tm-sl')?.value) || 0;
+  const tpv  = parseFloat(document.getElementById('tm-tp')?.value) || 0;
+  const size = parseFloat(document.getElementById('tm-size')?.value) || 0;
+  const lev  = parseFloat(document.getElementById('tm-leverage')?.value) || 10;
+  const mark = _getMark(sym);
+  const entryRaw = parseFloat(document.getElementById('tm-entry')?.value) || 0;
+  const entry = _tmType === 'Limit' && entryRaw > 0 ? entryRaw : mark;
+
+  if (!sym || !slv || !tpv || !size) {
+    alert('Completa símbolo, SL, TP y tamaño.');
+    return;
+  }
+
+  const r = _calcRR(entry, slv, tpv, _tmDir, size, lev);
+  if (!r) { alert('Verifica los precios de SL/TP vs entrada.'); return; }
+
+  const dirLbl = _tmDir === 'Buy' ? '▲ LONG' : '▼ SHORT';
+  const rows = [
+    `<div><span class="c-dim">Símbolo:</span> <strong>${esc(_symFull(sym))}</strong></div>`,
+    `<div><span class="c-dim">Dirección:</span> <strong class="${_tmDir==='Buy'?'c-green':'c-red'}">${dirLbl}</strong></div>`,
+    `<div><span class="c-dim">Tipo:</span> ${esc(_tmType)}</div>`,
+    _tmType === 'Limit' ? `<div><span class="c-dim">Precio límite:</span> ${fmtPrice(entry)}</div>` : '',
+    `<div><span class="c-dim">SL:</span> <span class="c-red">${fmtPrice(slv)}</span></div>`,
+    `<div><span class="c-dim">TP:</span> <span class="c-green">${fmtPrice(tpv)}</span></div>`,
+    `<div><span class="c-dim">Tamaño:</span> $${size.toFixed(2)} USDT</div>`,
+    `<div><span class="c-dim">Qty est.:</span> ${r.qty.toFixed(4)} contratos</div>`,
+    `<div><span class="c-dim">R:R:</span> <strong>${r.rr.toFixed(2)}:1</strong></div>`,
+    `<div><span class="c-dim">Riesgo máx.:</span> <span class="c-red">−$${r.risk.toFixed(2)}</span></div>`,
+    `<div><span class="c-dim">Objetivo:</span> <span class="c-green">+$${r.reward.toFixed(2)}</span></div>`,
+  ].filter(Boolean).join('');
+
+  document.getElementById('tm-confirm-body').innerHTML = rows;
+  document.getElementById('tm-confirm').style.display  = 'block';
+  document.getElementById('tm-footer').style.display   = 'none';
+  document.getElementById('tm-result').style.display   = 'none';
+});
+
+document.getElementById('tm-btn-cancel')?.addEventListener('click', () => {
+  document.getElementById('tm-confirm').style.display = 'none';
+  document.getElementById('tm-footer').style.display  = '';
+});
+
+document.getElementById('tm-btn-confirm')?.addEventListener('click', async () => {
+  const btn  = document.getElementById('tm-btn-confirm');
+  btn.disabled = true;
+  btn.textContent = 'ENVIANDO…';
+
+  const sym  = document.getElementById('tm-symbol')?.value || '';
+  const slv  = parseFloat(document.getElementById('tm-sl')?.value) || 0;
+  const tpv  = parseFloat(document.getElementById('tm-tp')?.value) || 0;
+  const size = parseFloat(document.getElementById('tm-size')?.value) || 0;
+  const lev  = parseFloat(document.getElementById('tm-leverage')?.value) || 10;
+  const entryRaw = parseFloat(document.getElementById('tm-entry')?.value) || 0;
+
+  const body = {
+    symbol:     _symFull(sym),
+    side:       _tmDir,
+    order_type: _tmType,
+    entry:      entryRaw,
+    sl:         slv,
+    tp:         tpv,
+    size_usdt:  size,
+    leverage:   lev,
+  };
+
+  try {
+    const res  = await fetch('/api/trade', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await res.json();
+    const rEl  = document.getElementById('tm-result');
+    rEl.style.display = 'block';
+    if (data.success) {
+      rEl.className   = 'trade-result ok';
+      rEl.textContent = `✓ Orden enviada — ID: ${data.order_id} · qty ${data.qty}`;
+      document.getElementById('tm-confirm').style.display = 'none';
+    } else {
+      rEl.className   = 'trade-result err';
+      rEl.textContent = `✗ Error: ${data.error}`;
+      document.getElementById('tm-footer').style.display = '';
+    }
+  } catch (e) {
+    const rEl = document.getElementById('tm-result');
+    rEl.style.display = 'block';
+    rEl.className     = 'trade-result err';
+    rEl.textContent   = `✗ ${String(e)}`;
+    document.getElementById('tm-footer').style.display = '';
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'EJECUTAR';
+  }
+});
+
+// ── Analysis: Save to localStorage ───────────────────────────────────────────
+
+function _loadAnalyses() {
+  try { return JSON.parse(localStorage.getItem(_lsKey) || '[]'); } catch { return []; }
+}
+
+function _saveAnalyses(list) {
+  localStorage.setItem(_lsKey, JSON.stringify(list));
+}
+
+document.getElementById('ta-btn-save')?.addEventListener('click', () => {
+  const sym   = document.getElementById('ta-symbol')?.value?.trim() || '';
+  const entry = parseFloat(document.getElementById('ta-entry')?.value) || 0;
+  const slv   = parseFloat(document.getElementById('ta-sl')?.value) || 0;
+  const tpv   = parseFloat(document.getElementById('ta-tp')?.value) || 0;
+  const size  = parseFloat(document.getElementById('ta-size')?.value) || 0;
+  const notes = document.getElementById('ta-notes')?.value?.trim() || '';
+
+  if (!sym || !entry || !slv || !tpv) { alert('Completa símbolo, entrada, SL y TP.'); return; }
+
+  const list = _loadAnalyses();
+  list.unshift({
+    id:         Date.now().toString(36),
+    symbol:     _symFull(sym),
+    label:      sym.toUpperCase().replace('USDT',''),
+    direction:  _taDir,
+    entry, sl: slv, tp: tpv, size, notes,
+    created_at: Date.now(),
+  });
+  _saveAnalyses(list);
+  _renderSavedAnalyses();
+
+  // Clear form
+  ['ta-symbol','ta-entry','ta-sl','ta-tp','ta-size','ta-notes'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  ['ta-rr','ta-risk','ta-reward','ta-pnl-mark'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '—';
+  });
+  _lastAnalysisSym = '';
+  document.getElementById('ta-signals').innerHTML = '';
+});
+
+function _renderSavedAnalyses() {
+  const list = _loadAnalyses();
+  const c    = document.getElementById('ta-saved-list');
+  if (!c) return;
+  if (!list.length) {
+    c.innerHTML = '<div class="c-dim" style="font-size:10px;text-align:center;padding:12px 0">Sin análisis guardados</div>';
+    return;
+  }
+  c.innerHTML = list.map(a => {
+    const isLong = a.direction === 'Buy';
+    const dirCls = isLong ? 'c-green' : 'c-red';
+    const dirLbl = isLong ? '▲ LONG' : '▼ SHORT';
+    const mark   = _liveMarks[a.symbol] || 0;
+    const qty    = a.size > 0 && a.entry > 0 ? a.size / a.entry : 0;
+    const virPnl = mark > 0 && qty > 0
+      ? ((isLong ? mark - a.entry : a.entry - mark) * qty)
+      : null;
+    const pnlHtml = virPnl != null
+      ? `<span class="ta-saved-pnl ${virPnl >= 0 ? 'c-green' : 'c-red'}">${virPnl >= 0 ? '+' : ''}$${virPnl.toFixed(2)}</span>`
+      : '';
+    const markHtml = mark > 0 ? `<span class="c-dim" style="font-size:9px">Mark ${fmtPrice(mark)}</span>` : '';
+    const date  = new Date(a.created_at);
+    const p = n => String(n).padStart(2,'0');
+    const dateStr = `${date.getMonth()+1}/${date.getDate()} ${p(date.getHours())}:${p(date.getMinutes())}`;
+    const rr = (a.tp - a.entry) !== 0 && (a.entry - a.sl) !== 0
+      ? Math.abs((a.tp - a.entry) / (a.entry - a.sl)).toFixed(2)
+      : '—';
+    return `
+    <div class="ta-saved-card" data-id="${esc(a.id)}">
+      <div class="ta-saved-hdr">
+        <span class="ta-saved-sym">${esc(a.label)}</span>
+        <span class="${dirCls}" style="font-size:10px;font-weight:600">${dirLbl}</span>
+        <span class="ta-saved-meta">${esc(dateStr)} · R:R ${rr} ${markHtml}</span>
+        ${pnlHtml}
+      </div>
+      ${a.notes ? `<div class="ta-saved-notes">${esc(a.notes)}</div>` : ''}
+      <div style="font-size:9px;color:var(--text-dim);margin-bottom:6px">
+        Entrada ${fmtPrice(a.entry)} · SL ${fmtPrice(a.sl)} · TP ${fmtPrice(a.tp)}
+        ${a.size ? ` · $${a.size}` : ''}
+      </div>
+      <div class="ta-saved-actions">
+        <button class="ta-saved-btn danger" data-del="${esc(a.id)}">Eliminar</button>
+        <button class="ta-saved-btn promote" data-promote="${esc(a.id)}">→ Real</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Wire delete
+  c.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const newList = _loadAnalyses().filter(a => a.id !== btn.dataset.del);
+      _saveAnalyses(newList);
+      _renderSavedAnalyses();
+    });
+  });
+
+  // Wire promote to manual
+  c.querySelectorAll('[data-promote]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const a = _loadAnalyses().find(x => x.id === btn.dataset.promote);
+      if (!a) return;
+      // Switch to manual mode
+      _tpMode = 'manual';
+      document.querySelectorAll('.trade-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'manual'));
+      document.getElementById('trade-manual').style.display   = 'flex';
+      document.getElementById('trade-analysis').style.display = 'none';
+      // Populate fields
+      const lbl = a.symbol.replace('USDT','');
+      const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+      setVal('tm-symbol', lbl);
+      setVal('tm-sl',     a.sl);
+      setVal('tm-tp',     a.tp);
+      setVal('tm-size',   a.size || '');
+      // Direction
+      _tmDir = a.direction;
+      document.querySelectorAll('#trade-manual .trade-dir-btn').forEach(b => b.classList.toggle('active', b.dataset.dir === _tmDir));
+      _updateTradePreview();
+    });
+  });
+}
+
+// Sync trade panel marks and analysis PnL every second from lastSnap
+setInterval(() => {
+  if (!_tpOpen || !lastSnap) return;
+  _updateMarkFromSnap(lastSnap);
+  if (_tpMode === 'analysis') { _updateAnalysisPreview(); _renderSavedAnalyses(); }
+}, 1000);
