@@ -689,6 +689,100 @@ body {
   background: rgba(220,220,170,.07);
 }
 
+/* ── Trades sub-tabs (Posiciones / Análisis) ──────────────────────────────── */
+.trades-sub-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px;
+}
+.trades-sub-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 1.2px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.trades-sub-btn.active {
+  background: var(--bg-card);
+  color: var(--accent);
+}
+.trades-sub-badge {
+  font-size: 9px; min-width: 15px; height: 15px;
+  background: var(--accent); color: var(--bg);
+  border-radius: 7px; padding: 0 4px;
+  display: none; align-items: center; justify-content: center;
+  font-weight: 700;
+}
+.trades-sub-badge:not(:empty) { display: inline-flex; }
+
+/* ── Analysis card ────────────────────────────────────────────────────────── */
+.ana-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.ana-card-hdr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.ana-virtual-badge {
+  font-size: 8px; letter-spacing: 1.2px; font-weight: 700;
+  padding: 2px 7px; border-radius: 3px;
+  border: 1px solid var(--yellow-dim);
+  background: rgba(220,220,170,.07);
+  color: var(--yellow);
+}
+.ana-date {
+  font-size: 9px; color: var(--text-sub); margin-left: auto;
+}
+.ana-notes {
+  font-size: 10px; color: var(--text-dim);
+  padding: 6px 14px 0;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ana-card-body { padding: 0 14px 10px; }
+.ana-actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 14px 12px;
+  border-top: 1px solid var(--border);
+}
+.ana-btn {
+  font-family: inherit;
+  font-size: 9px; letter-spacing: .6px;
+  padding: 5px 12px; border-radius: 4px;
+  border: 1px solid var(--border2);
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all .15s;
+  font-weight: 600;
+}
+.ana-btn:hover { color: var(--text); border-color: var(--accent); }
+.ana-btn.promote {
+  color: var(--green); border-color: var(--green-dim);
+  background: var(--green-bg);
+}
+.ana-btn.promote:hover { border-color: var(--green); }
+.ana-btn.danger:hover { color: var(--red); border-color: var(--red); }
+
 /* ── Sidenav trade button ─────────────────────────────────────────────────── */
 .sidenav-trade-btn-wrap {
   padding: 10px 14px;

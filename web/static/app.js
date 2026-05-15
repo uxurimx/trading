@@ -347,18 +347,137 @@ function buildPositionCard(pos) {
 // ── Render posiciones ─────────────────────────────────────────────────────────
 
 function renderPositions(positions) {
-  const n     = positions ? positions.length : 0;
-  const html  = n ? positions.map(buildPositionCard).join('') : '<div class="empty-state">Sin posiciones abiertas</div>';
-  const label = n ? `${n} activa${n > 1 ? 's' : ''}` : '';
+  const n    = positions ? positions.length : 0;
+  const html = n ? positions.map(buildPositionCard).join('') : '<div class="empty-state">Sin posiciones abiertas</div>';
 
   const c  = document.getElementById('positions-container');
   const pc = document.getElementById('pos-count');
   if (c)  c.innerHTML    = html;
-  if (pc) pc.textContent = label;
+  if (pc) pc.textContent = n > 0 ? String(n) : '';
 
-  // Badge en side-tab "Trades"
-  const sb = document.getElementById('side-pos-count');
-  if (sb) sb.textContent = n > 0 ? String(n) : '';
+  // Badge en side-tab "Trades" (suma posiciones + análisis)
+  const sb  = document.getElementById('side-pos-count');
+  const acn = parseInt(document.getElementById('ana-count')?.textContent || '0', 10);
+  if (sb) sb.textContent = (n + acn) > 0 ? String(n + acn) : '';
+}
+
+// ── Analysis cards ────────────────────────────────────────────────────────────
+
+function buildAnalysisCard(a) {
+  const isLong   = a.direction === 'LONG';
+  const dirCls   = isLong ? 'long' : 'short';
+  const chgStr   = fmtPct(a.roi_entry_pct);
+  const netAtSL  = a.net_at_sl;
+  const netAtTP  = a.net_at_tp;
+
+  const date = a.created_at ? (() => {
+    const d = new Date(a.created_at);
+    const p = n => String(n).padStart(2,'0');
+    return `${d.getMonth()+1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  })() : '';
+
+  return `
+  <div class="ana-card" data-aid="${esc(a.id)}">
+    <div class="ana-card-hdr">
+      <span class="pos-symbol">${esc(a.symbol)}</span>
+      <span class="ana-virtual-badge">VIRTUAL</span>
+      <span class="pos-dir ${dirCls}">${a.direction}</span>
+      <span class="pos-leverage">${a.leverage}x</span>
+      <span class="pos-leverage c-dim">$${a.size_usdt}</span>
+      <span class="ana-date">${esc(date)}</span>
+    </div>
+    ${a.notes ? `<div class="ana-notes">${esc(a.notes)}</div>` : ''}
+    <div class="ana-card-body">
+      <div class="pos-prices" style="margin-top:10px">
+        <div class="price-cell entry">
+          <div class="lbl">ENTRADA</div>
+          <div class="val">${fmtPrice(a.entry)}</div>
+        </div>
+        <div class="price-cell mark">
+          <div class="lbl">MARK &nbsp;<span class="${pnlClass(a.roi_entry_pct)}">${esc(chgStr)}</span></div>
+          <div class="val">${fmtPrice(a.mark)}</div>
+        </div>
+        <div class="price-cell sl">
+          <div class="lbl">STOP LOSS</div>
+          <div class="val">${fmtPrice(a.sl) || '—'}</div>
+        </div>
+        <div class="price-cell tp">
+          <div class="lbl">TAKE PROFIT</div>
+          <div class="val">${fmtPrice(a.tp) || '—'}</div>
+        </div>
+      </div>
+      ${buildProgressBar(a)}
+      <div class="pos-metrics">
+        <div class="pnl-cell">
+          <div class="lbl">EN SL <span style="color:var(--text-sub);font-size:8px">(${fmtPrice(a.sl)})</span></div>
+          <div class="val ${pnlClass(netAtSL)}">${fmtMoney(netAtSL)}</div>
+          <div class="sub">bruto · −fee ${fmtMoneyAbs(a.exit_fee_sl, 4)}</div>
+        </div>
+        <div class="pnl-cell">
+          <div class="lbl">EN TP <span style="color:var(--text-sub);font-size:8px">(${fmtPrice(a.tp)})</span></div>
+          <div class="val ${pnlClass(netAtTP)}">${fmtMoney(netAtTP)}</div>
+          <div class="sub">bruto · −fee ${fmtMoneyAbs(a.exit_fee_tp, 4)}</div>
+        </div>
+      </div>
+    </div>
+    <div class="ana-actions">
+      <button class="ana-btn danger" data-del="${esc(a.id)}">✕ Eliminar</button>
+      <button class="ana-btn promote" data-promote="${esc(a.id)}"
+        data-sym="${esc(a.symbol)}" data-dir="${esc(a.side)}"
+        data-entry="${a.entry}" data-sl="${a.sl}" data-tp="${a.tp}"
+        data-size="${a.size_usdt}" data-lev="${a.leverage}">
+        → Convertir a real
+      </button>
+    </div>
+  </div>`;
+}
+
+function renderAnalyses(analyses) {
+  const n   = analyses ? analyses.length : 0;
+  const c   = document.getElementById('analyses-container');
+  const acn = document.getElementById('ana-count');
+  if (acn) acn.textContent = n > 0 ? String(n) : '';
+
+  if (!c) return;
+  if (!n) { c.innerHTML = '<div class="empty-state">Sin análisis guardados</div>'; return; }
+
+  c.innerHTML = analyses.map(buildAnalysisCard).join('');
+
+  // Wire delete
+  c.querySelectorAll('[data-del]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const aid = btn.dataset.del;
+      await fetch(`/api/analyses/${aid}`, { method: 'DELETE' });
+      // WS snapshot se actualizará solo — no necesitamos re-renderizar aquí
+    });
+  });
+
+  // Wire promote → open trade panel in Manual mode pre-filled
+  c.querySelectorAll('[data-promote]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openTradePanel();
+      _tpMode = 'manual';
+      document.querySelectorAll('.trade-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'manual'));
+      document.getElementById('trade-manual').style.display   = 'flex';
+      document.getElementById('trade-analysis').style.display = 'none';
+      const lbl = btn.dataset.sym.replace('USDT','');
+      const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+      setVal('tm-symbol', lbl);
+      setVal('tm-sl',     btn.dataset.sl);
+      setVal('tm-tp',     btn.dataset.tp);
+      setVal('tm-size',   btn.dataset.size);
+      setVal('tm-leverage', btn.dataset.lev);
+      setVal('tm-lev-range', btn.dataset.lev);
+      _tmDir = btn.dataset.dir;
+      document.querySelectorAll('#trade-manual .trade-dir-btn').forEach(b => b.classList.toggle('active', b.dataset.dir === _tmDir));
+      _updateTradePreview();
+    });
+  });
+
+  // Update side-tab badge
+  const sb  = document.getElementById('side-pos-count');
+  const pcn = parseInt(document.getElementById('pos-count')?.textContent || '0', 10);
+  if (sb) sb.textContent = (pcn + n) > 0 ? String(pcn + n) : '';
 }
 
 // ── Render PnL por símbolo ────────────────────────────────────────────────────
@@ -456,6 +575,7 @@ async function loadHistory() {
 function render(data) {
   renderAccount(data.account);
   renderPositions(data.positions);
+  renderAnalyses(data.analyses || []);
   renderSymbolPnl(data.symbol_pnl);
 
   if (data.mxn_rate && data.mxn_rate > 1) {
@@ -517,6 +637,21 @@ document.getElementById('btn-refresh-history')?.addEventListener('click', () => 
 });
 
 switchTab(_activeTab);
+
+// ── Trades sub-tabs (Posiciones / Análisis) ───────────────────────────────────
+
+let _activeSub = 'positions';
+
+function switchSubTab(name) {
+  _activeSub = name;
+  document.querySelectorAll('.trades-sub-btn').forEach(b => b.classList.toggle('active', b.dataset.sub === name));
+  document.getElementById('positions-container').style.display = name === 'positions' ? '' : 'none';
+  document.getElementById('analyses-container').style.display  = name === 'analyses'  ? '' : 'none';
+}
+
+document.querySelectorAll('.trades-sub-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchSubTab(btn.dataset.sub));
+});
 
 // ── Config tab: controles ─────────────────────────────────────────────────────
 
@@ -613,8 +748,6 @@ connect();
 
 // ── Trade Panel ───────────────────────────────────────────────────────────────
 
-const _lsKey = 'qts_analyses';
-
 // State
 let _tpOpen      = false;
 let _tpMode      = 'manual';      // 'manual' | 'analysis'
@@ -631,7 +764,6 @@ function openTradePanel() {
   document.getElementById('trade-panel').classList.add('open');
   _loadSymbolList();
   _updateTradePreview();
-  _renderSavedAnalyses();
 }
 
 function closeTradePanel() {
@@ -653,7 +785,7 @@ document.querySelectorAll('.trade-mode-btn').forEach(btn => {
     document.querySelectorAll('.trade-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === _tpMode));
     document.getElementById('trade-manual').style.display   = _tpMode === 'manual'   ? 'flex' : 'none';
     document.getElementById('trade-analysis').style.display = _tpMode === 'analysis' ? 'flex' : 'none';
-    if (_tpMode === 'analysis') { _renderSavedAnalyses(); _updateAnalysisPreview(); }
+    if (_tpMode === 'analysis') _updateAnalysisPreview();
   });
 });
 
@@ -983,37 +1115,36 @@ document.getElementById('tm-btn-confirm')?.addEventListener('click', async () =>
   }
 });
 
-// ── Analysis: Save to localStorage ───────────────────────────────────────────
-
-function _loadAnalyses() {
-  try { return JSON.parse(localStorage.getItem(_lsKey) || '[]'); } catch { return []; }
-}
-
-function _saveAnalyses(list) {
-  localStorage.setItem(_lsKey, JSON.stringify(list));
-}
-
-document.getElementById('ta-btn-save')?.addEventListener('click', () => {
+document.getElementById('ta-btn-save')?.addEventListener('click', async () => {
   const sym   = document.getElementById('ta-symbol')?.value?.trim() || '';
   const entry = parseFloat(document.getElementById('ta-entry')?.value) || 0;
   const slv   = parseFloat(document.getElementById('ta-sl')?.value) || 0;
   const tpv   = parseFloat(document.getElementById('ta-tp')?.value) || 0;
   const size  = parseFloat(document.getElementById('ta-size')?.value) || 0;
   const notes = document.getElementById('ta-notes')?.value?.trim() || '';
+  const lev   = parseInt(document.getElementById('tm-leverage')?.value || '10');
 
   if (!sym || !entry || !slv || !tpv) { alert('Completa símbolo, entrada, SL y TP.'); return; }
 
-  const list = _loadAnalyses();
-  list.unshift({
-    id:         Date.now().toString(36),
-    symbol:     _symFull(sym),
-    label:      sym.toUpperCase().replace('USDT',''),
-    direction:  _taDir,
-    entry, sl: slv, tp: tpv, size, notes,
-    created_at: Date.now(),
-  });
-  _saveAnalyses(list);
-  _renderSavedAnalyses();
+  const btn = document.getElementById('ta-btn-save');
+  btn.disabled = true;
+  try {
+    const res  = await fetch('/api/analyses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol: _symFull(sym), direction: _taDir,
+        entry, sl: slv, tp: tpv, size, leverage: lev, notes,
+      }),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'error');
+  } catch (e) {
+    alert(`Error al guardar: ${e}`);
+    return;
+  } finally {
+    btn.disabled = false;
+  }
 
   // Clear form
   ['ta-symbol','ta-entry','ta-sl','ta-tp','ta-size','ta-notes'].forEach(id => {
@@ -1025,92 +1156,12 @@ document.getElementById('ta-btn-save')?.addEventListener('click', () => {
   });
   _lastAnalysisSym = '';
   document.getElementById('ta-signals').innerHTML = '';
+  // El WS snapshot lo actualizará en ~1 segundo
 });
 
-function _renderSavedAnalyses() {
-  const list = _loadAnalyses();
-  const c    = document.getElementById('ta-saved-list');
-  if (!c) return;
-  if (!list.length) {
-    c.innerHTML = '<div class="c-dim" style="font-size:10px;text-align:center;padding:12px 0">Sin análisis guardados</div>';
-    return;
-  }
-  c.innerHTML = list.map(a => {
-    const isLong = a.direction === 'Buy';
-    const dirCls = isLong ? 'c-green' : 'c-red';
-    const dirLbl = isLong ? '▲ LONG' : '▼ SHORT';
-    const mark   = _liveMarks[a.symbol] || 0;
-    const qty    = a.size > 0 && a.entry > 0 ? a.size / a.entry : 0;
-    const virPnl = mark > 0 && qty > 0
-      ? ((isLong ? mark - a.entry : a.entry - mark) * qty)
-      : null;
-    const pnlHtml = virPnl != null
-      ? `<span class="ta-saved-pnl ${virPnl >= 0 ? 'c-green' : 'c-red'}">${virPnl >= 0 ? '+' : ''}$${virPnl.toFixed(2)}</span>`
-      : '';
-    const markHtml = mark > 0 ? `<span class="c-dim" style="font-size:9px">Mark ${fmtPrice(mark)}</span>` : '';
-    const date  = new Date(a.created_at);
-    const p = n => String(n).padStart(2,'0');
-    const dateStr = `${date.getMonth()+1}/${date.getDate()} ${p(date.getHours())}:${p(date.getMinutes())}`;
-    const rr = (a.tp - a.entry) !== 0 && (a.entry - a.sl) !== 0
-      ? Math.abs((a.tp - a.entry) / (a.entry - a.sl)).toFixed(2)
-      : '—';
-    return `
-    <div class="ta-saved-card" data-id="${esc(a.id)}">
-      <div class="ta-saved-hdr">
-        <span class="ta-saved-sym">${esc(a.label)}</span>
-        <span class="${dirCls}" style="font-size:10px;font-weight:600">${dirLbl}</span>
-        <span class="ta-saved-meta">${esc(dateStr)} · R:R ${rr} ${markHtml}</span>
-        ${pnlHtml}
-      </div>
-      ${a.notes ? `<div class="ta-saved-notes">${esc(a.notes)}</div>` : ''}
-      <div style="font-size:9px;color:var(--text-dim);margin-bottom:6px">
-        Entrada ${fmtPrice(a.entry)} · SL ${fmtPrice(a.sl)} · TP ${fmtPrice(a.tp)}
-        ${a.size ? ` · $${a.size}` : ''}
-      </div>
-      <div class="ta-saved-actions">
-        <button class="ta-saved-btn danger" data-del="${esc(a.id)}">Eliminar</button>
-        <button class="ta-saved-btn promote" data-promote="${esc(a.id)}">→ Real</button>
-      </div>
-    </div>`;
-  }).join('');
-
-  // Wire delete
-  c.querySelectorAll('[data-del]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const newList = _loadAnalyses().filter(a => a.id !== btn.dataset.del);
-      _saveAnalyses(newList);
-      _renderSavedAnalyses();
-    });
-  });
-
-  // Wire promote to manual
-  c.querySelectorAll('[data-promote]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const a = _loadAnalyses().find(x => x.id === btn.dataset.promote);
-      if (!a) return;
-      // Switch to manual mode
-      _tpMode = 'manual';
-      document.querySelectorAll('.trade-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'manual'));
-      document.getElementById('trade-manual').style.display   = 'flex';
-      document.getElementById('trade-analysis').style.display = 'none';
-      // Populate fields
-      const lbl = a.symbol.replace('USDT','');
-      const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
-      setVal('tm-symbol', lbl);
-      setVal('tm-sl',     a.sl);
-      setVal('tm-tp',     a.tp);
-      setVal('tm-size',   a.size || '');
-      // Direction
-      _tmDir = a.direction;
-      document.querySelectorAll('#trade-manual .trade-dir-btn').forEach(b => b.classList.toggle('active', b.dataset.dir === _tmDir));
-      _updateTradePreview();
-    });
-  });
-}
-
-// Sync trade panel marks and analysis PnL every second from lastSnap
+// Sync trade panel marks every second from lastSnap
 setInterval(() => {
   if (!_tpOpen || !lastSnap) return;
   _updateMarkFromSnap(lastSnap);
-  if (_tpMode === 'analysis') { _updateAnalysisPreview(); _renderSavedAnalyses(); }
+  if (_tpMode === 'analysis') _updateAnalysisPreview();
 }, 1000);

@@ -14,6 +14,7 @@ from pathlib import Path
 import aiohttp
 import uvicorn
 import websockets as websockets_lib
+import json as _json_mod
 import uuid
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -53,6 +54,30 @@ _scorer   = OpportunityScorer()
 _signals:        dict = {}
 _mark_prices:    dict = {}   # sym → float, actualizado por WS público (tick a tick)
 _pos_first_seen: dict = {}   # pos_key → server timestamp when first observed
+
+# ─── Análisis mentales persistidos ───────────────────────────────────────────
+
+_ANALYSES_PATH = Path(__file__).parent.parent / "storage" / "analyses.json"
+_analyses: dict = {}          # id → analysis dict
+
+def _load_analyses_file() -> None:
+    global _analyses
+    if _ANALYSES_PATH.exists():
+        try:
+            _analyses = _json_mod.loads(_ANALYSES_PATH.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("analyses load error: %s", e)
+
+def _save_analyses_file() -> None:
+    try:
+        _ANALYSES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ANALYSES_PATH.write_text(
+            _json_mod.dumps(_analyses, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as e:
+        log.warning("analyses save error: %s", e)
+
+_load_analyses_file()
 
 # ─── Tipo de cambio MXN ───────────────────────────────────────────────────────
 
@@ -157,6 +182,62 @@ async def _signal_loop() -> None:
         await asyncio.sleep(5)
 
 # ─── Snapshot builder ─────────────────────────────────────────────────────────
+
+def _enrich_analyses() -> list:
+    """Convierte _analyses en dicts enriquecidos con calc_position_metrics."""
+    from types import SimpleNamespace
+    result = []
+    for aid, a in _analyses.items():
+        try:
+            sym     = a.get("symbol", "")
+            mark    = _mark_prices.get(sym) or 0.0
+            ms      = _market.states.get(sym)
+            if not mark and ms and ms.connected:
+                mark = ms.ticker.last_price
+            entry   = float(a.get("entry", 0))
+            sl      = float(a.get("sl", 0))
+            tp      = float(a.get("tp", 0))
+            size_u  = float(a.get("size", 0))
+            lev     = float(a.get("leverage", 10))
+            is_long = a.get("direction", "Buy") == "Buy"
+            qty     = size_u / entry if entry > 0 else 0.0
+            margin  = size_u / lev   if lev   > 0 else size_u
+
+            mock = SimpleNamespace(
+                entry_price       = entry,
+                mark_price        = mark,
+                stop_loss         = sl,
+                take_profit       = tp,
+                size              = qty,
+                is_long           = is_long,
+                margin            = max(margin, 1.0),
+                created_time      = int(a.get("created_at", 0)),
+                leverage          = lev,
+                liquidation_price = 0.0,
+            )
+            metrics = calc_position_metrics(mock, live_mark=mark if mark > 0 else entry)
+            result.append({
+                "id":        aid,
+                "symbol":    sym.replace("USDT", ""),
+                "full_sym":  sym,
+                "side":      a.get("direction", "Buy"),
+                "direction": "LONG" if is_long else "SHORT",
+                "entry":     round(entry, 6),
+                "mark":      round(mark or entry, 6),
+                "sl":        round(sl, 6),
+                "tp":        round(tp, 6),
+                "leverage":  int(lev),
+                "margin":    round(margin, 2),
+                "size_usdt": round(size_u, 2),
+                "notes":     a.get("notes", ""),
+                "created_at": a.get("created_at", 0),
+                **metrics,
+            })
+        except Exception as e:
+            log.debug("enrich_analysis %s: %s", aid, e)
+    result.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return result
+
 
 def _build_snapshot() -> dict:
     """Construye el snapshot completo. Nunca lanza excepción — devuelve lo que puede."""
@@ -269,6 +350,7 @@ def _build_snapshot() -> dict:
             },
             "positions":   positions_data,
             "symbol_pnl":  symbol_pnl,
+            "analyses":    _enrich_analyses(),
         }
 
     except Exception as e:
@@ -282,6 +364,7 @@ def _build_snapshot() -> dict:
                          "unrealized_pnl": 0, "daily_pnl": 0, "open_count": 0},
             "positions":  [],
             "symbol_pnl": [],
+            "analyses":   [],
         }
 
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
@@ -496,6 +579,39 @@ async def api_trade(req: Request):
     except Exception as e:
         log.error("api_trade: %s", e)
         return JSONResponse({"success": False, "error": str(e)})
+
+
+@app.post("/api/analyses")
+async def api_analyses_save(req: Request):
+    """Guarda un nuevo análisis mental."""
+    try:
+        body = await req.json()
+        sym  = str(body.get("symbol", "")).upper()
+        if not sym.endswith("USDT"):
+            sym += "USDT"
+        aid = str(uuid.uuid4())[:12]
+        _analyses[aid] = {
+            "symbol":     sym,
+            "direction":  str(body.get("direction", "Buy")),
+            "entry":      float(body.get("entry", 0)),
+            "sl":         float(body.get("sl", 0)),
+            "tp":         float(body.get("tp", 0)),
+            "size":       float(body.get("size", 0)),
+            "leverage":   int(body.get("leverage", 10)),
+            "notes":      str(body.get("notes", "")),
+            "created_at": int(time.time() * 1000),
+        }
+        _save_analyses_file()
+        return JSONResponse({"success": True, "id": aid})
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@app.delete("/api/analyses/{aid}")
+async def api_analyses_delete(aid: str):
+    _analyses.pop(aid, None)
+    _save_analyses_file()
+    return JSONResponse({"success": True})
 
 
 WEB_PORT = int(getattr(settings, "web_port", 8080))

@@ -61,13 +61,13 @@
 <!-- ══════════════════════════════════════════════════════════════════════ -->
 <!-- MOBILE TOP STRIP — logo + badge (sin nav, solo en mobile)             -->
 <!-- ══════════════════════════════════════════════════════════════════════ -->
-<div class="mobile-topstrip">
+<!-- <div class="mobile-topstrip">
   <div style="display:flex;align-items:center;gap:8px">
     <span class="logo" style="font-size:14px;letter-spacing:2px">QTS</span>
     <div id="conn-badge-mob" class="badge badge-connecting">● CONECTANDO</div>
   </div>
   <span id="clock-mob" class="topbar-time">--:--:--</span>
-</div>
+</div> -->
 
 <!-- ══════════════════════════════════════════════════════════════════════ -->
 <!-- MAIN CONTENT                                                           -->
@@ -127,11 +127,20 @@
   <div class="view" id="view-trades">
     <section class="section">
       <div class="section-header">
-        <span class="section-title">POSICIONES ABIERTAS</span>
-        <span class="section-hint" id="pos-count"></span>
+        <div class="trades-sub-tabs">
+          <button class="trades-sub-btn active" data-sub="positions">
+            POSICIONES <span class="trades-sub-badge" id="pos-count"></span>
+          </button>
+          <button class="trades-sub-btn" data-sub="analyses">
+            ANÁLISIS <span class="trades-sub-badge" id="ana-count"></span>
+          </button>
+        </div>
       </div>
       <div id="positions-container">
         <div class="empty-state">Sin posiciones abiertas</div>
+      </div>
+      <div id="analyses-container" style="display:none">
+        <div class="empty-state">Sin análisis guardados</div>
       </div>
     </section>
   </div>
@@ -424,8 +433,9 @@
       <button id="ta-btn-save" class="trade-btn primary full">GUARDAR ANÁLISIS</button>
     </div>
 
-    <!-- Saved analyses -->
-    <div id="ta-saved-list" class="ta-saved-list"></div>
+    <div class="c-dim" style="font-size:9px;letter-spacing:.5px;text-align:center;padding:8px 0">
+      Los análisis guardados aparecen en <strong>Trades → Análisis</strong>
+    </div>
 
   </div>
 
