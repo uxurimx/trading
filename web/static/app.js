@@ -229,11 +229,6 @@ function buildProgressBar(pos) {
 
   return `
   <div class="prog-wrap">
-    <div class="prog-labels">
-      <span>SL <strong>${esc(slLbl)}</strong></span>
-      <span class="prog-pct">${esc(pctLbl)} hacia TP</span>
-      <span>TP <strong>${esc(tpLbl)}</strong></span>
-    </div>
     <div class="prog-track">
       <div class="prog-zone-loss"   style="${lossStyle}"></div>
       ${beZoneStyle ? `<div class="prog-zone-be" style="${beZoneStyle}"></div>` : ''}
@@ -288,7 +283,76 @@ function buildPositionCard(pos) {
 
 // ── Pro card ──────────────────────────────────────────────────────────────────
 
-const _proDetailsOpen = new Set(); // keys con detalles expandidos, persiste entre renders
+// Estado del panel detalles Pro: key → 'detalles' | 'salud' | null(cerrado)
+const _proDetailState = new Map();
+// Cache de klines: `${sym}_${tf}` → { klines, tf, ts, error? }
+const _klineCache = new Map();
+const _KLINE_TTL  = 60000; // 1 minuto
+
+function _klineTf(elapsedS) {
+  if (elapsedS < 2 * 3600)   return '5';
+  if (elapsedS < 12 * 3600)  return '15';
+  if (elapsedS < 3 * 86400)  return '60';
+  return '240';
+}
+
+async function _fetchKlines(sym, elapsedS) {
+  const tf  = _klineTf(elapsedS);
+  const key = `${sym}_${tf}`;
+  const hit = _klineCache.get(key);
+  if (hit && Date.now() - hit.ts < _KLINE_TTL) return; // fresco
+  try {
+    const res  = await fetch(`/api/klines/${sym}?tf=${tf}&limit=60`);
+    const data = await res.json();
+    _klineCache.set(key, { klines: data.klines || [], tf, ts: Date.now() });
+  } catch (e) {
+    _klineCache.set(key, { klines: [], tf, ts: Date.now(), error: String(e) });
+  }
+  if (lastSnap) renderPositions(lastSnap.positions || []);
+}
+
+function buildCandleChart(klines, entry, mark, isLong) {
+  if (!klines || klines.length < 2) {
+    return `<div class="candle-chart-loading">Sin datos de velas</div>`;
+  }
+  const W = 300, H = 100, PAD = 2;
+  const highs = klines.map(k => k.h);
+  const lows  = klines.map(k => k.l);
+  let yMax = Math.max(...highs, entry, mark);
+  let yMin = Math.min(...lows,  entry, mark);
+  const yRange = yMax - yMin || 1;
+  yMax += yRange * 0.04;
+  yMin -= yRange * 0.04;
+  const toX = i  => PAD + (i / (klines.length - 1)) * (W - PAD * 2);
+  const toY = p  => H - PAD - ((p - yMin) / (yMax - yMin)) * (H - PAD * 2);
+  const candleW = Math.max(1.5, (W - PAD * 2) / klines.length * 0.65);
+
+  const candles = klines.map((k, i) => {
+    const x      = toX(i);
+    const green  = k.c >= k.o;
+    const col    = green ? 'var(--green)' : 'var(--red)';
+    const bodyT  = toY(Math.max(k.o, k.c));
+    const bodyB  = toY(Math.min(k.o, k.c));
+    const bodyH  = Math.max(1, bodyB - bodyT);
+    return `<line x1="${x.toFixed(1)}" y1="${toY(k.h).toFixed(1)}" x2="${x.toFixed(1)}" y2="${toY(k.l).toFixed(1)}" stroke="${col}" stroke-width="1" opacity=".5"/>
+<rect x="${(x-candleW/2).toFixed(1)}" y="${bodyT.toFixed(1)}" width="${candleW.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${col}"/>`;
+  }).join('');
+
+  const entryY = toY(entry).toFixed(1);
+  const markY  = toY(mark).toFixed(1);
+  const pnlCls = isLong ? (mark >= entry ? 'var(--green)' : 'var(--red)')
+                        : (mark <= entry ? 'var(--green)' : 'var(--red)');
+
+  return `<div class="candle-chart-wrap">
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">
+      ${candles}
+      <line x1="0" y1="${entryY}" x2="${W}" y2="${entryY}" stroke="var(--text-dim)" stroke-width="1" stroke-dasharray="4,3"/>
+      <line x1="0" y1="${markY}"  x2="${W}" y2="${markY}"  stroke="${pnlCls}" stroke-width="1" stroke-dasharray="2,2" opacity=".8"/>
+      <text x="3" y="${Math.max(8, entryY - 2)}" fill="var(--text-dim)" font-size="8" font-family="monospace">E</text>
+      <text x="3" y="${Math.max(8, markY  - 2)}" fill="${pnlCls}" font-size="8" font-family="monospace">M</text>
+    </svg>
+  </div>`;
+}
 
 function buildPosCardPro(pos) {
   const isLong   = pos.direction === 'LONG';
@@ -297,7 +361,8 @@ function buildPosCardPro(pos) {
   const netAtSL  = pos.net_at_sl;
   const netAtTP  = pos.net_at_tp;
   const key      = `${pos.full_sym}_${pos.side}`;
-  const detOpen  = _proDetailsOpen.has(key);
+  const detState = _proDetailState.get(key) || null;   // null | 'detalles' | 'salud'
+  const detOpen  = !!detState;
 
   // Botones de acción — misma lógica que Lite
   const slTarget  = _findSLTarget(pos);
@@ -328,9 +393,11 @@ function buildPosCardPro(pos) {
          <button class="pos-act-btn" disabled title="Próximamente">+ Más</button>
        </div>`;
 
-  // Panel de detalles colapsable
-  const detailsHtml = detOpen ? `
-    <div class="pos-details">
+  // Panel de detalles con tabs
+  let detailsHtml = '';
+  if (detOpen) {
+    // Tab: Detalles
+    const tabDetalles = detState === 'detalles' ? `
       <div class="pos-details-grid">
         <div class="pos-detail-cell lev">
           <div class="lbl">APALANCAMIENTO</div>
@@ -368,8 +435,43 @@ function buildPosCardPro(pos) {
           <div class="lbl">R:R</div>
           <div class="val">${fmt(pos.rr_ratio, 2)}</div>
         </div>
+      </div>` : '';
+
+    // Tab: Salud (mini chart de velas)
+    let tabSalud = '';
+    if (detState === 'salud') {
+      const tf       = _klineTf(pos.elapsed_s || 0);
+      const cacheKey = `${pos.full_sym}_${tf}`;
+      const cached   = _klineCache.get(cacheKey);
+      if (!cached) {
+        _fetchKlines(pos.full_sym, pos.elapsed_s || 0);
+        tabSalud = `<div class="candle-chart-loading">Cargando velas…</div>`;
+      } else if (cached.error) {
+        tabSalud = `<div class="candle-chart-loading" style="color:var(--red)">Error: ${esc(cached.error)}</div>`;
+      } else {
+        const tfLabels = {'5':'5m','15':'15m','60':'1h','240':'4h'};
+        tabSalud = buildCandleChart(cached.klines, pos.entry, pos.mark, isLong)
+          + `<div class="candle-chart-tf">${tfLabels[tf]||tf} · ${cached.klines.length} velas
+             · <button class="pos-details-toggle" style="font-size:9px;padding:1px 5px"
+                 data-reload-klines="${esc(pos.full_sym)}"
+                 data-elapsed="${pos.elapsed_s || 0}">↺ actualizar</button></div>`;
+      }
+    }
+
+    const dActive = detState === 'detalles' ? 'active' : '';
+    const sActive = detState === 'salud'    ? 'active' : '';
+    detailsHtml = `
+    <div class="pos-details">
+      <div class="pos-detail-tabs">
+        <button class="pos-detail-tab ${dActive}"
+          data-detail-tab="detalles" data-pos-key="${esc(key)}">Detalles</button>
+        <button class="pos-detail-tab ${sActive}"
+          data-detail-tab="salud" data-pos-key="${esc(key)}"
+          data-sym="${esc(pos.full_sym)}" data-elapsed="${pos.elapsed_s || 0}">Salud</button>
       </div>
-    </div>` : '';
+      ${tabDetalles}${tabSalud}
+    </div>`;
+  }
 
   return `
   <div class="pos-card">
@@ -591,9 +693,9 @@ function renderPositions(positions) {
 
   // Limpiar sets de estado de posiciones que ya desaparecieron del snapshot
   const activeKeys = new Set((positions || []).map(p => `${p.full_sym}_${p.side}`));
-  for (const k of [..._closingPos])     if (!activeKeys.has(k)) _closingPos.delete(k);
-  for (const k of [..._pendingClose])   if (!activeKeys.has(k)) _pendingClose.delete(k);
-  for (const k of [..._proDetailsOpen]) if (!activeKeys.has(k)) _proDetailsOpen.delete(k);
+  for (const k of [..._closingPos])           if (!activeKeys.has(k)) _closingPos.delete(k);
+  for (const k of [..._pendingClose])         if (!activeKeys.has(k)) _pendingClose.delete(k);
+  for (const k of _proDetailState.keys())    if (!activeKeys.has(k)) _proDetailState.delete(k);
 
   const html = n ? positions.map(buildPositionCard).join('') : '<div class="empty-state">Sin posiciones abiertas</div>';
 
@@ -838,13 +940,35 @@ applyProModeCfg();
 // ── Event delegation: botones de acción Lite (sobreviven re-renders) ──────────
 
 document.getElementById('positions-container')?.addEventListener('click', async e => {
-  // Toggle detalles Pro
+  // Toggle detalles Pro (abrir → tab detalles por defecto; cerrar)
   const toggleBtn = e.target.closest('[data-toggle-details]');
   if (toggleBtn) {
     const key = toggleBtn.dataset.toggleDetails;
-    if (_proDetailsOpen.has(key)) _proDetailsOpen.delete(key);
-    else _proDetailsOpen.add(key);
+    if (_proDetailState.has(key)) _proDetailState.delete(key);
+    else _proDetailState.set(key, 'detalles');
     if (lastSnap) renderPositions(lastSnap.positions || []);
+    return;
+  }
+
+  // Cambiar tab (Detalles / Salud)
+  const tabBtn = e.target.closest('[data-detail-tab]');
+  if (tabBtn) {
+    const key = tabBtn.dataset.posKey;
+    const tab = tabBtn.dataset.detailTab;
+    _proDetailState.set(key, tab);
+    if (tab === 'salud') _fetchKlines(tabBtn.dataset.sym, parseInt(tabBtn.dataset.elapsed || '0', 10));
+    if (lastSnap) renderPositions(lastSnap.positions || []);
+    return;
+  }
+
+  // Reload klines manualmente
+  const reloadBtn = e.target.closest('[data-reload-klines]');
+  if (reloadBtn) {
+    const sym     = reloadBtn.dataset.reloadKlines;
+    const elapsed = parseInt(reloadBtn.dataset.elapsed || '0', 10);
+    const tf      = _klineTf(elapsed);
+    _klineCache.delete(`${sym}_${tf}`);   // forzar re-fetch
+    _fetchKlines(sym, elapsed);
     return;
   }
 

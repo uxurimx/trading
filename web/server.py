@@ -511,6 +511,30 @@ async def api_symbols():
     return JSONResponse({"symbols": result})
 
 
+@app.get("/api/klines/{symbol}")
+async def api_klines(symbol: str, tf: str = "15", limit: int = 60):
+    """Velas OHLCV del símbolo para el mini chart de Salud."""
+    sym = symbol.upper()
+    try:
+        data = await _exec._get("/v5/market/kline", {
+            "category": "linear",
+            "symbol":   sym,
+            "interval": tf,
+            "limit":    str(min(int(limit), 200)),
+        })
+        raw = data.get("result", {}).get("list", []) or []
+        klines = [
+            {"t": int(k[0]), "o": float(k[1]), "h": float(k[2]),
+             "l": float(k[3]), "c": float(k[4]), "v": float(k[5])}
+            for k in raw
+        ]
+        klines.reverse()   # Bybit devuelve más reciente primero
+        return JSONResponse({"klines": klines, "tf": tf})
+    except Exception as e:
+        log.error("api_klines %s: %s", sym, e)
+        return JSONResponse({"klines": [], "tf": tf, "error": str(e)})
+
+
 @app.get("/api/analyze/{symbol}")
 async def api_analyze(symbol: str):
     """Señales de mercado para un símbolo."""

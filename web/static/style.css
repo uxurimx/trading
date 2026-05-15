@@ -306,6 +306,40 @@ body {
 .pos-detail-cell.tp   .val { color: var(--green-dim); }
 .pos-detail-cell.lev  .val { color: var(--text-sub); }
 
+/* Tabs de detalles (Detalles / Salud) */
+.pos-detail-tabs {
+  display: flex; gap: 0; margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.pos-detail-tab {
+  font-size: 9px; font-weight: 700; letter-spacing: .5px;
+  color: var(--text-sub); background: none; border: none;
+  padding: 5px 10px; cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color .15s, border-color .15s;
+  text-transform: uppercase;
+}
+.pos-detail-tab:hover { color: var(--text); }
+.pos-detail-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* Mini chart de velas */
+.candle-chart-wrap {
+  background: var(--bg-panel);
+  border-radius: 4px;
+  padding: 8px 4px 4px;
+  margin-top: 2px;
+  overflow: hidden;
+}
+.candle-chart-wrap svg { display: block; }
+.candle-chart-loading {
+  text-align: center; font-size: 10px; color: var(--text-sub);
+  padding: 30px 0;
+}
+.candle-chart-tf {
+  font-size: 9px; color: var(--text-dim); text-align: right;
+  margin-top: 4px; letter-spacing: .3px;
+}
+
 /* Prices grid */
 .pos-body   { padding: 10px 12px; }
 .pos-prices {
@@ -324,7 +358,7 @@ body {
 .price-cell.liq  .val { color: var(--orange); font-size: 10px; }
 
 /* ── Progress bar: SL → TP con indicador de precio actual ─────────────────── */
-.prog-wrap    { margin-bottom: 18px; }
+.prog-wrap    { margin-bottom: 18px; margin-top: 23px; }
 .prog-labels  {
   display: flex; justify-content: space-between;
   font-size: 9px; color: var(--text-dim); margin-bottom: 4px;
@@ -337,7 +371,7 @@ body {
   background: var(--border);
   border-radius: 4px;
   overflow: visible;
-  margin: 14px 0 44px;   /* arriba: solo BE label (-22px); abajo: milestones + mark label */
+  margin:28px 0 28px;   /* arriba: label (22px) + label-height (~14px) + BE label (8px); abajo: milestones */
 }
 
 /* Zona de riesgo (SL → entrada) */
@@ -405,10 +439,10 @@ body {
 .prog-mark-outer { stroke: #0d0d0d; }
 [data-theme="light"] .prog-mark-outer { stroke: #f0f0f0; }
 
-/* Label PnL — debajo de la barra (no obstruye BE/milestone labels de arriba) */
+/* Label PnL — encima del marcador SVG (arriba de la barra) */
 .prog-mark-label {
   position: absolute;
-  top: calc(100% + 22px);   /* debajo de milestone labels (bottom:-20px) */
+  bottom: calc(100% + 10px);  /* SVG mide 18px centrado; 22px deja ~13px de aire sobre el anillo */
   transform: translateX(-50%);
   font-size: 9px;
   font-weight: 600;
