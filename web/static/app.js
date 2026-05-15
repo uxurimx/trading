@@ -54,45 +54,7 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// ── Reloj ─────────────────────────────────────────────────────────────────────
-function tickClock() {
-  const d  = new Date();
-  const p  = n => String(n).padStart(2, '0');
-  document.getElementById('clock').textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-setInterval(tickClock, 1000);
-tickClock();
-
-// ── Controles de tema y moneda ────────────────────────────────────────────────
-
-function applyTheme() {
-  document.documentElement.setAttribute('data-theme', _theme);
-  document.getElementById('btn-theme').textContent = _theme === 'dark' ? '☀' : '☾';
-  localStorage.setItem('qts_theme', _theme);
-}
-
-function applyCurrency() {
-  const btn = document.getElementById('btn-currency');
-  const lbl = document.getElementById('mxn-rate-lbl');
-  btn.textContent = _showMxn ? 'MXN' : 'USD';
-  btn.classList.toggle('active', _showMxn);
-  if (lbl) lbl.style.display = _showMxn ? 'inline' : 'none';
-  localStorage.setItem('qts_mxn', _showMxn);
-  if (lastSnap) render(lastSnap);
-}
-
-document.getElementById('btn-theme').addEventListener('click', () => {
-  _theme = _theme === 'dark' ? 'light' : 'dark';
-  applyTheme();
-});
-
-document.getElementById('btn-currency').addEventListener('click', () => {
-  _showMxn = !_showMxn;
-  applyCurrency();
-});
-
-applyTheme();
-applyCurrency();
+// (theme/currency/clock init is at the bottom after DOM is ready)
 
 // ── Render account ────────────────────────────────────────────────────────────
 
@@ -364,18 +326,25 @@ function buildPositionCard(pos) {
   </div>`;
 }
 
-// ── Render posiciones ─────────────────────────────────────────────────────────
+// ── Render posiciones (desktop + mobile container) ────────────────────────────
 
 function renderPositions(positions) {
-  const container = document.getElementById('positions-container');
-  const count     = document.getElementById('pos-count');
-  if (!positions || positions.length === 0) {
-    container.innerHTML = '<div class="empty-state">Sin posiciones abiertas</div>';
-    count.textContent   = '';
-    return;
-  }
-  count.textContent   = `${positions.length} activa${positions.length > 1 ? 's' : ''}`;
-  container.innerHTML = positions.map(buildPositionCard).join('');
+  const html  = positions && positions.length
+    ? positions.map(buildPositionCard).join('')
+    : '<div class="empty-state">Sin posiciones abiertas</div>';
+  const label = positions && positions.length
+    ? `${positions.length} activa${positions.length > 1 ? 's' : ''}`
+    : '';
+
+  const c1 = document.getElementById('positions-container');
+  const c2 = document.getElementById('positions-container-mob');
+  if (c1) { c1.innerHTML = html; }
+  if (c2) { c2.innerHTML = html; }
+
+  const pc1 = document.getElementById('pos-count');
+  const pc2 = document.getElementById('pos-count-mob');
+  if (pc1) pc1.textContent = label;
+  if (pc2) pc2.textContent = label;
 }
 
 // ── Render PnL por símbolo ────────────────────────────────────────────────────
@@ -396,8 +365,76 @@ function renderSymbolPnl(items) {
 // ── MXN rate label ────────────────────────────────────────────────────────────
 
 function renderMxnLabel(rate) {
-  const el = document.getElementById('mxn-rate-lbl');
-  if (el) el.textContent = `1 USD = ${rate.toFixed(2)} MXN`;
+  const el  = document.getElementById('mxn-rate-lbl');
+  const el2 = document.getElementById('cfg-mxn-rate');
+  if (el)  el.textContent  = `1 USD = ${rate.toFixed(2)} MXN`;
+  if (el2) el2.textContent = `1 USD = ${rate.toFixed(2)} MXN`;
+}
+
+// ── Historial de trades ───────────────────────────────────────────────────────
+
+let _historyLoaded = false;
+
+function fmtTs(ms) {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function buildHistoryCard(t) {
+  const isLong  = (t.side || '').toLowerCase() === 'buy';
+  const dirCls  = isLong ? 'long' : 'short';
+  const dirLbl  = isLong ? 'LONG' : 'SHORT';
+  const pnlCls  = pnlClass(t.closed_pnl);
+  const roi     = t.entry_price > 0
+    ? ((t.exit_price - t.entry_price) / t.entry_price * 100 * (isLong ? 1 : -1) * t.leverage)
+    : 0;
+
+  return `
+  <div class="hist-card">
+    <div class="hist-header">
+      <span class="pos-symbol">${esc(t.symbol)}</span>
+      <span class="pos-dir ${dirCls}">${dirLbl}</span>
+      <span class="pos-leverage">${t.leverage}x</span>
+      <span class="hist-pnl ${pnlCls}">${fmtMoney(t.closed_pnl)}</span>
+    </div>
+    <div class="hist-prices">
+      <div class="hist-price-pair">
+        <span class="lbl">ENTRADA</span>
+        <span class="val">${fmtPrice(t.entry_price)}</span>
+      </div>
+      <div class="hist-arrow">→</div>
+      <div class="hist-price-pair">
+        <span class="lbl">SALIDA</span>
+        <span class="val">${fmtPrice(t.exit_price)}</span>
+      </div>
+      <div class="hist-roi ${pnlCls}">${roi >= 0 ? '+' : ''}${roi.toFixed(2)}% ROI</div>
+    </div>
+    <div class="hist-meta">
+      <span>📅 ${fmtTs(t.open_ts)}</span>
+      <span>⏱ ${esc(t.duration_fmt || '—')}</span>
+      <span>${t.qty} contratos</span>
+    </div>
+  </div>`;
+}
+
+async function loadHistory() {
+  const c = document.getElementById('history-container');
+  c.innerHTML = '<div class="empty-state">Cargando…</div>';
+  try {
+    const res  = await fetch('/api/history');
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (!data.history || data.history.length === 0) {
+      c.innerHTML = '<div class="empty-state">Sin trades cerrados recientes</div>';
+      return;
+    }
+    c.innerHTML = data.history.map(buildHistoryCard).join('');
+    _historyLoaded = true;
+  } catch (e) {
+    c.innerHTML = `<div class="empty-state c-red">Error: ${esc(String(e))}</div>`;
+  }
 }
 
 // ── Render completo ───────────────────────────────────────────────────────────
@@ -413,11 +450,123 @@ function render(data) {
     renderMxnLabel(_mxnRate);
   }
 
-  const ts = new Date(data.ts);
-  const p  = n => String(n).padStart(2, '0');
-  document.getElementById('last-update').textContent =
-    `actualizado ${p(ts.getHours())}:${p(ts.getMinutes())}:${p(ts.getSeconds())}`;
+  // Config tab: estado cuenta
+  const cfgConn  = document.getElementById('cfg-conn-badge');
+  const cfgWal   = document.getElementById('cfg-wallet');
+  const cfgUpd   = document.getElementById('cfg-last-update');
+  if (cfgConn) {
+    cfgConn.className   = data.account.connected ? 'badge badge-ok' : 'badge badge-connecting';
+    cfgConn.textContent = data.account.connected ? '● EN VIVO' : '● CONECTANDO';
+  }
+  if (cfgWal)  cfgWal.textContent  = fmtMoneyAbs(data.account.wallet_balance ?? data.account.equity);
+  if (cfgUpd) {
+    const ts = new Date(data.ts);
+    const p  = n => String(n).padStart(2, '0');
+    cfgUpd.textContent = `${p(ts.getHours())}:${p(ts.getMinutes())}:${p(ts.getSeconds())}`;
+  }
+
+  const luEl = document.getElementById('last-update');
+  if (luEl) {
+    const ts = new Date(data.ts);
+    const p  = n => String(n).padStart(2, '0');
+    luEl.textContent = `actualizado ${p(ts.getHours())}:${p(ts.getMinutes())}:${p(ts.getSeconds())}`;
+  }
 }
+
+// ── Tab router ────────────────────────────────────────────────────────────────
+
+let _activeTab = localStorage.getItem('qts_tab') || 'dashboard';
+
+function switchTab(name) {
+  _activeTab = name;
+  localStorage.setItem('qts_tab', name);
+
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(b => b.classList.remove('active'));
+
+  const view = document.getElementById(`view-${name}`);
+  if (view) view.classList.add('active');
+
+  const btn = document.querySelector(`.nav-tab[data-tab="${name}"]`);
+  if (btn) btn.classList.add('active');
+
+  if (name === 'historial' && !_historyLoaded) loadHistory();
+}
+
+document.querySelectorAll('.nav-tab').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+document.getElementById('btn-refresh-history')?.addEventListener('click', () => {
+  _historyLoaded = false;
+  loadHistory();
+});
+
+// Restaurar tab activo al cargar
+switchTab(_activeTab);
+
+// ── Config tab: controles ─────────────────────────────────────────────────────
+
+function applyCurrencyCfg() {
+  const btn    = document.getElementById('btn-currency-cfg');
+  const btnTop = document.getElementById('btn-currency');
+  const lbl    = document.getElementById('mxn-rate-lbl');
+  const label  = _showMxn ? 'MXN' : 'USD';
+  if (btn) { btn.textContent = label; btn.classList.toggle('active', _showMxn); }
+  if (btnTop) { btnTop.textContent = label; btnTop.classList.toggle('active', _showMxn); }
+  if (lbl) lbl.style.display = _showMxn ? 'inline' : 'none';
+  localStorage.setItem('qts_mxn', _showMxn);
+}
+
+function applyThemeCfg() {
+  document.documentElement.setAttribute('data-theme', _theme);
+  const btnTop = document.getElementById('btn-theme');
+  const btnCfg = document.getElementById('btn-theme-cfg');
+  const label  = _theme === 'dark' ? 'OSCURO' : 'CLARO';
+  if (btnTop) btnTop.textContent = _theme === 'dark' ? '☀' : '☾';
+  if (btnCfg) btnCfg.textContent = label;
+  localStorage.setItem('qts_theme', _theme);
+}
+
+document.getElementById('btn-theme-cfg')?.addEventListener('click', () => {
+  _theme = _theme === 'dark' ? 'light' : 'dark';
+  applyThemeCfg();
+  if (lastSnap) render(lastSnap);
+});
+
+document.getElementById('btn-currency-cfg')?.addEventListener('click', () => {
+  _showMxn = !_showMxn;
+  applyCurrencyCfg();
+  if (lastSnap) render(lastSnap);
+});
+
+// Topbar desktop buttons
+document.getElementById('btn-theme')?.addEventListener('click', () => {
+  _theme = _theme === 'dark' ? 'light' : 'dark';
+  applyThemeCfg();
+  if (lastSnap) render(lastSnap);
+});
+document.getElementById('btn-currency')?.addEventListener('click', () => {
+  _showMxn = !_showMxn;
+  applyCurrencyCfg();
+  if (lastSnap) render(lastSnap);
+});
+
+applyThemeCfg();
+applyCurrencyCfg();
+
+// ── Clock (topbar + mobile topbar) ────────────────────────────────────────────
+function tickClock() {
+  const d  = new Date();
+  const p  = n => String(n).padStart(2, '0');
+  const t  = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  const c1 = document.getElementById('clock');
+  const c2 = document.getElementById('clock-mob');
+  if (c1) c1.textContent = t;
+  if (c2) c2.textContent = t;
+}
+setInterval(tickClock, 1000);
+tickClock();
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 
@@ -438,8 +587,7 @@ function connect() {
 
   ws.onclose = () => {
     const b = document.getElementById('conn-badge');
-    b.className   = 'badge badge-connecting';
-    b.textContent = '● RECONECTANDO';
+    if (b) { b.className = 'badge badge-connecting'; b.textContent = '● RECONECTANDO'; }
     reconnectTimer = setTimeout(connect, 2000);
   };
 }

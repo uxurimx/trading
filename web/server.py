@@ -30,7 +30,7 @@ from core.executor import BybitExecutor
 from streams.market import MarketStream
 from streams.account import AccountStream
 from streams.klines import KlineStream
-from web.calculator import calc_position_metrics
+from web.calculator import calc_position_metrics, format_elapsed
 
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger("qts.web")
@@ -341,6 +341,41 @@ async def ws_endpoint(ws: WebSocket):
 @app.get("/api/snapshot")
 async def api_snapshot():
     return JSONResponse(_build_snapshot())
+
+
+@app.get("/api/history")
+async def api_history():
+    """Historial de trades cerrados vía Bybit closed-pnl."""
+    try:
+        data = await _exec._get("/v5/position/closed-pnl", {
+            "category": "linear",
+            "limit":    "50",
+        })
+        items = data.get("result", {}).get("list", [])
+        history = []
+        for x in items:
+            sym        = x.get("symbol", "")
+            open_ts    = int(x.get("createdTime")  or 0)
+            close_ts   = int(x.get("updatedTime")  or 0)
+            duration_s = max(0, (close_ts - open_ts) // 1000) if open_ts and close_ts else 0
+            history.append({
+                "symbol":      sym.replace("USDT", ""),
+                "full_sym":    sym,
+                "side":        x.get("side", ""),
+                "qty":         float(x.get("qty") or 0),
+                "entry_price": float(x.get("avgEntryPrice") or 0),
+                "exit_price":  float(x.get("avgExitPrice")  or 0),
+                "closed_pnl":  float(x.get("closedPnl")     or 0),
+                "leverage":    int(float(x.get("leverage") or 1)),
+                "open_ts":     open_ts,
+                "close_ts":    close_ts,
+                "duration_s":  duration_s,
+                "duration_fmt": format_elapsed(duration_s),
+            })
+        return JSONResponse({"history": history})
+    except Exception as e:
+        log.error("api_history: %s", e)
+        return JSONResponse({"history": [], "error": str(e)})
 
 
 WEB_PORT = int(getattr(settings, "web_port", 8080))
