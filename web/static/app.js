@@ -2,9 +2,10 @@
 'use strict';
 
 // ── Estado persistido ─────────────────────────────────────────────────────────
-let _theme      = localStorage.getItem('qts_theme')  || 'dark';
-let _showMxn    = localStorage.getItem('qts_mxn')    === 'true';
+let _theme      = localStorage.getItem('qts_theme')    || 'dark';
+let _showMxn    = localStorage.getItem('qts_mxn')      === 'true';
 let _mxnRate    = parseFloat(localStorage.getItem('qts_mxn_rate') || '17.5');
+let _proMode    = localStorage.getItem('qts_pro_mode') !== 'false'; // default: PRO
 let lastSnap    = null;
 
 document.documentElement.setAttribute('data-theme', _theme);
@@ -281,17 +282,20 @@ function buildOrdersRow(orders) {
   return `<div class="pos-signals" style="margin-bottom:8px">${chips}</div>`;
 }
 
-// ── Tarjeta de posición ───────────────────────────────────────────────────────
+// ── Tarjeta de posición — delegador Pro / Lite ────────────────────────────────
 
 function buildPositionCard(pos) {
+  return _proMode ? buildPosCardPro(pos) : buildPosCardLite(pos);
+}
+
+// ── Pro card (sin cambios respecto al original) ───────────────────────────────
+
+function buildPosCardPro(pos) {
   const isLong   = pos.direction === 'LONG';
   const dirClass = isLong ? 'long' : 'short';
-
-  const chgStr  = fmtPct(pos.roi_entry_pct);
-
-  // Absoluto total en SL/TP (directo desde el servidor)
-  const netAtSL = pos.net_at_sl;
-  const netAtTP = pos.net_at_tp;
+  const chgStr   = fmtPct(pos.roi_entry_pct);
+  const netAtSL  = pos.net_at_sl;
+  const netAtTP  = pos.net_at_tp;
 
   return `
   <div class="pos-card">
@@ -301,9 +305,7 @@ function buildPositionCard(pos) {
       <span class="pos-leverage">${pos.leverage}x</span>
       <span class="pos-time">⏱ ${pos.elapsed_fmt}</span>
     </div>
-
     <div class="pos-body">
-
       <div class="pos-prices">
         <div class="price-cell entry">
           <div class="lbl">ENTRADA</div>
@@ -322,9 +324,7 @@ function buildPositionCard(pos) {
           <div class="val">${fmtPrice(pos.tp) || '—'}</div>
         </div>
       </div>
-
       ${buildProgressBar(pos)}
-
       <div class="pos-metrics">
         <div class="pnl-cell">
           <div class="lbl">EN SL <span style="color:var(--text-sub);font-size:8px">(${fmtPrice(pos.sl)})</span></div>
@@ -337,10 +337,185 @@ function buildPositionCard(pos) {
           <div class="sub">bruto · −fee ${fmtMoneyAbs(pos.exit_fee_tp, 4)}</div>
         </div>
       </div>
-
       ${buildOrdersRow(pos.orders)}
       ${buildSignalChips(pos)}
     </div>
+  </div>`;
+}
+
+// ── Lite: detectar marcador SL disponible ────────────────────────────────────
+
+function _findSLTarget(pos) {
+  const isLong = pos.direction === 'LONG';
+  const mark   = pos.mark;
+  const curSL  = pos.sl || 0;
+
+  const candidates = [];
+  if (pos.breakeven_price > 0) candidates.push({ label: 'BE', price: pos.breakeven_price });
+  (pos.milestones || []).forEach(m => candidates.push({ label: `${m.pct}%`, price: m.price }));
+
+  const passed = candidates.filter(c =>
+    isLong ? (mark >= c.price && c.price > curSL)
+           : (mark <= c.price && c.price < curSL)
+  );
+  if (!passed.length) return null;
+  return isLong
+    ? passed.sort((a, b) => b.price - a.price)[0]
+    : passed.sort((a, b) => a.price - b.price)[0];
+}
+
+// ── Lite: barra de progreso simplificada ──────────────────────────────────────
+
+function buildProgressBarLite(pos) {
+  const isLong   = pos.direction === 'LONG';
+  const entryPct = pos.entry_pct_bar;
+  const markPct  = pos.mark_pct_bar;
+  const bePct    = pos.be_pct_bar ?? entryPct;
+  const progress = pos.progress_pct;
+
+  // Zonas de fondo (misma lógica que Pro)
+  const lossStyle = isLong
+    ? `left:0%;width:${entryPct.toFixed(1)}%`
+    : `left:${entryPct.toFixed(1)}%;width:${(100 - entryPct).toFixed(1)}%`;
+  let beZoneStyle = '';
+  if (pos.be_pct_bar != null) {
+    if (isLong) { const w = Math.max(0, bePct - entryPct); beZoneStyle = `left:${entryPct.toFixed(1)}%;width:${w.toFixed(1)}%`; }
+    else        { const w = Math.max(0, entryPct - bePct); beZoneStyle = `left:${bePct.toFixed(1)}%;width:${w.toFixed(1)}%`; }
+  }
+  const profitStyle = isLong
+    ? `left:${bePct.toFixed(1)}%;width:${(100 - bePct).toFixed(1)}%`
+    : `left:0%;width:${bePct.toFixed(1)}%`;
+
+  // Fill tricolor
+  const mark  = pos.mark;
+  const bePx  = pos.breakeven_price || pos.entry;
+  let fillState;
+  if (isLong) {
+    if (mark >= bePx)        fillState = 'profit';
+    else if (mark >= pos.entry) fillState = 'be';
+    else                     fillState = 'loss';
+  } else {
+    if (mark <= bePx)        fillState = 'profit';
+    else if (mark <= pos.entry) fillState = 'be';
+    else                     fillState = 'loss';
+  }
+  let fillLeft, fillWidth;
+  if (fillState === 'loss') {
+    if (isLong) { fillLeft = Math.max(0, markPct); fillWidth = Math.max(0, entryPct - Math.max(0, markPct)); }
+    else        { fillLeft = entryPct; fillWidth = Math.max(0, Math.min(100, markPct) - entryPct); }
+  } else {
+    if (isLong) { fillLeft = entryPct; fillWidth = Math.max(0, markPct - entryPct); }
+    else        { fillLeft = Math.max(0, markPct); fillWidth = Math.max(0, entryPct - Math.max(0, markPct)); }
+  }
+  const fillClass = fillState === 'profit' ? 'prog-fill-profit'
+                  : fillState === 'be'     ? 'prog-fill-be'
+                  :                          'prog-fill-loss';
+  const fnCls = fillState === 'profit' ? 'c-green' : fillState === 'be' ? 'c-orange' : 'c-red';
+
+  // Labels con $ en vez de precio
+  const slLbl  = pos.net_at_sl != null ? fmtMoney(pos.net_at_sl) : '—';
+  const tpLbl  = pos.net_at_tp != null ? fmtMoney(pos.net_at_tp) : '—';
+  const pctLbl = `${progress >= 0 ? '+' : ''}${fmt(progress, 1)}%`;
+
+  // Marcador plano — dot CSS puro, sin SVG, sin anillo
+  const dotColor = fillState === 'profit' ? 'var(--green)' : fillState === 'be' ? 'var(--orange)' : 'var(--red)';
+
+  // BE marker
+  const beMarker = (pos.be_pct_bar != null && pos.breakeven_price)
+    ? `<div class="prog-be-marker" style="left:${pos.be_pct_bar.toFixed(1)}%" title="BE: ${esc(fmtPrice(pos.breakeven_price))}"></div>
+       <div class="prog-be-label"  style="left:${pos.be_pct_bar.toFixed(1)}%">BE</div>`
+    : '';
+
+  // Milestone markers (solo %)
+  const msMarkers = (pos.milestones || []).map(m =>
+    `<div class="prog-milestone" style="left:${m.bar_pct.toFixed(1)}%" title="${m.pct}% → ${fmtPrice(m.price)}"></div>
+     <div class="prog-milestone-lbl-lite" style="left:${m.bar_pct.toFixed(1)}%">${m.pct}%</div>`
+  ).join('');
+
+  return `
+  <div class="prog-wrap">
+    <div class="prog-labels">
+      <span class="c-red">SL <strong>${esc(slLbl)}</strong></span>
+      <span class="prog-pct">${esc(pctLbl)} hacia TP</span>
+      <span class="c-green">TP <strong>${esc(tpLbl)}</strong></span>
+    </div>
+    <div class="prog-track prog-track-lite">
+      <div class="prog-zone-loss"   style="${lossStyle}"></div>
+      ${beZoneStyle ? `<div class="prog-zone-be" style="${beZoneStyle}"></div>` : ''}
+      <div class="prog-zone-profit" style="${profitStyle}"></div>
+      <div class="${fillClass}"     style="left:${fillLeft.toFixed(1)}%;width:${fillWidth.toFixed(1)}%"></div>
+      ${beMarker}
+      ${msMarkers}
+      <div class="prog-entry-line" style="left:${entryPct.toFixed(1)}%"></div>
+      <div class="prog-dot-lite"   style="left:${markPct.toFixed(1)}%;background:${dotColor}" title="Mark: ${esc(fmtPrice(pos.mark))}"></div>
+      <div class="prog-dot-lbl-lite ${fnCls}" style="left:${markPct.toFixed(1)}%">${esc(fmtMoney(pos.full_net_pnl))}</div>
+    </div>
+  </div>`;
+}
+
+// ── Lite card ─────────────────────────────────────────────────────────────────
+
+const _pendingClose = new Set(); // "BTCUSDT_Buy" — confirming state persiste entre renders
+
+function buildPosCardLite(pos) {
+  const isLong = pos.direction === 'LONG';
+  const dirCls = isLong ? 'long' : 'short';
+
+  // Color del % de progreso: misma lógica que fill
+  const mark   = pos.mark;
+  const bePx   = pos.breakeven_price || pos.entry;
+  let fillState;
+  if (isLong) {
+    if (mark >= bePx)           fillState = 'profit';
+    else if (mark >= pos.entry) fillState = 'be';
+    else                        fillState = 'loss';
+  } else {
+    if (mark <= bePx)           fillState = 'profit';
+    else if (mark <= pos.entry) fillState = 'be';
+    else                        fillState = 'loss';
+  }
+  const pctCls = fillState === 'profit' ? 'c-green' : fillState === 'be' ? 'c-orange' : 'c-red';
+  const prog   = pos.progress_pct ?? 0;
+  const pctStr = `${prog >= 0 ? '+' : ''}${fmt(prog, 1)}%`;
+
+  // SL move button
+  const slTarget = _findSLTarget(pos);
+  const key      = `${pos.full_sym}_${pos.side}`;
+
+  const slBtnHtml = slTarget
+    ? `<button class="pos-act-btn warn"
+         data-move-sl="${esc(key)}"
+         data-sym="${esc(pos.full_sym)}" data-side="${esc(pos.side)}"
+         data-new-sl="${slTarget.price}"
+         title="Mover SL a ${esc(slTarget.label)}: ${fmtPrice(slTarget.price)}">
+         SL → ${esc(slTarget.label)}
+       </button>`
+    : `<button class="pos-act-btn" disabled title="Ningún marcador superado aún">SL →</button>`;
+
+  const actionsHtml = _pendingClose.has(key)
+    ? `<div class="pos-actions confirming">
+         <span class="pos-confirm-lbl">Cerrar ${esc(pos.symbol)} @ ${fmtPrice(mark)}?</span>
+         <button class="pos-act-btn secondary" data-cancel-close="${esc(key)}">CANCELAR</button>
+         <button class="pos-act-btn danger" data-confirm-close="${esc(key)}"
+           data-sym="${esc(pos.full_sym)}" data-side="${esc(pos.side)}">✓ CERRAR</button>
+       </div>`
+    : `<div class="pos-actions">
+         <button class="pos-act-btn danger" data-close="${esc(key)}">Cerrar</button>
+         ${slBtnHtml}
+         <button class="pos-act-btn" disabled title="Próximamente">+ Más</button>
+       </div>`;
+
+  return `
+  <div class="pos-card pos-card-lite">
+    <div class="pos-header-lite">
+      <span class="pos-symbol pos-sym-lite ${dirCls}">${esc(pos.symbol)}</span>
+      <span class="pos-pct-lite ${pctCls}">${esc(pctStr)}</span>
+      <span class="pos-time">⏱ ${pos.elapsed_fmt}</span>
+    </div>
+    <div style="padding:0 14px">
+      ${buildProgressBarLite(pos)}
+    </div>
+    ${actionsHtml}
   </div>`;
 }
 
@@ -569,6 +744,93 @@ async function loadHistory() {
     c.innerHTML = `<div class="empty-state c-red">Error: ${esc(String(e))}</div>`;
   }
 }
+
+// ── Pro / Lite switch ─────────────────────────────────────────────────────────
+
+function applyProModeCfg() {
+  const btn  = document.getElementById('btn-promode-cfg');
+  const desc = document.getElementById('cfg-mode-desc');
+  if (btn)  btn.textContent  = _proMode ? 'PRO' : 'LITE';
+  if (desc) desc.textContent = _proMode ? 'Datos técnicos completos' : 'Vista simplificada e intuitiva';
+  localStorage.setItem('qts_pro_mode', _proMode);
+  if (lastSnap) renderPositions(lastSnap.positions || []);
+}
+
+document.getElementById('btn-promode-cfg')?.addEventListener('click', () => {
+  _proMode = !_proMode;
+  applyProModeCfg();
+});
+
+applyProModeCfg();
+
+// ── Event delegation: botones de acción Lite (sobreviven re-renders) ──────────
+
+document.getElementById('positions-container')?.addEventListener('click', async e => {
+  // Cerrar — primer clic: pedir confirmación
+  const closeBtn = e.target.closest('[data-close]');
+  if (closeBtn) {
+    _pendingClose.add(closeBtn.dataset.close);
+    if (lastSnap) renderPositions(lastSnap.positions || []);
+    return;
+  }
+
+  // Cancelar cierre
+  const cancelBtn = e.target.closest('[data-cancel-close]');
+  if (cancelBtn) {
+    _pendingClose.delete(cancelBtn.dataset.cancelClose);
+    if (lastSnap) renderPositions(lastSnap.positions || []);
+    return;
+  }
+
+  // Confirmar cierre → llamada al servidor
+  const confirmBtn = e.target.closest('[data-confirm-close]');
+  if (confirmBtn) {
+    const key  = confirmBtn.dataset.confirmClose;
+    const sym  = confirmBtn.dataset.sym;
+    const side = confirmBtn.dataset.side;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = '…';
+    try {
+      const res  = await fetch(`/api/close/${sym}/${side}`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) {
+        alert(`No se pudo cerrar: ${data.error}`);
+        _pendingClose.delete(key);
+        if (lastSnap) renderPositions(lastSnap.positions || []);
+      }
+      // Si hay éxito, el WS snapshot actualizará las posiciones automáticamente
+    } catch (err) {
+      alert(`Error: ${err}`);
+      _pendingClose.delete(key);
+      if (lastSnap) renderPositions(lastSnap.positions || []);
+    }
+    return;
+  }
+
+  // Mover SL al marcador detectado
+  const moveSLBtn = e.target.closest('[data-move-sl]');
+  if (moveSLBtn) {
+    const sym   = moveSLBtn.dataset.sym;
+    const side  = moveSLBtn.dataset.side;
+    const newSL = parseFloat(moveSLBtn.dataset.newSl);
+    const lbl   = moveSLBtn.dataset.lbl;
+    moveSLBtn.disabled = true;
+    moveSLBtn.textContent = '…';
+    try {
+      const res  = await fetch('/api/move-sl', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ symbol: sym, side, new_sl: newSL }),
+      });
+      const data = await res.json();
+      if (!data.success) alert(`No se pudo mover SL: ${data.error}`);
+    } catch (err) {
+      alert(`Error: ${err}`);
+    }
+    // El WS actualizará el SL en ~1 segundo
+    return;
+  }
+});
 
 // ── Render completo ───────────────────────────────────────────────────────────
 

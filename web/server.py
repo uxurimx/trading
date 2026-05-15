@@ -581,6 +581,55 @@ async def api_trade(req: Request):
         return JSONResponse({"success": False, "error": str(e)})
 
 
+@app.post("/api/close/{symbol}/{side}")
+async def api_close_position(symbol: str, side: str):
+    """Cierra una posición a mercado (reduceOnly=True)."""
+    sym = symbol.upper()
+    pos = next(
+        (p for p in _account.state.open_positions() if p.symbol == sym and p.side == side),
+        None,
+    )
+    if not pos:
+        return JSONResponse({"success": False, "error": "Posición no encontrada"})
+    close_side = "Sell" if pos.is_long else "Buy"
+    body = {
+        "category":    "linear",
+        "symbol":      sym,
+        "side":        close_side,
+        "orderType":   "Market",
+        "qty":         str(pos.size),
+        "timeInForce": "IOC",
+        "reduceOnly":  True,
+        "positionIdx": _exec._pos_idx(side),
+    }
+    try:
+        data = await _exec._post("/v5/order/create", body)
+        if data.get("retCode") == 0:
+            log.warning("Position closed: %s %s", sym, side)
+            return JSONResponse({"success": True, "order_id": data["result"].get("orderId", "")})
+        return JSONResponse({"success": False, "error": data.get("retMsg", "error")})
+    except Exception as e:
+        log.error("api_close_position: %s", e)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@app.post("/api/move-sl")
+async def api_move_sl_endpoint(req: Request):
+    """Mueve el SL de una posición al precio indicado."""
+    try:
+        body   = await req.json()
+        symbol = str(body.get("symbol", "")).upper()
+        side   = str(body.get("side", "Buy"))
+        new_sl = float(body.get("new_sl", 0))
+        if not symbol or new_sl <= 0:
+            return JSONResponse({"success": False, "error": "Parámetros inválidos"})
+        ok = await _exec.set_sl_tp(symbol=symbol, sl=new_sl, side=side)
+        return JSONResponse({"success": ok, "error": "" if ok else "No se pudo mover el SL"})
+    except Exception as e:
+        log.error("api_move_sl: %s", e)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
 @app.post("/api/analyses")
 async def api_analyses_save(req: Request):
     """Guarda un nuevo análisis mental."""

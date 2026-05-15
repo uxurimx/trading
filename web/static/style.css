@@ -327,21 +327,17 @@ body {
   border-radius: 0 4px 4px 0;
 }
 /* Fill activo — tricolor según posición respecto a entry/BE/TP */
-.prog-fill-profit {
-  position: absolute; top: 0; height: 100%;
-  background: var(--green); opacity: .75;
-  transition: left .4s, width .4s;
-}
-.prog-fill-be {
-  position: absolute; top: 0; height: 100%;
-  background: var(--orange); opacity: .75;
-  transition: left .4s, width .4s;
-}
+.prog-fill-profit,
+.prog-fill-be,
 .prog-fill-loss {
   position: absolute; top: 0; height: 100%;
-  background: var(--red); opacity: .75;
+  z-index: 1;           /* por encima de las zonas de fondo */
+  min-width: 3px;       /* siempre visible aunque sea mínimo */
   transition: left .4s, width .4s;
 }
+.prog-fill-profit { background: var(--green);  opacity: .85; }
+.prog-fill-be     { background: var(--orange); opacity: .85; }
+.prog-fill-loss   { background: var(--red);    opacity: .85; }
 /* Línea de entrada */
 .prog-entry-line {
   position: absolute; top: -3px; bottom: -3px; width: 2px;
@@ -471,6 +467,87 @@ body {
 .c-orange { color: var(--orange); }
 .c-dim    { color: var(--text-dim); }
 .c-text   { color: var(--text); }
+
+/* ── Lite position card ───────────────────────────────────────────────────── */
+.pos-card-lite .pos-header-lite {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.pos-sym-lite       { font-size: 17px; font-weight: 700; letter-spacing: .5px; }
+.pos-sym-lite.long  { color: var(--green); }
+.pos-sym-lite.short { color: var(--red); }
+.pos-pct-lite       { font-size: 13px; font-weight: 700; letter-spacing: .3px; }
+.pos-card-lite .pos-time { margin-left: auto; font-size: 10px; color: var(--text-dim); }
+
+/* Progress bar Lite variant */
+.prog-track-lite { margin: 16px 0 28px !important; }
+
+/* Marcador Lite: dot CSS plano, perfectamente centrado */
+.prog-dot-lite {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: 2.5px solid var(--bg-card);
+  z-index: 5;
+  transition: left .3s, background .3s;
+  box-shadow: 0 1px 5px rgba(0,0,0,.35);
+}
+[data-theme="light"] .prog-dot-lite { border-color: #f5f5f5; }
+
+/* Label $ — elemento separado, anclado debajo del track */
+.prog-dot-lbl-lite {
+  position: absolute;
+  top: calc(100% + 7px);
+  transform: translateX(-50%);
+  font-size: 10px; font-weight: 700;
+  white-space: nowrap; pointer-events: none;
+  letter-spacing: .2px;
+}
+.prog-dot-lbl-lite.c-green  { color: var(--green); }
+.prog-dot-lbl-lite.c-red    { color: var(--red); }
+.prog-dot-lbl-lite.c-orange { color: var(--orange); }
+
+/* Milestone labels simplificados en Lite (solo %) */
+.prog-milestone-lbl-lite {
+  position: absolute; bottom: -18px;
+  transform: translateX(-50%);
+  font-size: 8px; color: var(--green-dim);
+  white-space: nowrap; pointer-events: none;
+}
+
+/* ── Action buttons (Lite) ────────────────────────────────────────────────── */
+.pos-actions {
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border);
+}
+.pos-actions.confirming { background: var(--red-bg); }
+.pos-act-btn {
+  font-family: inherit;
+  font-size: 10px; font-weight: 700; letter-spacing: .4px;
+  padding: 6px 12px; border-radius: 4px;
+  border: 1px solid var(--border2);
+  background: var(--bg-panel); color: var(--text-dim);
+  cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.pos-act-btn:disabled { opacity: .3; cursor: not-allowed; }
+.pos-act-btn.danger {
+  color: var(--red); border-color: var(--red-dim); background: var(--red-bg);
+}
+.pos-act-btn.danger:hover:not(:disabled) { border-color: var(--red); }
+.pos-act-btn.warn {
+  color: var(--orange); border-color: rgba(206,145,120,.5);
+  background: rgba(206,145,120,.07);
+}
+.pos-act-btn.warn:hover:not(:disabled) { border-color: var(--orange); }
+.pos-act-btn.secondary:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.pos-confirm-lbl {
+  font-size: 10px; color: var(--red); font-weight: 600;
+  flex: 1;
+}
 
 /* ── Symbol PnL row ──────────────────────────────────────────────────────── */
 .symbol-pnl-row { display: flex; flex-wrap: wrap; gap: 7px; }
