@@ -35,6 +35,7 @@ from streams.account import AccountStream
 from streams.klines import KlineStream
 from web.calculator import calc_position_metrics, format_elapsed
 from web.zone_tracker import tracker as _zone_tracker
+from web.liquidity_map import build_liquidity_map
 
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger("qts.web")
@@ -637,6 +638,41 @@ async def api_klines(symbol: str, tf: str = "15", limit: int = 60):
     except Exception as e:
         log.error("api_klines %s: %s", sym, e)
         return JSONResponse({"klines": [], "tf": tf, "error": str(e)})
+
+
+@app.get("/api/liquidity/{symbol}")
+async def api_liquidity(
+    symbol: str,
+    view_min: float = 0.0,
+    view_max: float = 0.0,
+    bucket_mult: float = 1.0,
+):
+    """Mapa de liquidez para el viewport [view_min, view_max] del símbolo."""
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    ms = _market.states.get(sym)
+    if not ms:
+        return JSONResponse({"error": "symbol not streaming"}, status_code=404)
+
+    # Defaults: ±2% alrededor del precio actual si no se especifica viewport
+    price = ms.ticker.last_price or ms.orderbook.mid_price
+    if view_min <= 0 or view_max <= 0 or view_max <= view_min:
+        if price <= 0:
+            return JSONResponse({"error": "no price"}, status_code=503)
+        view_min = price * 0.98
+        view_max = price * 1.02
+
+    payload = build_liquidity_map(
+        ms,
+        _account.state.open_orders,
+        view_min=view_min,
+        view_max=view_max,
+        bucket_mult=max(0.25, min(8.0, bucket_mult)),
+    )
+    if payload is None:
+        return JSONResponse({"error": "no data"}, status_code=503)
+    return JSONResponse(payload)
 
 
 @app.get("/api/analyze/{symbol}")

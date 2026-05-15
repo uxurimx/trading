@@ -372,6 +372,15 @@ function buildProgressBar(pos) {
       <div class="prog-time-legend">Fases ${esc(fmtElapsedShort(totalS))}: ${top}${curHtml ? ' · ' + curHtml : ''}</div>`;
   }
 
+  // Strip gravitacional — comparte viewport con la progress bar
+  const gravStrip = `
+    <div class="prog-gravity">
+      <canvas class="prog-grav-canvas"
+              data-grav-sym="${esc(pos.full_sym)}"
+              data-grav-vmin="${view.min}"
+              data-grav-vmax="${view.max}"></canvas>
+    </div>`;
+
   return `
   <div class="prog-wrap">
     ${zoomCtrls}
@@ -387,6 +396,7 @@ function buildProgressBar(pos) {
       ${markBlock}
       ${oorSl}${oorEntry}${oorBe}${oorMark}${oorTp}
     </div>
+    ${gravStrip}
     ${timeLayer}
   </div>`;
 }
@@ -2038,3 +2048,67 @@ setInterval(() => {
   _updateMarkFromSnap(lastSnap);
   if (_tpMode === 'analysis') _updateAnalysisPreview();
 }, 1000);
+
+// ── Gravity poller — refresca el mapa de liquidez de cada pos-card Pro ──────
+// Cada canvas trae data-grav-sym + view_min/view_max (sincronizados con el
+// zoom de la progress bar). Para cada símbolo único, hace UNA petición con el
+// viewport más amplio y re-renderiza todos los canvases de ese símbolo con su
+// propio viewport.
+const _gravCache = new Map();  // sym → { ts, data }
+let   _gravBusy  = false;
+
+async function _gravTick() {
+  if (_gravBusy) return;
+  _gravBusy = true;
+  try {
+    const canvases = document.querySelectorAll('canvas[data-grav-sym]');
+    if (!canvases.length) return;
+
+    // Agrupa por símbolo y calcula viewport envolvente
+    const bySym = new Map();
+    canvases.forEach(c => {
+      const sym = c.dataset.gravSym;
+      const lo  = parseFloat(c.dataset.gravVmin);
+      const hi  = parseFloat(c.dataset.gravVmax);
+      if (!sym || !(hi > lo)) return;
+      const cur = bySym.get(sym) || { vmin: lo, vmax: hi, canvases: [] };
+      cur.vmin = Math.min(cur.vmin, lo);
+      cur.vmax = Math.max(cur.vmax, hi);
+      cur.canvases.push(c);
+      bySym.set(sym, cur);
+    });
+
+    const now = Date.now();
+    await Promise.all(Array.from(bySym.entries()).map(async ([sym, grp]) => {
+      const cached = _gravCache.get(sym);
+      let data = cached && (now - cached.ts < 1800) ? cached.data : null;
+      if (!data) {
+        try {
+          const url = `/api/liquidity/${encodeURIComponent(sym)}`
+            + `?view_min=${grp.vmin}&view_max=${grp.vmax}`;
+          const r = await fetch(url);
+          if (!r.ok) return;
+          data = await r.json();
+          _gravCache.set(sym, { ts: now, data });
+        } catch (_) { return; }
+      }
+      grp.canvases.forEach(c => {
+        const lo = parseFloat(c.dataset.gravVmin);
+        const hi = parseFloat(c.dataset.gravVmax);
+        QtsGravity.render(c, data, { vmin: lo, vmax: hi });
+      });
+    }));
+
+    // Limpieza de cache para símbolos que ya no están en pantalla
+    const active = new Set(bySym.keys());
+    Array.from(_gravCache.keys()).forEach(k => {
+      if (!active.has(k)) _gravCache.delete(k);
+    });
+  } finally {
+    _gravBusy = false;
+  }
+}
+
+setInterval(_gravTick, 2000);
+// Primer tick rápido para que aparezca en cuanto se monten las cards
+setTimeout(_gravTick, 400);
