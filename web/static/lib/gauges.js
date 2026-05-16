@@ -1,69 +1,81 @@
 /*
  * QtsGauges — cabina del piloto (SVG).
  *
- * Tres instrumentos sobre el campo gravitacional:
- *   · renderPressure(el, p)  — tacómetro 0-100, sector fear/greed/neutral
- *   · renderVelocity(el, v)  — velocímetro 0-100 referenciado a ATR ambiental
- *   · renderRoad(el, r)      — tipo de carretera + leverage hint
- *
- * Todos producen SVG inline ligero. Tema controlado por CSS variables.
+ * Sistema de coords:
+ *   viewBox 0 0 120 70
+ *   center  (60, 55)   radius 46
+ *   Arco semicircular superior: ángulos en [π, 2π].
+ *     π    (180°)   → izquierda     (cos=-1, sin= 0) → (14, 55)
+ *     3π/2 (270°)   → arriba        (cos= 0, sin=-1) → (60,  9)
+ *     2π   (360°)   → derecha       (cos= 1, sin= 0) → (106,55)
+ *   Score 0-100 → ángulo = π + s·π
  */
 (function () {
   'use strict';
 
-  const TAU = Math.PI * 2;
+  const CX = 60, CY = 55, R = 46;
 
-  function arc(cx, cy, r, a0, a1) {
-    // SVG path para un arco entre dos ángulos (radianes)
-    const x0 = cx + r * Math.cos(a0);
-    const y0 = cy + r * Math.sin(a0);
-    const x1 = cx + r * Math.cos(a1);
-    const y1 = cy + r * Math.sin(a1);
-    const large = (a1 - a0) > Math.PI ? 1 : 0;
-    return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
+  function polar(angle, r) {
+    return { x: CX + r * Math.cos(angle), y: CY + r * Math.sin(angle) };
   }
 
-  // Mapea score [0,100] a ángulo dentro de un arco semicircular superior
-  // (de 180°=π a 360°/0°). Es decir, desde izquierda (π) hasta derecha (0).
+  // Path entre dos ángulos. Para semicírculo superior siempre a0 < a1 y |Δ| ≤ π.
+  function arcPath(a0, a1, r) {
+    const p0 = polar(a0, r);
+    const p1 = polar(a1, r);
+    const large = Math.abs(a1 - a0) > Math.PI ? 1 : 0;
+    const sweep = a1 > a0 ? 1 : 0;
+    return `M ${p0.x.toFixed(2)} ${p0.y.toFixed(2)} `
+         + `A ${r} ${r} 0 ${large} ${sweep} ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
+  }
+
   function scoreToAngle(score) {
     const s = Math.max(0, Math.min(100, score)) / 100;
-    return Math.PI - s * Math.PI;   // 0→π (izq); 100→0 (der)
+    return Math.PI + s * Math.PI;          // π (izq) → 2π (der)
   }
 
-  function needle(cx, cy, r, angle, color) {
-    const x = cx + r * Math.cos(angle);
-    const y = cy + r * Math.sin(angle);
-    return `<line x1="${cx}" y1="${cy}" x2="${x.toFixed(2)}" y2="${y.toFixed(2)}"
-             stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
-            <circle cx="${cx}" cy="${cy}" r="3" fill="${color}"/>`;
+  function needle(angle, color) {
+    const tip  = polar(angle, R - 6);
+    const tail = polar(angle, -6);          // pequeña cola opuesta para anclaje visual
+    return `
+      <line x1="${tail.x.toFixed(2)}" y1="${tail.y.toFixed(2)}"
+            x2="${tip.x.toFixed(2)}"  y2="${tip.y.toFixed(2)}"
+            stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="${CX}" cy="${CY}" r="3.5" fill="${color}"/>
+      <circle cx="${CX}" cy="${CY}" r="1.5" fill="#0f172a"/>`;
   }
 
-  // ── Tacómetro de presión ───────────────────────────────────────────────────
+  function svgOpen(extraCls) {
+    return `<svg viewBox="0 0 120 70" class="g-svg ${extraCls || ''}"
+                 preserveAspectRatio="xMidYMid meet">`;
+  }
+
+  // ── Tacómetro de Presión ───────────────────────────────────────────────────
   function renderPressure(el, p) {
     if (!el) return;
     const score = (p && p.score) || 0;
     const side  = (p && p.side)  || 'neutral';
-    const color = side === 'fear' ? '#ef4444'
+    const color = side === 'fear'  ? '#ef4444'
                 : side === 'greed' ? '#22c55e'
-                : '#94a3b8';
-    const ang   = scoreToAngle(score);
-    const cx = 60, cy = 56, r = 44;
+                :                    '#94a3b8';
 
-    // 3 sectores: 0-33 verde tenue, 33-66 ámbar, 66-100 rojo
-    const aFull   = Math.PI;
-    const aMid    = Math.PI - (33/100) * Math.PI;
-    const aHigh   = Math.PI - (66/100) * Math.PI;
-    const lowArc  = arc(cx, cy, r, aFull, aMid);
-    const midArc  = arc(cx, cy, r, aMid,  aHigh);
-    const hiArc   = arc(cx, cy, r, aHigh, 0);
+    // 3 sectores en [π, 2π]: 0-33 verde, 33-66 ámbar, 66-100 rojo
+    const a0   = Math.PI;
+    const a33  = Math.PI + 0.33 * Math.PI;
+    const a66  = Math.PI + 0.66 * Math.PI;
+    const a100 = 2 * Math.PI;
+    const lowArc = arcPath(a0,  a33,  R);
+    const midArc = arcPath(a33, a66,  R);
+    const hiArc  = arcPath(a66, a100, R);
+    const ang    = scoreToAngle(score);
 
     el.innerHTML = `
-      <svg viewBox="0 0 120 76" class="g-svg" preserveAspectRatio="xMidYMid meet">
-        <path d="${lowArc}" stroke="#22c55e" stroke-width="6" fill="none" opacity=".35"/>
-        <path d="${midArc}" stroke="#f59e0b" stroke-width="6" fill="none" opacity=".45"/>
-        <path d="${hiArc}"  stroke="#ef4444" stroke-width="6" fill="none" opacity=".55"/>
-        ${needle(cx, cy, r - 4, ang, color)}
-        <text x="60" y="72" text-anchor="middle" class="g-num">${score.toFixed(0)}</text>
+      ${svgOpen()}
+        <path d="${lowArc}" stroke="#22c55e" stroke-width="5" fill="none" opacity=".45"/>
+        <path d="${midArc}" stroke="#f59e0b" stroke-width="5" fill="none" opacity=".55"/>
+        <path d="${hiArc}"  stroke="#ef4444" stroke-width="5" fill="none" opacity=".65"/>
+        ${needle(ang, color)}
+        <text x="60" y="68" text-anchor="middle" class="g-num">${score.toFixed(0)}</text>
       </svg>
       <div class="g-lbl">
         <span class="g-title">Presión</span>
@@ -77,21 +89,20 @@
     const score = (v && v.score) || 0;
     const pct   = (v && v.pct_per_min) || 0;
     const ref   = (v && v.ref_pct) || 0;
-    const ang   = scoreToAngle(score);
     const color = score > 80 ? '#ef4444'
                 : score > 50 ? '#f59e0b'
-                : '#22d3ee';
-    const cx = 60, cy = 56, r = 44;
-    const baseArc = arc(cx, cy, r, Math.PI, 0);
-    const fillEnd = Math.PI - (Math.min(100, score) / 100) * Math.PI;
-    const fillArc = arc(cx, cy, r, Math.PI, fillEnd);
+                :              '#22d3ee';
+    const ang     = scoreToAngle(score);
+    const baseArc = arcPath(Math.PI, 2 * Math.PI, R);
+    const fillEnd = scoreToAngle(score);
+    const fillArc = arcPath(Math.PI, fillEnd, R);
 
     el.innerHTML = `
-      <svg viewBox="0 0 120 76" class="g-svg" preserveAspectRatio="xMidYMid meet">
-        <path d="${baseArc}" stroke="#1e293b" stroke-width="6" fill="none"/>
-        <path d="${fillArc}" stroke="${color}" stroke-width="6" fill="none" stroke-linecap="round"/>
-        ${needle(cx, cy, r - 4, ang, color)}
-        <text x="60" y="72" text-anchor="middle" class="g-num">${pct.toFixed(2)}<tspan class="g-unit">%/m</tspan></text>
+      ${svgOpen()}
+        <path d="${baseArc}" stroke="#1e293b" stroke-width="5" fill="none"/>
+        <path d="${fillArc}" stroke="${color}" stroke-width="5" fill="none" stroke-linecap="round"/>
+        ${needle(ang, color)}
+        <text x="60" y="68" text-anchor="middle" class="g-num">${pct.toFixed(2)}<tspan class="g-unit"> %/m</tspan></text>
       </svg>
       <div class="g-lbl">
         <span class="g-title">Velocidad</span>
@@ -100,12 +111,44 @@
   }
 
   // ── Carretera ──────────────────────────────────────────────────────────────
+  // Render con SVG para igualar footprint visual con los otros dos gauges.
+  // Cada tipo dibuja una "vista de carril" distinta dentro del mismo viewBox.
   const ROAD_VIS = {
-    highway:  { icon: '═══', color: '#22c55e', tone: 'Autopista' },
-    curvy:    { icon: '∿∿∿', color: '#f59e0b', tone: 'Curvas'    },
-    rough:    { icon: '≈≈≈', color: '#ef4444', tone: 'Terracería'},
-    gridlock: { icon: '▪▪▪', color: '#64748b', tone: 'Atasco'    },
+    highway:  { color: '#22c55e', tone: 'Autopista'  },
+    curvy:    { color: '#f59e0b', tone: 'Curvas'     },
+    rough:    { color: '#ef4444', tone: 'Terracería' },
+    gridlock: { color: '#64748b', tone: 'Atasco'     },
   };
+
+  function roadShape(type, color) {
+    // Líneas dentro del viewBox (área de carril ≈ y∈[10,45], x∈[20,100])
+    switch (type) {
+      case 'highway':
+        return `
+          <line x1="20" y1="20" x2="100" y2="20" stroke="${color}" stroke-width="3"/>
+          <line x1="20" y1="35" x2="100" y2="35" stroke="${color}" stroke-width="3" stroke-dasharray="6 4"/>
+          <line x1="20" y1="50" x2="100" y2="50" stroke="${color}" stroke-width="3"/>`;
+      case 'curvy':
+        return `
+          <path d="M 18 35 Q 35 12, 60 35 T 102 35"
+                stroke="${color}" stroke-width="3" fill="none" stroke-linecap="round"/>`;
+      case 'rough':
+        return `
+          <polyline points="18,38 28,22 38,40 48,20 58,42 68,22 78,40 88,20 102,38"
+                    stroke="${color}" stroke-width="2.5" fill="none" stroke-linejoin="round"/>`;
+      case 'gridlock':
+      default:
+        return `
+          <rect x="22" y="18" width="14" height="8" fill="${color}" opacity=".7"/>
+          <rect x="42" y="18" width="14" height="8" fill="${color}" opacity=".5"/>
+          <rect x="62" y="18" width="14" height="8" fill="${color}" opacity=".5"/>
+          <rect x="82" y="18" width="14" height="8" fill="${color}" opacity=".7"/>
+          <rect x="22" y="38" width="14" height="8" fill="${color}" opacity=".5"/>
+          <rect x="42" y="38" width="14" height="8" fill="${color}" opacity=".7"/>
+          <rect x="62" y="38" width="14" height="8" fill="${color}" opacity=".7"/>
+          <rect x="82" y="38" width="14" height="8" fill="${color}" opacity=".5"/>`;
+    }
+  }
 
   function renderRoad(el, r) {
     if (!el) return;
@@ -116,13 +159,15 @@
     const conf = (r && r.confidence)    || 0;
 
     el.innerHTML = `
-      <div class="g-road g-road-${type}" style="--g-road-color:${vis.color}">
-        <div class="g-road-icon">${vis.icon}</div>
-        <div class="g-road-meta">
-          <div class="g-road-tone">${vis.tone}</div>
-          <div class="g-road-lev">leverage ${lev}</div>
-          <div class="g-road-reg">${reg} · conf ${conf}</div>
-        </div>
+      ${svgOpen('g-svg-road')}
+        ${roadShape(type, vis.color)}
+        <text x="60" y="64" text-anchor="middle" class="g-num"
+              fill="${vis.color}">${lev}</text>
+      </svg>
+      <div class="g-lbl">
+        <span class="g-title">Carretera</span>
+        <span class="g-side" style="color:${vis.color}">${vis.tone}</span>
+        <span class="g-sub">${reg} · conf ${conf}</span>
       </div>`;
   }
 

@@ -259,15 +259,15 @@ def _build_snapshot() -> dict:
                 ms_price  = ms.ticker.last_price if (ms and ms.connected and ms.ticker.last_price > 0) else 0.0
                 live_mark = _mark_prices.get(sym) or ms_price or 0.0
 
-                # Duración: usa tiempo del servidor para evitar created_time corrupto de Bybit
-                pos_key      = f"{sym}_{pos.side}"
-                server_elapsed = time.time() - _pos_first_seen.setdefault(pos_key, time.time())
-                bybit_elapsed  = max(0.0, time.time() - pos.created_time / 1000) if pos.created_time > 0 else 0.0
-                # Si Bybit da un timestamp razonable (< 30 días), usamos el menor; sino solo servidor
+                # Duración: confiar en createdTime de Bybit cuando es razonable.
+                # Sobrevive reinicios del server porque createdTime viene del exchange.
+                # Fallback: _pos_first_seen (server-side) solo si Bybit no da timestamp válido.
+                pos_key       = f"{sym}_{pos.side}"
+                bybit_elapsed = max(0.0, time.time() - pos.created_time / 1000) if pos.created_time > 0 else 0.0
                 if 0 < bybit_elapsed < 30 * 24 * 3600:
-                    elapsed_override = min(bybit_elapsed, server_elapsed)
+                    elapsed_override = bybit_elapsed
                 else:
-                    elapsed_override = server_elapsed
+                    elapsed_override = time.time() - _pos_first_seen.setdefault(pos_key, time.time())
 
                 metrics = calc_position_metrics(pos, live_mark=live_mark,
                                                 elapsed_override=elapsed_override)
@@ -275,7 +275,10 @@ def _build_snapshot() -> dict:
                 # Sampler de zona (cronotopología): clasifica el mark y acumula tiempo.
                 # Corre dentro del snapshot loop (1 Hz) — suficiente para zonas con
                 # duración de minutos/horas; el sampler dedicado complementa a 0.5 Hz.
-                _zone_tracker().sample(pos_key, metrics["geometry"], live_mark or pos.entry_price)
+                opened_hint = pos.created_time / 1000.0 if pos.created_time > 0 else None
+                _zone_tracker().sample(pos_key, metrics["geometry"],
+                                       live_mark or pos.entry_price,
+                                       opened_at_hint=opened_hint)
                 zones_summary = _zone_tracker().summary(pos_key)
 
                 sig = _signals.get(sym, {})

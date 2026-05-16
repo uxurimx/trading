@@ -201,6 +201,18 @@ def initialize_db() -> None:
         )
     """)
 
+    # Cronotopología persistente del ZoneTracker (sobrevive reinicios)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS position_zone_state (
+            pos_key    VARCHAR PRIMARY KEY,
+            opened_at  DOUBLE,
+            last_zone  VARCHAR,
+            last_ts    DOUBLE,
+            zones_json TEXT,
+            updated_at DOUBLE
+        )
+    """)
+
     # Migraciones: agregar columnas si no existen (bases de datos previas)
     for migration in [
         "ALTER TABLE trade_journal ADD COLUMN strategy_tag VARCHAR DEFAULT 'absorcion'",
@@ -1058,3 +1070,62 @@ def get_symbol_stats(symbol: str = None) -> list:
         log.error("get_symbol_stats falló: %s", e)
         return []
 
+
+# ─── Cronotopología (ZoneTracker persistence) ────────────────────────────────
+
+def load_all_zone_states() -> dict:
+    """Devuelve {pos_key: state_dict} para rehidratar el ZoneTracker al arrancar."""
+    try:
+        con = get_connection()
+        rows = con.execute("""
+            SELECT pos_key, opened_at, last_zone, last_ts, zones_json
+            FROM position_zone_state
+        """).fetchall()
+        con.close()
+        out = {}
+        for pk, opened, last_zone, last_ts, zj in rows:
+            try:
+                zones = json.loads(zj) if zj else {}
+            except Exception:
+                zones = {}
+            out[pk] = {
+                "opened_at": float(opened or 0),
+                "last_zone": last_zone,
+                "last_ts":   float(last_ts or 0),
+                "zones":     zones,
+            }
+        return out
+    except Exception as e:
+        log.error("load_all_zone_states falló: %s", e)
+        return {}
+
+
+def save_zone_state(pos_key: str, opened_at: float, last_zone, last_ts: float, zones: dict) -> None:
+    """Upsert del estado por pos_key. Llamado con debounce desde ZoneTracker."""
+    try:
+        con = get_connection()
+        con.execute("""
+            INSERT OR REPLACE INTO position_zone_state
+                (pos_key, opened_at, last_zone, last_ts, zones_json, updated_at)
+            VALUES (?,?,?,?,?,?)
+        """, (
+            pos_key,
+            float(opened_at or 0),
+            last_zone,
+            float(last_ts or 0),
+            json.dumps(zones),
+            time.time(),
+        ))
+        con.close()
+    except Exception as e:
+        log.error("save_zone_state(%s) falló: %s", pos_key, e)
+
+
+def delete_zone_state(pos_key: str) -> None:
+    """Borra el estado de una posición (al cerrarse el trade)."""
+    try:
+        con = get_connection()
+        con.execute("DELETE FROM position_zone_state WHERE pos_key = ?", (pos_key,))
+        con.close()
+    except Exception as e:
+        log.error("delete_zone_state(%s) falló: %s", pos_key, e)

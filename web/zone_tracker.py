@@ -2,8 +2,8 @@
 web/zone_tracker.py — cronotopología del trade.
 
 Clasifica el mark price en una de 8 zonas y acumula tiempo cocinado por zona.
-El estado se mantiene en memoria por pos_key. El frontend lee `summary(pos_key)`
-desde el snapshot para renderizar el heatmap temporal, bubbles y donut.
+El estado se mantiene en memoria por pos_key y se persiste en DuckDB
+(position_zone_state) con debounce — sobrevive reinicios del server.
 
 Zonas (LONG; en SHORT se invierten los signos):
     below_sl  : mark <  sl
@@ -17,9 +17,12 @@ Zonas (LONG; en SHORT se invierten los signos):
 """
 from __future__ import annotations
 
+import logging
 import time
 from threading import Lock
 from typing import Optional
+
+log = logging.getLogger("qts.zones")
 
 ZONES = ['below_sl', 'sl_entry', 'entry_be',
          'be_25', '25_50', '50_75', '75_tp', 'above_tp']
@@ -34,6 +37,10 @@ ZONE_LABELS = {
     '75_tp':    '75→TP',
     'above_tp': 'TP+',
 }
+
+# Debounce de flush a DB: cada 10s o cada 30 samples por pos_key.
+FLUSH_INTERVAL_S = 10.0
+FLUSH_EVERY_N    = 30
 
 
 def classify_zone(geom: dict, mark: float) -> Optional[str]:
@@ -72,17 +79,81 @@ def classify_zone(geom: dict, mark: float) -> Optional[str]:
 
 
 class ZoneTracker:
-    """State machine de residencia en zonas, thread-safe."""
+    """State machine de residencia en zonas, thread-safe y persistente."""
 
     def __init__(self) -> None:
-        self._lock = Lock()
+        self._lock  = Lock()
         self._st: dict = {}
+        self._dirty:        dict[str, int] = {}    # pos_key → samples desde último flush
+        self._last_flush:   dict[str, float] = {}  # pos_key → ts del último flush
+        self._hydrate()
 
-    def _new_pos(self, now: float) -> dict:
+    # ── Hidratación desde DB ─────────────────────────────────────────────────
+    def _hydrate(self) -> None:
+        """Carga el estado persistido al arrancar el server."""
+        try:
+            from core.db import load_all_zone_states
+            saved = load_all_zone_states()
+        except Exception as e:
+            log.warning("ZoneTracker hydrate falló: %s", e)
+            return
+        if not saved:
+            return
+        now = time.time()
+        for pk, s in saved.items():
+            zones = s.get("zones") or {}
+            # Asegurar todas las zonas presentes (compatibilidad si cambia ZONES)
+            full_zones = {
+                z: {
+                    'seconds':        float(zones.get(z, {}).get('seconds', 0.0)),
+                    'visits':         int(zones.get(z, {}).get('visits', 0)),
+                    'max_streak':     float(zones.get(z, {}).get('max_streak', 0.0)),
+                    'current_streak': float(zones.get(z, {}).get('current_streak', 0.0)),
+                    'first_entered':  zones.get(z, {}).get('first_entered'),
+                    'last_entered':   zones.get(z, {}).get('last_entered'),
+                } for z in ZONES
+            }
+            self._st[pk] = {
+                'opened_at': s.get("opened_at") or now,
+                'last_zone': s.get("last_zone"),
+                'last_ts':   s.get("last_ts") or now,
+                'zones':     full_zones,
+            }
+            self._last_flush[pk] = now
+        log.info("ZoneTracker: rehidratadas %d posiciones desde DB", len(saved))
+
+    # ── Flush a DB ───────────────────────────────────────────────────────────
+    def _flush(self, pos_key: str) -> None:
+        """Persiste un pos_key. Llamar fuera del lock cuando sea posible."""
+        st = self._st.get(pos_key)
+        if not st:
+            return
+        try:
+            from core.db import save_zone_state
+            save_zone_state(
+                pos_key,
+                st['opened_at'],
+                st['last_zone'],
+                st['last_ts'],
+                st['zones'],
+            )
+            self._dirty[pos_key]      = 0
+            self._last_flush[pos_key] = time.time()
+        except Exception as e:
+            log.debug("flush %s falló: %s", pos_key, e)
+
+    def _maybe_flush(self, pos_key: str) -> None:
+        n   = self._dirty.get(pos_key, 0)
+        ts0 = self._last_flush.get(pos_key, 0)
+        if n >= FLUSH_EVERY_N or (n > 0 and time.time() - ts0 >= FLUSH_INTERVAL_S):
+            self._flush(pos_key)
+
+    # ── Plantilla de un pos nuevo ────────────────────────────────────────────
+    def _new_pos(self, opened_at: float) -> dict:
         return {
-            'opened_at': now,
+            'opened_at': opened_at,
             'last_zone': None,
-            'last_ts':   now,
+            'last_ts':   opened_at,
             'zones': {
                 z: {
                     'seconds':        0.0,
@@ -95,38 +166,56 @@ class ZoneTracker:
             },
         }
 
-    def sample(self, pos_key: str, geom: dict, mark: float) -> Optional[str]:
-        """Registra una muestra. Devuelve la zona clasificada o None."""
+    # ── API ──────────────────────────────────────────────────────────────────
+    def sample(
+        self,
+        pos_key: str,
+        geom: dict,
+        mark: float,
+        opened_at_hint: Optional[float] = None,
+    ) -> Optional[str]:
+        """
+        Registra una muestra. Devuelve la zona clasificada o None.
+
+        opened_at_hint: timestamp epoch en segundos del momento real de apertura
+        del trade (típicamente Bybit createdTime/1000). Solo se usa la primera
+        vez que se ve este pos_key (cuando se crea el estado en memoria).
+        """
         now  = time.time()
         zone = classify_zone(geom, mark)
         if zone is None:
             return None
 
+        do_flush = False
         with self._lock:
             st = self._st.get(pos_key)
             if st is None:
-                st = self._new_pos(now)
+                # Trade nuevo: usar opened_at de Bybit si está disponible
+                opened = opened_at_hint if (opened_at_hint and opened_at_hint > 0) else now
+                st = self._new_pos(opened)
                 self._st[pos_key] = st
+                # Si el opened_at es del pasado (típico tras reinicio), el primer
+                # sample también debe cubrir el tiempo transcurrido — pero no
+                # sabemos en qué zona estuvo. Lo dejamos sin acumular: lo que
+                # importa es que el `opened_at` quede correcto.
+                self._last_flush[pos_key] = 0  # forzar flush rápido
 
             prev = st['last_zone']
             dt   = max(0.0, now - st['last_ts'])
 
             if prev is None:
-                # Primera muestra: registrar visita inicial
                 z = st['zones'][zone]
                 z['visits'] += 1
                 z['first_entered'] = z['first_entered'] or now
                 z['last_entered']  = now
                 z['current_streak'] = 0.0
             elif prev == zone:
-                # Continúa en la misma zona: acumular tiempo
                 z = st['zones'][zone]
                 z['seconds']        += dt
                 z['current_streak'] += dt
                 if z['current_streak'] > z['max_streak']:
                     z['max_streak'] = z['current_streak']
             else:
-                # Transición: el dt cuenta para la zona PREVIA hasta este sample
                 pz = st['zones'][prev]
                 pz['seconds']        += dt
                 pz['current_streak'] = 0.0
@@ -138,10 +227,17 @@ class ZoneTracker:
 
             st['last_zone'] = zone
             st['last_ts']   = now
+            self._dirty[pos_key] = self._dirty.get(pos_key, 0) + 1
+
+            n   = self._dirty[pos_key]
+            ts0 = self._last_flush.get(pos_key, 0)
+            do_flush = n >= FLUSH_EVERY_N or (n > 0 and now - ts0 >= FLUSH_INTERVAL_S)
+
+        if do_flush:
+            self._flush(pos_key)
         return zone
 
     def summary(self, pos_key: str) -> Optional[dict]:
-        """Resumen agregado para el snapshot. None si no hay datos."""
         with self._lock:
             st = self._st.get(pos_key)
             if not st:
@@ -172,6 +268,13 @@ class ZoneTracker:
     def forget(self, pos_key: str) -> None:
         with self._lock:
             self._st.pop(pos_key, None)
+            self._dirty.pop(pos_key, None)
+            self._last_flush.pop(pos_key, None)
+        try:
+            from core.db import delete_zone_state
+            delete_zone_state(pos_key)
+        except Exception as e:
+            log.debug("forget delete_zone_state %s: %s", pos_key, e)
 
     def known_keys(self) -> list:
         with self._lock:
