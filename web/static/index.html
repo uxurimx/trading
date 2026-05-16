@@ -492,8 +492,33 @@
 
 </div>
 
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!-- GRAVITY PANEL VERTICAL — drawer derecho (desktop) / bottom-sheet (mob) -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div id="gvp-backdrop" class="gvp-backdrop"></div>
+<aside id="gvp-panel" class="gvp-panel" aria-hidden="true">
+  <div class="gvp-hdr">
+    <div class="gvp-hdr-titles">
+      <span class="gvp-hdr-sym"   data-gvp-sym>—</span>
+      <span class="gvp-hdr-current" data-gvp-current>—</span>
+    </div>
+    <span class="gvp-hdr-range" data-gvp-range>—</span>
+    <button id="gvp-close" class="gvp-close" aria-label="Cerrar">✕</button>
+  </div>
+  <div class="gvp-body"></div>
+  <div class="gvp-stats"></div>
+  <div class="gvp-legend">
+    <span><i class="gvp-lg gvp-lg-bid"></i> bids</span>
+    <span><i class="gvp-lg gvp-lg-ask"></i> asks</span>
+    <span><i class="gvp-lg gvp-lg-vp"></i> VP</span>
+    <span><i class="gvp-lg gvp-lg-hvn"></i> HVN/LVN</span>
+    <span><i class="gvp-lg gvp-lg-liq"></i> liqs</span>
+  </div>
+</aside>
+
 <script src="/static/lib/scale.js"></script>
 <script src="/static/lib/gravity.js"></script>
+<script src="/static/lib/gravity_vertical.js"></script>
 <script src="/static/lib/gauges.js"></script>
 <script src="/static/app.js"></script>
 </body>

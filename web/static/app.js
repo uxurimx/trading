@@ -555,7 +555,8 @@ function buildPosCardPro(pos) {
     : `<div class="pos-actions">
          <button class="pos-act-btn danger" data-close="${esc(key)}">Cerrar</button>
          ${slBtnHtml}
-         <button class="pos-act-btn" disabled title="Próximamente">+ Más</button>
+         <button class="pos-act-btn gvp-btn" data-grav-open="${esc(key)}"
+                 title="Abrir mapa de liquidez vertical">◉ Liquidez</button>
        </div>`;
 
   // Panel de detalles con tabs
@@ -834,7 +835,8 @@ function buildPosCardLite(pos) {
     : `<div class="pos-actions">
          <button class="pos-act-btn danger" data-close="${esc(key)}">Cerrar</button>
          ${slBtnHtml}
-         <button class="pos-act-btn" disabled title="Próximamente">+ Más</button>
+         <button class="pos-act-btn gvp-btn" data-grav-open="${esc(key)}"
+                 title="Abrir mapa de liquidez vertical">◉ Liquidez</button>
        </div>`;
 
   return `
@@ -1359,6 +1361,13 @@ window.addEventListener('keydown', e => {
 });
 
 document.getElementById('positions-container')?.addEventListener('click', async e => {
+  // Abrir panel vertical de liquidez
+  const gravBtn = e.target.closest('[data-grav-open]');
+  if (gravBtn) {
+    openGravPanel(gravBtn.dataset.gravOpen);
+    return;
+  }
+
   // Zoom: −/+/reset
   const zoomBtn = e.target.closest('button[data-zoom-act]');
   if (zoomBtn) {
@@ -2168,3 +2177,91 @@ setInterval(_gravTick,  2000);
 setInterval(_pilotTick, 3000);
 setTimeout(_gravTick,   400);
 setTimeout(_pilotTick,  600);
+
+// ── Gravity Vertical Panel — drawer independiente, expandido ────────────────
+// Reusa /api/liquidity y respeta el zoom de la pos-card de origen. Cada tick
+// busca la pos en lastSnap (puede haber cambiado side/zoom) y re-fetcha viewport.
+
+let _gvpState = null;     // { posKey } | null
+let _gvpBusy  = false;
+const _gvpEl  = () => document.getElementById('gvp-panel');
+
+function _findPosByKey(posKey) {
+  if (!lastSnap || !lastSnap.positions) return null;
+  return lastSnap.positions.find(p => `${p.full_sym}_${p.side}` === posKey) || null;
+}
+
+function _gvpComputeView(pos) {
+  // Mismo cómputo que buildProgressBar — vista alineada al zoom activo
+  const isLong = pos.direction === 'LONG';
+  const key    = `${pos.full_sym}_${pos.side}`;
+  const z      = _getZoom(key);
+  const geom   = pos.geometry || {
+    sl: pos.sl, entry: pos.entry, tp: pos.tp,
+    be: pos.breakeven_price || pos.entry,
+    mark: pos.mark, is_long: isLong,
+    milestones: (pos.milestones || []).map(m => ({ pct: m.pct, price: m.price })),
+  };
+  const view = QtsScale.viewport(z.levelIdx, z.anchor, geom);
+  return { view, geom, key };
+}
+
+function openGravPanel(posKey) {
+  const pos = _findPosByKey(posKey);
+  if (!pos) return;
+  _gvpState = { posKey };
+
+  const panel    = _gvpEl();
+  const backdrop = document.getElementById('gvp-backdrop');
+  if (!panel || !backdrop) return;
+
+  panel.setAttribute('aria-hidden', 'false');
+  panel.classList.add('open');
+  backdrop.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  // primer paint inmediato + arrancar poller
+  _gvpTick();
+}
+
+function closeGravPanel() {
+  const panel    = _gvpEl();
+  const backdrop = document.getElementById('gvp-backdrop');
+  if (!panel || !backdrop) return;
+  panel.classList.remove('open');
+  backdrop.classList.remove('open');
+  document.body.style.overflow = '';
+  // Mantener el aria-hidden tras la transición
+  setTimeout(() => { if (!panel.classList.contains('open')) panel.setAttribute('aria-hidden', 'true'); }, 250);
+  _gvpState = null;
+}
+
+async function _gvpTick() {
+  if (!_gvpState || _gvpBusy) return;
+  const pos = _findPosByKey(_gvpState.posKey);
+  if (!pos) { closeGravPanel(); return; }
+
+  _gvpBusy = true;
+  try {
+    const { view, geom } = _gvpComputeView(pos);
+    if (!(view.max > view.min)) return;
+    const url = `/api/liquidity/${encodeURIComponent(pos.full_sym)}`
+              + `?view_min=${view.min}&view_max=${view.max}`;
+    const r = await fetch(url);
+    if (!r.ok) return;
+    const data  = await r.json();
+    const panel = _gvpEl();
+    if (panel && _gvpState) QtsGravityVertical.render(panel, data, { view, geom });
+  } catch (_) { /* swallow */ }
+  finally { _gvpBusy = false; }
+}
+
+document.getElementById('gvp-close')?.addEventListener('click', closeGravPanel);
+document.getElementById('gvp-backdrop')?.addEventListener('click', closeGravPanel);
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _gvpState) closeGravPanel();
+});
+
+setInterval(_gvpTick, 1500);
+window.openGravPanel  = openGravPanel;
+window.closeGravPanel = closeGravPanel;

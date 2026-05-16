@@ -1540,3 +1540,322 @@ body {
   }
   .trade-panel.open { transform: translateY(0); }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/* GRAVITY PANEL VERTICAL — drawer expandido del strip gravitacional          */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+.gvp-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, .55);
+  z-index: 80;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s ease;
+}
+.gvp-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.gvp-panel {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 420px;
+  max-width: 100vw;
+  background: var(--bg-card);
+  border-left: 1px solid var(--border);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform .25s ease-out;
+  box-shadow: -8px 0 32px rgba(0, 0, 0, .35);
+}
+.gvp-panel.open { transform: translateX(0); }
+.gvp-panel[aria-hidden="true"] { visibility: hidden; }
+.gvp-panel.open[aria-hidden="false"] { visibility: visible; }
+
+.gvp-hdr {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.gvp-hdr-titles {
+  display: flex; flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.gvp-hdr-sym {
+  font-size: 13px; font-weight: 700;
+  letter-spacing: .04em;
+  color: var(--text);
+}
+.gvp-hdr-current {
+  font: 600 11px ui-monospace, Menlo, monospace;
+  color: var(--text-sub);
+}
+.gvp-hdr-range {
+  margin-left: auto;
+  font: 500 9px ui-monospace, Menlo, monospace;
+  color: var(--text-sub);
+  text-align: right;
+  white-space: nowrap;
+}
+.gvp-close {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-sub);
+  width: 28px; height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.gvp-close:hover { color: var(--text); border-color: var(--text-dim); }
+
+.gvp-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: grid;
+  grid-template-columns: 56px 1fr 120px;
+  overflow: hidden;
+}
+
+/* eje Y de precios (col 1) */
+.gvp-axis-y {
+  position: relative;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+}
+.gvp-axis-tick {
+  position: absolute;
+  right: 5px;
+  transform: translateY(-50%);
+  font: 500 9px ui-monospace, Menlo, monospace;
+  color: var(--text-sub);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.gvp-axis-tick.is-current {
+  color: var(--text);
+  font-weight: 700;
+}
+
+/* área de chart (col 2) — bids/asks/vp/overlay apilados */
+.gvp-chart {
+  position: relative;
+  overflow: hidden;
+}
+.gvp-vp-bg, .gvp-bids-col, .gvp-asks-col, .gvp-overlay {
+  position: absolute;
+  inset: 0;
+}
+.gvp-vp-bg { z-index: 1; pointer-events: none; }
+.gvp-bids-col, .gvp-asks-col { z-index: 2; }
+.gvp-overlay { z-index: 3; pointer-events: none; }
+
+.gvp-vp-bar {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  height: 1px;
+  background: #64748b;
+  opacity: .22;
+  pointer-events: auto;
+}
+
+/* depth bars — bids crecen hacia la izquierda desde el centro, asks hacia derecha */
+.gvp-depth-bar {
+  position: absolute;
+  height: 2px;
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+.gvp-bid {
+  right: 50%;
+  max-width: 50%;
+  background: linear-gradient(90deg, rgba(34,197,94,0) 0%, #22c55e 100%);
+  border-right: 1px solid #22c55e;
+}
+.gvp-ask {
+  left: 50%;
+  max-width: 50%;
+  background: linear-gradient(90deg, #ef4444 0%, rgba(239,68,68,0) 100%);
+  border-left: 1px solid #ef4444;
+}
+
+/* overlay: líneas horizontales (levels + geom) + liqs + current */
+.gvp-level-line, .gvp-geom-line {
+  position: absolute;
+  left: 0; right: 0;
+  height: 0;
+  transform: translateY(-50%);
+  border-top: 1px dashed transparent;
+}
+.gvp-geom-line { border-top-style: solid; border-top-width: 1.5px; }
+.gvp-geom-sl    { border-top-width: 2px; }
+.gvp-geom-tp    { border-top-width: 2px; }
+.gvp-geom-entry { border-top-style: dotted; }
+.gvp-geom-be    { border-top-style: dashed; }
+
+.gvp-liq {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: auto;
+  filter: blur(0.5px);
+}
+.gvp-liq-long  {
+  background: radial-gradient(circle, #ef4444 0%, rgba(239,68,68,.6) 35%, rgba(239,68,68,0) 75%);
+  box-shadow: 0 0 8px rgba(239,68,68,.5);
+}
+.gvp-liq-short {
+  background: radial-gradient(circle, #22c55e 0%, rgba(34,197,94,.6) 35%, rgba(34,197,94,0) 75%);
+  box-shadow: 0 0 8px rgba(34,197,94,.5);
+}
+
+.gvp-current-line {
+  position: absolute;
+  left: 0; right: 0;
+  height: 0;
+  transform: translateY(-50%);
+  border-top: 1px dashed #e5e7eb;
+  opacity: .92;
+  z-index: 5;
+}
+.gvp-current-lbl {
+  position: absolute;
+  right: 4px;
+  transform: translateY(-50%);
+  background: #e5e7eb;
+  color: #0c1220;
+  font: 700 9px ui-monospace, Menlo, monospace;
+  padding: 1px 5px;
+  border-radius: 3px;
+  z-index: 6;
+  pointer-events: none;
+}
+
+/* labels-col (col 3) — etiquetas detalladas alineadas al precio */
+.gvp-labels-col {
+  position: relative;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+  overflow: hidden;
+}
+.gvp-lvl-lbl, .gvp-geom-lbl, .gvp-order {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font: 500 9px ui-monospace, Menlo, monospace;
+  color: var(--c, var(--text-sub));
+  white-space: nowrap;
+  pointer-events: auto;
+}
+.gvp-lvl-tag, .gvp-geom-tag {
+  font-weight: 700;
+  background: var(--c);
+  color: #0c1220;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-size: 8px;
+  letter-spacing: .04em;
+  flex-shrink: 0;
+}
+.gvp-lvl-px, .gvp-geom-px { color: var(--text); }
+.gvp-lvl-str {
+  margin-left: auto;
+  opacity: .55;
+  font-size: 8px;
+}
+.gvp-order {
+  font-weight: 600;
+}
+.gvp-order-buy  { color: #22c55e; }
+.gvp-order-sell { color: #ef4444; }
+.gvp-order-tag  { font-size: 10px; }
+.gvp-order-qty  { color: var(--text-sub); }
+
+/* stats footer */
+.gvp-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px 14px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 10px;
+}
+.gvp-stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.gvp-stat-lbl {
+  color: var(--text-sub);
+  font-size: 9px;
+  letter-spacing: .04em;
+}
+.gvp-stat-v {
+  font: 600 10px ui-monospace, Menlo, monospace;
+}
+
+/* legend */
+.gvp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 8px 14px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 9px;
+  color: var(--text-sub);
+  background: var(--bg);
+}
+.gvp-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.gvp-lg {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 1px;
+}
+.gvp-lg-bid { background: #22c55e; }
+.gvp-lg-ask { background: #ef4444; }
+.gvp-lg-vp  { background: #64748b; }
+.gvp-lg-hvn { background: #22d3ee; }
+.gvp-lg-liq { background: radial-gradient(circle, #ef4444 0%, transparent 70%); border-radius: 50%; }
+
+/* botón Liquidez en pos-card actions */
+.pos-act-btn.gvp-btn {
+  color: #22d3ee;
+  border-color: rgba(34,211,238,.35);
+}
+.pos-act-btn.gvp-btn:hover {
+  background: rgba(34,211,238,.08);
+}
+
+/* mobile: bottom sheet */
+@media (max-width: 720px) {
+  .gvp-panel {
+    top: auto; bottom: 0; right: 0; left: 0;
+    width: 100%;
+    height: 82vh;
+    max-height: 82vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 12px 12px 0 0;
+    transform: translateY(100%);
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, .35);
+  }
+  .gvp-panel.open { transform: translateY(0); }
+  .gvp-body { grid-template-columns: 50px 1fr 110px; }
+  .gvp-hdr-range { font-size: 8px; }
+}
