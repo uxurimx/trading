@@ -130,27 +130,127 @@
     }).join('');
   }
 
-  function buildLevels(levels, vmin, vmax) {
+  function _touchesByPriceType(trails) {
+    const m = new Map();
+    if (!trails) return m;
+    trails.forEach(tr => {
+      if (!tr.points || !tr.points.length) return;
+      const last = tr.points[tr.points.length - 1];
+      m.set(`${tr.type}:${last.price.toFixed(8)}`, tr.touches || 0);
+    });
+    return m;
+  }
+
+  function buildLevels(levels, vmin, vmax, trails) {
     if (!levels || !levels.length) return { lines: '', labels: '' };
+    const touchMap = _touchesByPriceType(trails);
     const lines = [], labels = [];
-    levels.forEach(lv => {
-      if (lv.price < vmin || lv.price > vmax) return;
+    const span = vmax - vmin;
+    const mid  = (vmin + vmax) / 2;
+    const zoomPct = mid > 0 ? span / mid : 0;
+    const compact = zoomPct > 0.04;
+    const clusterBand = span * 0.018;
+    // Filtrar al viewport una vez
+    const visible = levels.filter(lv => lv.price >= vmin && lv.price <= vmax);
+
+    // Líneas siempre se dibujan, una por nivel
+    visible.forEach(lv => {
       const y    = priceToY(lv.price, vmin, vmax).toFixed(2);
       const col  = ZONE_COLORS[lv.type] || '#94a3b8';
       const str  = Math.min(100, lv.strength || 30);
       const op   = (0.35 + (str / 100) * 0.55).toFixed(2);
-      const ldis = vmin < vmax ? Math.abs(lv.price - (vmin + (vmax - vmin) / 2)) : 0;
       lines.push(`<div class="gvp-level-line"
                     style="top:${y}%;border-top-color:${col};opacity:${op}"></div>`);
-      const tip = `${lv.type} @ ${fmtPrice(lv.price)} · strength ${str|0}`
-                + (lv.count ? ` · ${lv.count} touches` : '')
-                + (lv.vol_pct ? ` · ${(lv.vol_pct*100).toFixed(1)}% del vol` : '');
-      labels.push(`<div class="gvp-lvl-lbl" style="top:${y}%;--c:${col}" title="${esc(tip)}">
-        <span class="gvp-lvl-tag">${esc(ZONE_LABELS[lv.type] || lv.type)}</span>
-        <span class="gvp-lvl-px">${fmtPrice(lv.price)}</span>
-        <span class="gvp-lvl-str">${str|0}</span>
-      </div>`);
     });
+
+    const touchesFor = (lv) => {
+      let touches = 0;
+      touchMap.forEach((cnt, key) => {
+        const [ttype, tpx] = key.split(':');
+        if (ttype !== lv.type) return;
+        const tp = parseFloat(tpx);
+        if (!(tp > 0)) return;
+        if (Math.abs(tp - lv.price) / lv.price < 0.0015) {
+          touches = Math.max(touches, cnt);
+        }
+      });
+      return touches;
+    };
+
+    if (compact && visible.length > 6) {
+      // Cluster nearby levels en bandas de ~1.8% del span
+      const sorted = visible.slice().sort((a, b) => a.price - b.price);
+      const clusters = [];
+      sorted.forEach(lv => {
+        const last = clusters[clusters.length - 1];
+        if (last && Math.abs(lv.price - last.center) <= clusterBand) {
+          last.items.push(lv);
+          last.center = last.items.reduce((s, x) => s + x.price, 0) / last.items.length;
+        } else {
+          clusters.push({ center: lv.price, items: [lv] });
+        }
+      });
+      clusters.forEach(cl => {
+        if (cl.items.length === 1) {
+          const lv = cl.items[0];
+          const y    = priceToY(lv.price, vmin, vmax).toFixed(2);
+          const col  = ZONE_COLORS[lv.type] || '#94a3b8';
+          const str  = Math.min(100, lv.strength || 30);
+          const touches = touchesFor(lv);
+          const touchBadge = touches > 0
+            ? `<span class="gvp-lvl-touch">×${touches}</span>` : '';
+          labels.push(`<div class="gvp-lvl-lbl" style="top:${y}%;--c:${col}"
+                        title="${esc(lv.type)} @ ${fmtPrice(lv.price)}">
+            <span class="gvp-lvl-tag">${esc(ZONE_LABELS[lv.type] || lv.type)}</span>
+            <span class="gvp-lvl-px">${fmtPrice(lv.price)}</span>
+            <span class="gvp-lvl-str">${str|0}</span>
+            ${touchBadge}
+          </div>`);
+        } else {
+          // Meta-icon: dominante por strength
+          const dom = cl.items.reduce((a, b) =>
+            (a.strength || 0) >= (b.strength || 0) ? a : b);
+          const col  = ZONE_COLORS[dom.type] || '#94a3b8';
+          const y    = priceToY(cl.center, vmin, vmax).toFixed(2);
+          const totalStrength = cl.items.reduce((s, x) => s + (x.strength || 0), 0) | 0;
+          const lo = Math.min(...cl.items.map(x => x.price));
+          const hi = Math.max(...cl.items.map(x => x.price));
+          const totalTouches = cl.items.reduce((s, x) => s + touchesFor(x), 0);
+          const tip = `${cl.items.length} niveles · ${fmtPrice(lo)} … ${fmtPrice(hi)} · `
+                    + `dominante ${dom.type} (s${dom.strength|0})`;
+          const touchBadge = totalTouches > 0
+            ? `<span class="gvp-lvl-touch">×${totalTouches}</span>` : '';
+          labels.push(`<div class="gvp-lvl-lbl gvp-lvl-cluster" style="top:${y}%;--c:${col}"
+                        title="${esc(tip)}">
+            <span class="gvp-lvl-tag">⬢${cl.items.length}</span>
+            <span class="gvp-lvl-px">${fmtPrice(cl.center)}</span>
+            <span class="gvp-lvl-str">${totalStrength}</span>
+            ${touchBadge}
+          </div>`);
+        }
+      });
+    } else {
+      visible.forEach(lv => {
+        const y    = priceToY(lv.price, vmin, vmax).toFixed(2);
+        const col  = ZONE_COLORS[lv.type] || '#94a3b8';
+        const str  = Math.min(100, lv.strength || 30);
+        const touches = touchesFor(lv);
+        const tip = `${lv.type} @ ${fmtPrice(lv.price)} · strength ${str|0}`
+                  + (touches ? ` · ${touches} touches` : '')
+                  + (lv.count ? ` · cluster ${lv.count}` : '')
+                  + (lv.vol_pct ? ` · ${(lv.vol_pct*100).toFixed(1)}% del vol` : '');
+        const touchBadge = touches > 0
+          ? `<span class="gvp-lvl-touch" title="${touches} toques recientes">×${touches}</span>`
+          : '';
+        labels.push(`<div class="gvp-lvl-lbl" style="top:${y}%;--c:${col}" title="${esc(tip)}">
+          <span class="gvp-lvl-tag">${esc(ZONE_LABELS[lv.type] || lv.type)}</span>
+          <span class="gvp-lvl-px">${fmtPrice(lv.price)}</span>
+          <span class="gvp-lvl-str">${str|0}</span>
+          ${touchBadge}
+        </div>`);
+      });
+    }
+
     return { lines: lines.join(''), labels: labels.join('') };
   }
 
@@ -195,11 +295,105 @@
     }).join('');
   }
 
+  function buildTrails(trails, vmin, vmax) {
+    if (!trails || !trails.length) return '';
+    const now = Date.now();
+    const MAX_AGE_MS = 5 * 60 * 1000;
+    const out = [];
+    trails.forEach(tr => {
+      if (!tr.points || tr.points.length < 2) return;
+      const col = ZONE_COLORS[tr.type] || '#94a3b8';
+      for (let i = 1; i < tr.points.length; i++) {
+        const p0 = tr.points[i - 1];
+        const p1 = tr.points[i];
+        if (p0.price < vmin || p0.price > vmax) continue;
+        if (p1.price < vmin || p1.price > vmax) continue;
+        const age = Math.max(0, (now - p1.ts) / MAX_AGE_MS);
+        if (age > 1) continue;
+        const y0 = priceToY(p0.price, vmin, vmax);
+        const y1 = priceToY(p1.price, vmin, vmax);
+        const top    = Math.min(y0, y1).toFixed(2);
+        const height = Math.max(0.1, Math.abs(y1 - y0)).toFixed(2);
+        const alpha  = Math.max(0.06, 0.4 * (1 - age)).toFixed(2);
+        out.push(`<div class="gvp-trail" style="top:${top}%;height:${height}%;background:${col};opacity:${alpha}"></div>`);
+      }
+      const last = tr.points[tr.points.length - 1];
+      if (last.price >= vmin && last.price <= vmax) {
+        const yL = priceToY(last.price, vmin, vmax).toFixed(2);
+        out.push(`<div class="gvp-trail-dot" style="top:${yL}%;background:${col}" title="${esc(tr.type)} track"></div>`);
+      }
+    });
+    return out.join('');
+  }
+
+  function buildHeat(samples, vmin, vmax, opacityMult) {
+    if (!samples || samples.length < 4) return '';
+    const mult = (opacityMult != null && opacityMult > 0) ? opacityMult : 0.5;
+    const now = Date.now();
+    const MAX_AGE_MS = 6 * 60 * 1000;
+    const BUCKETS = 50;
+    const bucketSize = (vmax - vmin) / BUCKETS;
+    if (bucketSize <= 0) return '';
+    const weights = new Array(BUCKETS).fill(0);
+    let maxW = 0;
+    for (const s of samples) {
+      if (s.price < vmin || s.price > vmax) continue;
+      const age = (now - s.ts) / MAX_AGE_MS;
+      if (age < 0 || age > 1) continue;
+      const wgt = Math.exp(-2.5 * age);
+      const i = Math.min(BUCKETS - 1, Math.floor((s.price - vmin) / bucketSize));
+      weights[i] += wgt;
+      if (weights[i] > maxW) maxW = weights[i];
+    }
+    if (maxW <= 0) return '';
+    const out = [];
+    const slice = 100 / BUCKETS;
+    for (let i = 0; i < BUCKETS; i++) {
+      const wt = weights[i] / maxW;
+      if (wt < 0.06) continue;
+      const priceMid = vmin + (i + 0.5) * bucketSize;
+      const y = priceToY(priceMid, vmin, vmax).toFixed(2);
+      const alpha = ((0.08 + 0.28 * wt) * mult).toFixed(3);
+      out.push(`<div class="gvp-heat-cell"
+        style="top:${y}%;height:${slice}%;margin-top:-${slice/2}%;
+               background:rgba(251,146,60,${alpha})"></div>`);
+    }
+    return out.join('');
+  }
+
+  function buildEnergy(energy, vmin, vmax) {
+    if (!energy || !energy.levels || !energy.levels.length) return { halos: '', arrows: '' };
+    const halos = [], arrows = [];
+    energy.levels.forEach(e => {
+      if (e.energy <= 5) return;
+      if (e.price < vmin || e.price > vmax) return;
+      const y = priceToY(e.price, vmin, vmax);
+      const intensity = Math.min(1, e.energy / 100);
+      const col = e.dir === 'up'   ? '34,197,94'
+                : e.dir === 'down' ? '239,68,68'
+                : '148,163,184';
+      const half = (3 + 18 * intensity).toFixed(2);
+      const alpha = (0.18 + 0.42 * intensity).toFixed(2);
+      halos.push(`<div class="gvp-energy-halo"
+        style="top:${y}%;height:${half * 2}%;margin-top:-${half}%;
+               background:radial-gradient(ellipse at center,rgba(${col},${alpha}) 0%,rgba(${col},0) 70%)"></div>`);
+      if (e.energy >= 40 && e.dir !== 'flat') {
+        const arr = e.dir === 'up' ? '⚡↑' : '⚡↓';
+        arrows.push(`<div class="gvp-energy-arrow gvp-energy-${e.dir}"
+          style="top:${y}%;color:rgb(${col})"
+          title="energy ${e.energy} · ${e.dir}">${arr}</div>`);
+      }
+    });
+    return { halos: halos.join(''), arrows: arrows.join('') };
+  }
+
   function buildCurrent(current, vmin, vmax) {
     if (!current || current < vmin || current > vmax) return '';
     const y = priceToY(current, vmin, vmax).toFixed(2);
     return `
+      <div class="gvp-current-glow" style="top:${y}%"></div>
       <div class="gvp-current-line" style="top:${y}%"></div>
+      <div class="gvp-current-diamond" style="top:${y}%"></div>
       <div class="gvp-current-lbl"  style="top:${y}%">${fmtPrice(current)}</div>`;
   }
 
@@ -240,6 +434,34 @@
         <span class="gvp-stat-v">${fmtPrice(data.bucket || 0)}</span></div>`;
   }
 
+  function buildAnomalies(data, energy) {
+    const tags = [];
+    if (energy && Array.isArray(energy.levels)) {
+      const spikes = energy.levels
+        .filter(e => e.energy >= 70)
+        .sort((a, b) => b.energy - a.energy)
+        .slice(0, 3);
+      spikes.forEach(e => {
+        const arr = e.dir === 'up' ? '↑' : e.dir === 'down' ? '↓' : '·';
+        tags.push(`<span class="gvp-anom gvp-anom-energy" title="energy ${e.energy} ${e.dir}">⚡ ${e.energy.toFixed(0)}${arr} @ ${fmtPrice(e.price)}</span>`);
+      });
+      if (energy.vitality >= 80) {
+        tags.push(`<span class="gvp-anom gvp-anom-vitality" title="vitality ${energy.vitality}">🔥 vitality ${energy.vitality.toFixed(0)}</span>`);
+      }
+      if (energy.pulse_hz >= 5) {
+        tags.push(`<span class="gvp-anom gvp-anom-pulse" title="${energy.pulse_hz} trades/s">🚀 ${energy.pulse_hz.toFixed(1)} tr/s</span>`);
+      }
+    }
+    if (data && Array.isArray(data.liqs)) {
+      const bigLiqs = data.liqs.filter(l => l.notional >= 50000);
+      const total = bigLiqs.reduce((s, l) => s + l.notional, 0);
+      if (bigLiqs.length >= 3 || total >= 200000) {
+        tags.push(`<span class="gvp-anom gvp-anom-liq" title="${bigLiqs.length} liqs · $${(total/1000).toFixed(0)}k">💥 ${bigLiqs.length} liqs · $${(total/1000).toFixed(0)}k</span>`);
+      }
+    }
+    return tags.join('');
+  }
+
   // ── API pública ────────────────────────────────────────────────────────────
 
   function render(panelEl, data, opts) {
@@ -264,23 +486,30 @@
     const bids   = buildDepth(data.bids, data.max_qty, vmin, vmax, 'bid');
     const asks   = buildDepth(data.asks, data.max_qty, vmin, vmax, 'ask');
     const liqs   = buildLiqs(data.liqs, data.max_liq, vmin, vmax);
-    const lv     = buildLevels(data.levels, vmin, vmax);
+    const lv     = buildLevels(data.levels, vmin, vmax, opts && opts.trails);
     const gx     = buildGeom(geom, vmin, vmax);
     const orders = buildOrders(data.my_orders, vmin, vmax);
     const cur    = buildCurrent(data.current, vmin, vmax);
+    const trails = buildTrails(opts && opts.trails, vmin, vmax);
+    const energy = buildEnergy(opts && opts.energy, vmin, vmax);
+    const heat   = buildHeat(opts && opts.heat, vmin, vmax, opts && opts.heatOpacity);
     const axisY  = buildAxisY(vmin, vmax, data.current);
 
     bodyEl.innerHTML = `
       <div class="gvp-axis-y">${axisY}</div>
       <div class="gvp-chart">
+        <div class="gvp-heat">${heat}</div>
         <div class="gvp-vp-bg">${vp}</div>
         <div class="gvp-bids-col">${bids}</div>
         <div class="gvp-asks-col">${asks}</div>
+        <div class="gvp-trails">${trails}</div>
+        <div class="gvp-energy">${energy.halos}</div>
         <div class="gvp-overlay">
           ${gx.lines}
           ${lv.lines}
           ${liqs}
           ${cur}
+          ${energy.arrows}
         </div>
       </div>
       <div class="gvp-labels-col">
@@ -290,6 +519,9 @@
       </div>`;
 
     if (statsEl) statsEl.innerHTML = buildStats(data);
+
+    const anomEl = panelEl.querySelector('[data-gvp-anomalies]');
+    if (anomEl) anomEl.innerHTML = buildAnomalies(data, opts && opts.energy);
   }
 
   window.QtsGravityVertical = { render, priceToY };

@@ -503,7 +503,21 @@
       <span class="gvp-hdr-current" data-gvp-current>—</span>
     </div>
     <span class="gvp-hdr-range" data-gvp-range>—</span>
+    <div class="gvp-heat-ctrl" title="Opacidad del heat memory">
+      <span class="gvp-heat-icon">🔥</span>
+      <input id="gvp-heat-opacity" type="range" min="0" max="100" step="5" value="50"/>
+    </div>
+    <button id="gvp-help"  class="gvp-help"  aria-label="Leyenda" title="Leyenda">?</button>
+    <button id="gvp-sound" class="gvp-sound" aria-label="Sonificación" title="Sonificar anomalías">🔇</button>
     <button id="gvp-close" class="gvp-close" aria-label="Cerrar">✕</button>
+  </div>
+  <div class="gvp-anomalies" data-gvp-anomalies></div>
+  <div class="gvp-replay">
+    <label class="gvp-replay-lbl" for="gvp-replay-range">Replay</label>
+    <input id="gvp-replay-range" type="range" min="0" max="0" step="1" value="0"
+           class="gvp-replay-range" />
+    <span class="gvp-replay-time" data-gvp-replay-time>LIVE</span>
+    <button id="gvp-replay-live" class="gvp-replay-live" title="Volver a vivo">⏵ live</button>
   </div>
   <div class="gvp-body"></div>
   <div class="gvp-stats"></div>
@@ -515,6 +529,71 @@
     <span><i class="gvp-lg gvp-lg-liq"></i> liqs</span>
   </div>
 </aside>
+
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<!-- LEYENDA / GUÍA VISUAL — qué significa cada elemento del panel          -->
+<!-- ══════════════════════════════════════════════════════════════════════ -->
+<div id="gvp-help-backdrop" class="gvp-help-backdrop" hidden></div>
+<div id="gvp-help-modal" class="gvp-help-modal" role="dialog" aria-modal="true" hidden>
+  <div class="gvp-help-hdr">
+    <span>Leyenda visual</span>
+    <button id="gvp-help-close" class="gvp-help-close" aria-label="Cerrar">✕</button>
+  </div>
+  <div class="gvp-help-body">
+
+    <h4>Marcador de precio actual</h4>
+    <ul>
+      <li><span class="lg-swatch" style="background:#22d3ee"></span>
+        <b>Diamante cian + halo:</b> precio actual. La línea horizontal/vertical
+        marca el nivel. El label muestra el valor exacto.</li>
+    </ul>
+
+    <h4>Niveles (S/R)</h4>
+    <ul>
+      <li><span class="lg-swatch" style="background:#22c55e"></span>
+        <b>Verde (resistencia rota / soporte):</b> nivel histórico con presión compradora.</li>
+      <li><span class="lg-swatch" style="background:#ef4444"></span>
+        <b>Rojo (resistencia / soporte roto):</b> nivel con presión vendedora.</li>
+      <li><b>Número junto al nivel:</b> cantidad de <i>toques</i> registrados — cuántas veces el precio rozó esa banda (±0.1%). Más toques = nivel más “probado”.</li>
+      <li><b>Halo de luz alrededor del nivel:</b> <i>energía</i> actual del nivel.
+        <span class="lg-swatch" style="background:rgba(34,197,94,.7)"></span> verde = flujo comprador dominante ·
+        <span class="lg-swatch" style="background:rgba(239,68,68,.7)"></span> rojo = flujo vendedor ·
+        <span class="lg-swatch" style="background:rgba(148,163,184,.7)"></span> gris = sin presión definida.
+        El brillo crece con la magnitud del flujo (CVD pesado).</li>
+      <li><b>⚡ rayo:</b> <i>pulso</i> de liquidaciones cerca del nivel — alguien acaba de ser liquidado ahí. Suele preceder una mecha.</li>
+      <li><b>Flecha ▲ / ▼:</b> dirección dominante del CVD en la última ventana. ▲ = compradores empujan, ▼ = vendedores empujan.</li>
+    </ul>
+
+    <h4>Barras de momentum (gauges)</h4>
+    <ul>
+      <li><b>6 barras pequeñas verticales:</b> los últimos 6 valores históricos del gauge, agrupados temporalmente. La altura indica magnitud; el color es el del gauge.</li>
+      <li><b>Línea punteada horizontal:</b> el valor <i>actual</i> sobre las barras — permite leer si está acelerando o desacelerando vs la historia reciente.</li>
+      <li>Coherencia entre barras = tendencia clara. Saltos = volatilidad sin dirección.</li>
+    </ul>
+
+    <h4>Strip vertical (perfil + heat memory)</h4>
+    <ul>
+      <li><b>Punto lila / morado:</b> alta concentración de volumen perfil (HVN) o liquidez agresiva en ese nivel. Es zona donde el precio “se pegó” en el pasado reciente.</li>
+      <li><b>Naranja translúcido (heat memory):</b> dónde estuvo el precio en los últimos minutos. Más opaco = más tiempo. Ajusta la opacidad con el slider 🔥.</li>
+      <li><b>Bids (verde) / asks (rojo) extendidos:</b> profundidad del libro a cada lado del precio.</li>
+    </ul>
+
+    <h4>Barra de progreso (SL → TP)</h4>
+    <ul>
+      <li><b>Naranja translúcido dentro de la barra:</b> dwell por sub-zona — dónde se pasea el precio dentro del rango. Más opaco = más tiempo acumulado en esa banda fina.</li>
+      <li><b>Verde / rojo / amarillo (BE):</b> color del fill indica si vas en ganancia, pérdida o break-even.</li>
+      <li><b>Móvil:</b> sólo se muestra el siguiente hito relevante con su color (SL rojo · BE amarillo · TP/hitos verdes).</li>
+    </ul>
+
+    <h4>¿Qué hago con esto?</h4>
+    <ul>
+      <li><b>Halo verde fuerte + ⚡ en un nivel arriba → </b>posible squeeze alcista: stops largos por encima se están barriendo.</li>
+      <li><b>Heat memory denso + nivel rojo → </b>zona de distribución; cuidado con rupturas falsas.</li>
+      <li><b>Gauges con 6 barras coherentes en una dirección → </b>tendencia sostenida; no es ruido.</li>
+      <li><b>Dwell concentrado cerca de tu SL → </b>el precio está “masticando” tu stop; considera mover SL o reducir tamaño.</li>
+    </ul>
+  </div>
+</div>
 
 <script src="/static/lib/scale.js"></script>
 <script src="/static/lib/gravity.js"></script>

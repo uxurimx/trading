@@ -14,6 +14,66 @@
   'use strict';
 
   const CX = 60, CY = 55, R = 46;
+  // Banda de 6 barras estilo Bybit-volume
+  const BARS_N = 6;
+  const BARS_W = 100, BARS_H = 9, BARS_X = 10, BARS_Y = 0;
+  const BAR_GAP = 1.5;
+  const BAR_W = (BARS_W - BAR_GAP * (BARS_N - 1)) / BARS_N;
+
+  // Agrupa la serie en 6 buckets adaptativos (último samples a la derecha).
+  function _bucketize(series, n) {
+    if (!series || series.length === 0) return new Array(n).fill(null);
+    const out = new Array(n).fill(null);
+    const len = series.length;
+    if (len <= n) {
+      // Alinear a la derecha: huecos a la izquierda
+      for (let i = 0; i < len; i++) out[n - len + i] = series[i];
+      return out;
+    }
+    // Más samples que barras: promediar por bucket
+    const step = len / n;
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor(i * step);
+      const b = Math.floor((i + 1) * step);
+      let s = 0, c = 0;
+      for (let j = a; j < b; j++) { s += series[j]; c++; }
+      out[i] = c > 0 ? s / c : null;
+    }
+    return out;
+  }
+
+  // Renderiza 6 barras verticales tipo histograma + línea horizontal del valor actual.
+  function barsHistogram(series, color, max, current) {
+    const m = max || 100;
+    const buckets = _bucketize(series, BARS_N);
+    let bars = '';
+    for (let i = 0; i < BARS_N; i++) {
+      const x = BARS_X + i * (BAR_W + BAR_GAP);
+      // Fondo (slot vacío)
+      bars += `<rect x="${x.toFixed(2)}" y="${BARS_Y.toFixed(2)}" `
+            + `width="${BAR_W.toFixed(2)}" height="${BARS_H}" `
+            + `fill="${color}" opacity="0.08" rx="0.5"/>`;
+      const v = buckets[i];
+      if (v == null) continue;
+      const norm = Math.max(0, Math.min(m, v)) / m;
+      const h = Math.max(0.6, norm * BARS_H);
+      const y = BARS_Y + (BARS_H - h);
+      const op = 0.35 + 0.55 * norm;
+      bars += `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" `
+            + `width="${BAR_W.toFixed(2)}" height="${h.toFixed(2)}" `
+            + `fill="${color}" opacity="${op.toFixed(2)}" rx="0.5"/>`;
+    }
+    // Línea del valor actual sobre las barras
+    let line = '';
+    if (typeof current === 'number' && isFinite(current)) {
+      const norm = Math.max(0, Math.min(m, current)) / m;
+      const y = BARS_Y + (BARS_H - norm * BARS_H);
+      line = `<line x1="${BARS_X}" x2="${BARS_X + BARS_W}" `
+           + `y1="${y.toFixed(2)}" y2="${y.toFixed(2)}" `
+           + `stroke="${color}" stroke-width="0.8" opacity="0.95" stroke-dasharray="2 1.5"/>`;
+    }
+    return bars + line;
+  }
 
   function polar(angle, r) {
     return { x: CX + r * Math.cos(angle), y: CY + r * Math.sin(angle) };
@@ -51,7 +111,7 @@
   }
 
   // ── Tacómetro de Presión ───────────────────────────────────────────────────
-  function renderPressure(el, p) {
+  function renderPressure(el, p, hist) {
     if (!el) return;
     const score = (p && p.score) || 0;
     const side  = (p && p.side)  || 'neutral';
@@ -71,6 +131,7 @@
 
     el.innerHTML = `
       ${svgOpen()}
+        ${barsHistogram(hist, color, 100, score)}
         <path d="${lowArc}" stroke="#22c55e" stroke-width="5" fill="none" opacity=".45"/>
         <path d="${midArc}" stroke="#f59e0b" stroke-width="5" fill="none" opacity=".55"/>
         <path d="${hiArc}"  stroke="#ef4444" stroke-width="5" fill="none" opacity=".65"/>
@@ -84,7 +145,7 @@
   }
 
   // ── Velocímetro ────────────────────────────────────────────────────────────
-  function renderVelocity(el, v) {
+  function renderVelocity(el, v, hist) {
     if (!el) return;
     const score = (v && v.score) || 0;
     const pct   = (v && v.pct_per_min) || 0;
@@ -99,6 +160,7 @@
 
     el.innerHTML = `
       ${svgOpen()}
+        ${barsHistogram(hist, color, 100, score)}
         <path d="${baseArc}" stroke="#1e293b" stroke-width="5" fill="none"/>
         <path d="${fillArc}" stroke="${color}" stroke-width="5" fill="none" stroke-linecap="round"/>
         ${needle(ang, color)}
@@ -150,7 +212,7 @@
     }
   }
 
-  function renderRoad(el, r) {
+  function renderRoad(el, r, hist) {
     if (!el) return;
     const type = (r && r.type) || 'curvy';
     const vis  = ROAD_VIS[type] || ROAD_VIS.curvy;
@@ -160,6 +222,7 @@
 
     el.innerHTML = `
       ${svgOpen('g-svg-road')}
+        ${barsHistogram(hist, vis.color, 100, conf)}
         ${roadShape(type, vis.color)}
         <text x="60" y="64" text-anchor="middle" class="g-num"
               fill="${vis.color}">${lev}</text>
@@ -171,14 +234,15 @@
       </div>`;
   }
 
-  function renderAll(rootEl, payload) {
+  function renderAll(rootEl, payload, history) {
     if (!rootEl || !payload) return;
     const pEl = rootEl.querySelector('[data-gauge="pressure"]');
     const vEl = rootEl.querySelector('[data-gauge="velocity"]');
     const rEl = rootEl.querySelector('[data-gauge="road"]');
-    if (pEl) renderPressure(pEl, payload.pressure);
-    if (vEl) renderVelocity(vEl, payload.velocity);
-    if (rEl) renderRoad(rEl, payload.road);
+    const h   = history || {};
+    if (pEl) renderPressure(pEl, payload.pressure, h.pressure);
+    if (vEl) renderVelocity(vEl, payload.velocity, h.velocity);
+    if (rEl) renderRoad(rEl, payload.road, h.road);
   }
 
   window.QtsGauges = { renderPressure, renderVelocity, renderRoad, renderAll };

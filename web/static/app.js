@@ -282,7 +282,47 @@ function buildProgressBar(pos) {
   // ── Mark + label (in-range) ──────────────────────────────────────────────
   const markBlock = _renderInRange(markPct, p =>
     `<div class="prog-mark-wrap"   style="left:${p.toFixed(1)}%" title="Mark: ${esc(fmtPrice(geom.mark))}">${markSvg}</div>
-     <div class="prog-mark-label ${fnCls}" style="left:${p.toFixed(1)}%">${esc(markLbl)}</div>`);
+     <div class="prog-mark-label ${fnCls}" style="left:${p.toFixed(1)}%">${esc(markLbl)}</div>
+     <div class="prog-mark-label-mobile" style="left:${p.toFixed(1)}%">${esc(fmtPrice(geom.mark))}</div>`);
+
+  // ── Mobile: solo el siguiente hito relevante, con su color ───────────────
+  const _nextMobile = (() => {
+    const m = geom.mark;
+    if (m == null) return null;
+    const cands = [];
+    if (geom.sl != null) cands.push({ label: 'SL', price: geom.sl, color: '#ef4444', cls: 'sl' });
+    if (geom.entry != null) cands.push({ label: 'E', price: geom.entry, color: '#94a3b8', cls: 'entry' });
+    if (geom.be != null) cands.push({ label: 'BE', price: geom.be, color: '#f59e0b', cls: 'be' });
+    if (geom.tp != null) cands.push({ label: 'TP', price: geom.tp, color: '#22c55e', cls: 'tp' });
+    (pos.milestones || []).forEach(ms => {
+      if (ms.price != null) cands.push({ label: `${ms.pct}%`, price: ms.price, color: '#22c55e', cls: 'tp' });
+    });
+    if (!cands.length) return null;
+    // En LONG, el siguiente es el más bajo por encima del mark.
+    // En SHORT, el más alto por debajo. Si no hay, fallback al más cercano.
+    let next;
+    if (isLong) {
+      const above = cands.filter(c => c.price > m).sort((a, b) => a.price - b.price);
+      next = above[0];
+    } else {
+      const below = cands.filter(c => c.price < m).sort((a, b) => b.price - a.price);
+      next = below[0];
+    }
+    if (!next) {
+      next = cands.slice().sort((a, b) => Math.abs(a.price - m) - Math.abs(b.price - m))[0];
+    }
+    return next;
+  })();
+  let nextMobileBlock = '';
+  if (_nextMobile) {
+    const np = QtsScale.T(_nextMobile.price, view);
+    const inRange = np >= 0 && np <= 100;
+    if (inRange) {
+      nextMobileBlock = `<div class="prog-next-mobile prog-next-${_nextMobile.cls}"
+        style="left:${np.toFixed(1)}%;color:${_nextMobile.color};border-color:${_nextMobile.color}">
+        ${esc(_nextMobile.label)} ${esc(fmtPrice(_nextMobile.price))}</div>`;
+    }
+  }
 
   // ── Controles de zoom ────────────────────────────────────────────────────
   const lv = QtsScale.level(z.levelIdx);
@@ -372,13 +412,50 @@ function buildProgressBar(pos) {
       <div class="prog-time-legend">Fases ${esc(fmtElapsedShort(totalS))}: ${top}${curHtml ? ' · ' + curHtml : ''}</div>`;
   }
 
+  // ── Sub-zone dwell: histograma fino dentro de la track ───────────────────
+  // Cada bucket = 1/N del rango SL→TP. Opacidad ∝ log(seconds).
+  let dwellLayer = '';
+  if (zonesData && Array.isArray(zonesData.histogram) && zonesData.histogram.length > 0) {
+    const hist  = zonesData.histogram;
+    const N     = zonesData.hist_buckets || hist.length;
+    const maxS  = hist.reduce((m, v) => Math.max(m, v), 0);
+    if (maxS > 1) {
+      const sl = geom.sl, tp = geom.tp;
+      const logMax = Math.log(1 + maxS);
+      const cells = [];
+      for (let i = 0; i < N; i++) {
+        const s = hist[i] || 0;
+        if (s < 0.5) continue;
+        const p0 = sl + (tp - sl) * (i     / N);
+        const p1 = sl + (tp - sl) * ((i+1) / N);
+        const r  = QtsScale.clipRange(p0, p1, view);
+        if (r.width <= 0) continue;
+        const norm = Math.log(1 + s) / logMax;
+        const op   = Math.max(0.06, Math.min(0.6, norm * 0.6));
+        const dur  = fmtElapsedShort(s);
+        const tip  = `Sub-zona ${(i*100/N).toFixed(0)}–${((i+1)*100/N).toFixed(0)}% · ${dur}`;
+        cells.push(`<div class="prog-dwell-cell"
+          style="left:${r.left.toFixed(2)}%;width:${r.width.toFixed(2)}%;opacity:${op.toFixed(2)}"
+          title="${esc(tip)}"></div>`);
+      }
+      if (cells.length > 0) {
+        dwellLayer = `<div class="prog-dwell" title="Dónde se pasea el precio dentro de SL→TP">${cells.join('')}</div>`;
+      }
+    }
+  }
+
   // Strip gravitacional — comparte viewport con la progress bar
+  const gravGeomJson = JSON.stringify({
+    sl: geom.sl, entry: geom.entry, be: geom.be, tp: geom.tp,
+    milestones: (geom.milestones || []).map(m => ({ pct: m.pct, price: m.price })),
+  });
   const gravStrip = `
     <div class="prog-gravity">
       <canvas class="prog-grav-canvas"
               data-grav-sym="${esc(pos.full_sym)}"
               data-grav-vmin="${view.min}"
-              data-grav-vmax="${view.max}"></canvas>
+              data-grav-vmax="${view.max}"
+              data-grav-geom='${esc(gravGeomJson)}'></canvas>
     </div>`;
 
   // Cabina del piloto
@@ -389,6 +466,20 @@ function buildProgressBar(pos) {
       <div class="pilot-gauge" data-gauge="road"></div>
     </div>`;
 
+  // ETA panel — estimador de tiempo a SL/BE/TP. Geom va en data-attr.
+  const etaGeomJson = JSON.stringify({
+    sl: geom.sl, entry: geom.entry, be: geom.be, tp: geom.tp,
+    is_long: !!geom.is_long,
+    milestones: (geom.milestones || []).map(m => ({ pct: m.pct, price: m.price })),
+  });
+  const etaPanel = `
+    <div class="pilot-eta"
+         data-eta-sym="${esc(pos.full_sym)}"
+         data-eta-key="${esc(key)}"
+         data-eta-geom='${esc(etaGeomJson)}'>
+      <div class="eta-loading">Calculando ETA…</div>
+    </div>`;
+
   return `
   <div class="prog-wrap">
     ${zoomCtrls}
@@ -396,16 +487,19 @@ function buildProgressBar(pos) {
       <div class="prog-zone-loss"   style="${lossStyle}"></div>
       ${beZoneR.width > 0 ? `<div class="prog-zone-be" style="${beZoneStyle}"></div>` : ''}
       <div class="prog-zone-profit" style="${profitStyle}"></div>
+      ${dwellLayer}
       <div class="${fillClass}"     style="left:${fillR.left.toFixed(1)}%;width:${fillR.width.toFixed(1)}%"></div>
       ${orderMarkers}
       ${beMarker}
       ${milestoneMarkers}
       ${entryMarker}
       ${markBlock}
+      ${nextMobileBlock}
       ${oorSl}${oorEntry}${oorBe}${oorMark}${oorTp}
     </div>
     ${gravStrip}
     ${pilot}
+    ${etaPanel}
     ${timeLayer}
   </div>`;
 }
@@ -858,6 +952,10 @@ function buildPosCardLite(pos) {
 function renderPositions(positions) {
   const n    = positions ? positions.length : 0;
 
+  // Heat memory: registra mark de cada posición visible para drawHeat layers
+  const nowTs = Date.now();
+  (positions || []).forEach(p => _pushPriceHeat(p.full_sym, p.mark, nowTs));
+
   // Limpiar sets de estado de posiciones que ya desaparecieron del snapshot
   const activeKeys = new Set((positions || []).map(p => `${p.full_sym}_${p.side}`));
   for (const k of [..._closingPos])           if (!activeKeys.has(k)) _closingPos.delete(k);
@@ -875,6 +973,7 @@ function renderPositions(positions) {
   // entre el snapshot WS @1Hz que reemplaza el HTML y el poller @2-3s)
   if (typeof paintGravFromCache  === 'function') paintGravFromCache();
   if (typeof paintPilotFromCache === 'function') paintPilotFromCache();
+  if (typeof paintEtaFromCache   === 'function') paintEtaFromCache();
 
   // Badge en side-tab "Trades" (suma posiciones + análisis)
   const sb  = document.getElementById('side-pos-count');
@@ -2077,10 +2176,48 @@ setInterval(() => {
 // zoom de la progress bar). Para cada símbolo único, hace UNA petición con el
 // viewport más amplio y re-renderiza todos los canvases de ese símbolo con su
 // propio viewport.
-const _gravCache  = new Map();   // sym → { ts, data }
-const _pilotCache = new Map();
-let   _gravBusy   = false;
-let   _pilotBusy  = false;
+const _gravCache   = new Map();   // sym → { ts, data }
+const _pilotCache  = new Map();
+const _trailsCache = new Map();   // sym → { ts, trails }
+const _energyCache = new Map();   // sym → { ts, data }
+const _priceHeat   = new Map();   // sym → ring buffer of {ts, price}
+
+// ── User-tweakable visual config (persistido en localStorage) ────────────────
+const QtsConfig = {
+  heatOpacity: parseFloat(localStorage.getItem('qts_heat_opacity') || '0.5'),
+  setHeatOpacity(v) {
+    const n = Math.max(0, Math.min(1, parseFloat(v) || 0));
+    this.heatOpacity = n;
+    localStorage.setItem('qts_heat_opacity', String(n));
+    if (typeof paintGravFromCache === 'function') paintGravFromCache();
+    if (typeof _gvpTick === 'function' && _gvpState) _gvpTick();
+  },
+};
+window.QtsConfig = QtsConfig;
+const _PRICE_HEAT_MAX = 240;       // ~6min @ 1.5s sample (driven by snapshot 1Hz)
+
+function _pushPriceHeat(sym, price, ts) {
+  if (!sym || !(price > 0)) return;
+  let arr = _priceHeat.get(sym);
+  if (!arr) { arr = []; _priceHeat.set(sym, arr); }
+  const last = arr[arr.length - 1];
+  if (last && (ts - last.ts) < 800) return;   // throttle 800ms entre samples
+  arr.push({ ts, price });
+  if (arr.length > _PRICE_HEAT_MAX) arr.shift();
+}
+
+function _getPriceHeat(sym) {
+  const arr = _priceHeat.get(sym);
+  if (!arr || arr.length < 4) return null;
+  const now = Date.now();
+  const cutoff = now - 6 * 60 * 1000;
+  const fresh = arr.filter(s => s.ts >= cutoff);
+  return fresh.length >= 4 ? fresh : null;
+}
+let   _gravBusy    = false;
+let   _pilotBusy   = false;
+let   _trailsBusy  = false;
+let   _energyBusy  = false;
 
 // Repintado síncrono desde cache — se llama tras cada re-render de pos cards
 function paintGravFromCache() {
@@ -2089,19 +2226,148 @@ function paintGravFromCache() {
     if (!cached) return;
     const lo = parseFloat(c.dataset.gravVmin);
     const hi = parseFloat(c.dataset.gravVmax);
-    if (hi > lo) QtsGravity.render(c, cached.data, { vmin: lo, vmax: hi });
+    if (!(hi > lo)) return;
+    let geom = null;
+    try { if (c.dataset.gravGeom) geom = JSON.parse(c.dataset.gravGeom); } catch (_) {}
+    const tr = _trailsCache.get(c.dataset.gravSym);
+    const en = _energyCache.get(c.dataset.gravSym);
+    const ht = _getPriceHeat(c.dataset.gravSym);
+    QtsGravity.render(c, cached.data, { vmin: lo, vmax: hi },
+      { geom, trails: tr ? tr.trails : null, energy: en ? en.data : null,
+        heat: ht, heatOpacity: QtsConfig.heatOpacity });
   });
+}
+
+const _pilotHistory = new Map();    // sym → { pressure:[], velocity:[], road:[] }
+const _PILOT_HIST_LEN = 30;
+
+function _pushPilotSample(sym, data) {
+  if (!sym || !data) return;
+  let h = _pilotHistory.get(sym);
+  if (!h) { h = { pressure: [], velocity: [], road: [] }; _pilotHistory.set(sym, h); }
+  const ps = (data.pressure && data.pressure.score) || 0;
+  const vs = (data.velocity && data.velocity.score) || 0;
+  const rs = (data.road     && data.road.confidence) || 0;
+  const push = (arr, v) => {
+    arr.push(v);
+    if (arr.length > _PILOT_HIST_LEN) arr.shift();
+  };
+  push(h.pressure, ps);
+  push(h.velocity, vs);
+  push(h.road,     rs);
 }
 
 function paintPilotFromCache() {
   document.querySelectorAll('.pilot-cockpit[data-pilot-sym]').forEach(el => {
-    const cached = _pilotCache.get(el.dataset.pilotSym);
-    if (cached) QtsGauges.renderAll(el, cached.data);
+    const sym = el.dataset.pilotSym;
+    const cached = _pilotCache.get(sym);
+    if (!cached) return;
+    QtsGauges.renderAll(el, cached.data, _pilotHistory.get(sym));
   });
+}
+
+// ── ETA panel ───────────────────────────────────────────────────────────────
+const _etaCache = new Map();   // posKey → { ts, data }
+let   _etaBusy  = false;
+
+function _fmtEta(s) {
+  if (s == null) return '—';
+  if (s < 60)   return `${s.toFixed(0)}s`;
+  if (s < 3600) return `${(s/60).toFixed(1)}m`;
+  if (s < 86400) return `${(s/3600).toFixed(1)}h`;
+  return `${(s/86400).toFixed(1)}d`;
+}
+
+function _etaTargetClass(tgt) {
+  if (!tgt.feasible) return 'eta-tgt eta-na';
+  if (tgt.key === 'tp') return 'eta-tgt eta-tp';
+  if (tgt.key === 'sl') {
+    return tgt.eta_seconds != null && tgt.eta_seconds < 600 ? 'eta-tgt eta-sl alert' : 'eta-tgt eta-sl';
+  }
+  if (tgt.key === 'be') return 'eta-tgt eta-be';
+  return 'eta-tgt eta-ms';
+}
+
+function paintEtaFromCache() {
+  document.querySelectorAll('.pilot-eta[data-eta-key]').forEach(el => {
+    const cached = _etaCache.get(el.dataset.etaKey);
+    if (!cached) return;
+    const d = cached.data;
+    const conf = d.confidence || 'medium';
+    const regime = d.regime || 'UNKNOWN';
+    const vPct = d.velocity_pct_min || 0;
+    const arrow = vPct > 0.01 ? '↗' : vPct < -0.01 ? '↘' : '→';
+
+    // Filtrar a SL/BE/TP solamente (milestones se ven en el strip)
+    const tgts = (d.targets || []).filter(t => ['sl', 'be', 'tp'].includes(t.key));
+    const tgtsHtml = tgts.map(t => {
+      const cls = _etaTargetClass(t);
+      const eta = t.feasible ? _fmtEta(t.eta_seconds) : '→';
+      const band = (t.feasible && t.eta_low != null && t.eta_high != null)
+        ? `±${_fmtEta((t.eta_high - t.eta_low) / 2)}`
+        : t.feasible && t.eta_high == null ? '±∞' : '';
+      return `<div class="${cls}" title="${esc(t.label)} @ ${t.price}${t.feasible ? ` · ETA ${eta} ${band}` : ' · alejándose'}">
+        <span class="eta-tag">${esc(t.label)}</span>
+        <span class="eta-val">${esc(eta)}</span>
+        ${band ? `<span class="eta-band">${esc(band)}</span>` : ''}
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="eta-header">
+        <span class="eta-title">ETA</span>
+        <span class="eta-vel">${arrow} ${vPct >= 0 ? '+' : ''}${vPct.toFixed(2)}%/m</span>
+        <span class="eta-conf eta-conf-${esc(conf)}" title="Regime ${esc(regime)}">${esc(conf)}</span>
+      </div>
+      <div class="eta-targets">${tgtsHtml}</div>`;
+  });
+}
+
+async function _etaTick() {
+  if (_etaBusy) return;
+  _etaBusy = true;
+  try {
+    const els = document.querySelectorAll('.pilot-eta[data-eta-key]');
+    if (!els.length) return;
+    const now = Date.now();
+
+    const tasks = [];
+    els.forEach(el => {
+      const key = el.dataset.etaKey;
+      const cached = _etaCache.get(key);
+      if (cached && now - cached.ts < 4500) return;
+
+      let geom = null;
+      try { geom = JSON.parse(el.dataset.etaGeom); } catch (_) { return; }
+      if (!geom) return;
+      const sym = el.dataset.etaSym;
+      const milestones = (geom.milestones || []).map(m => `${m.pct}:${m.price}`).join(',');
+      const url = `/api/eta/${encodeURIComponent(sym)}`
+        + `?sl=${geom.sl || 0}&entry=${geom.entry || 0}&be=${geom.be || 0}`
+        + `&tp=${geom.tp || 0}&is_long=${geom.is_long ? 'true' : 'false'}`
+        + `&milestones=${encodeURIComponent(milestones)}`;
+      tasks.push((async () => {
+        try {
+          const r = await fetch(url);
+          if (!r.ok) return;
+          _etaCache.set(key, { ts: now, data: await r.json() });
+        } catch (_) {}
+      })());
+    });
+    await Promise.all(tasks);
+    paintEtaFromCache();
+
+    const active = new Set();
+    els.forEach(el => active.add(el.dataset.etaKey));
+    Array.from(_etaCache.keys()).forEach(k => { if (!active.has(k)) _etaCache.delete(k); });
+  } finally {
+    _etaBusy = false;
+  }
 }
 
 window.paintGravFromCache  = paintGravFromCache;
 window.paintPilotFromCache = paintPilotFromCache;
+window.paintEtaFromCache   = paintEtaFromCache;
 
 async function _gravTick() {
   if (_gravBusy) return;
@@ -2161,22 +2427,133 @@ async function _pilotTick() {
       try {
         const r = await fetch(`/api/pilot/${encodeURIComponent(sym)}`);
         if (!r.ok) return;
-        _pilotCache.set(sym, { ts: now, data: await r.json() });
+        const data = await r.json();
+        _pilotCache.set(sym, { ts: now, data });
+        _pushPilotSample(sym, data);
       } catch (_) { /* swallow */ }
     }));
 
     paintPilotFromCache();
 
     Array.from(_pilotCache.keys()).forEach(k => { if (!syms.has(k)) _pilotCache.delete(k); });
+    Array.from(_pilotHistory.keys()).forEach(k => { if (!syms.has(k)) _pilotHistory.delete(k); });
   } finally {
     _pilotBusy = false;
   }
 }
 
-setInterval(_gravTick,  2000);
-setInterval(_pilotTick, 3000);
-setTimeout(_gravTick,   400);
-setTimeout(_pilotTick,  600);
+async function _trailsTick() {
+  if (_trailsBusy) return;
+  _trailsBusy = true;
+  try {
+    const canvases = document.querySelectorAll('canvas[data-grav-sym]');
+    const gvpSym   = _gvpState && lastSnap && lastSnap.positions[_gvpState.posKey]
+                       ? lastSnap.positions[_gvpState.posKey].full_sym : null;
+
+    const bySym = new Map();   // sym → {vmin, vmax}
+    canvases.forEach(c => {
+      const sym = c.dataset.gravSym;
+      const lo  = parseFloat(c.dataset.gravVmin);
+      const hi  = parseFloat(c.dataset.gravVmax);
+      if (!sym || !(hi > lo)) return;
+      const cur = bySym.get(sym) || { vmin: lo, vmax: hi };
+      cur.vmin = Math.min(cur.vmin, lo);
+      cur.vmax = Math.max(cur.vmax, hi);
+      bySym.set(sym, cur);
+    });
+    if (gvpSym && !bySym.has(gvpSym)) {
+      try {
+        const pos = lastSnap.positions[_gvpState.posKey];
+        const { view } = _gvpComputeView(pos);
+        if (view && view.max > view.min) bySym.set(gvpSym, { vmin: view.min, vmax: view.max });
+      } catch (_) {}
+    }
+    if (!bySym.size) return;
+
+    const now = Date.now();
+    await Promise.all(Array.from(bySym.entries()).map(async ([sym, grp]) => {
+      const cached = _trailsCache.get(sym);
+      if (cached && now - cached.ts < 6000) return;
+      try {
+        const url = `/api/level_trails/${encodeURIComponent(sym)}`
+          + `?view_min=${grp.vmin}&view_max=${grp.vmax}`;
+        const r = await fetch(url);
+        if (!r.ok) return;
+        const j = await r.json();
+        _trailsCache.set(sym, { ts: now, trails: j.trails || [] });
+      } catch (_) {}
+    }));
+
+    paintGravFromCache();
+    if (typeof _gvpTick === 'function' && _gvpState) _gvpTick();
+
+    const active = new Set(bySym.keys());
+    Array.from(_trailsCache.keys()).forEach(k => { if (!active.has(k)) _trailsCache.delete(k); });
+  } finally {
+    _trailsBusy = false;
+  }
+}
+
+async function _energyTick() {
+  if (_energyBusy) return;
+  _energyBusy = true;
+  try {
+    const canvases = document.querySelectorAll('canvas[data-grav-sym]');
+    const bySym = new Map();
+    canvases.forEach(c => {
+      const sym = c.dataset.gravSym;
+      const lo  = parseFloat(c.dataset.gravVmin);
+      const hi  = parseFloat(c.dataset.gravVmax);
+      if (!sym || !(hi > lo)) return;
+      const cur = bySym.get(sym) || { vmin: lo, vmax: hi };
+      cur.vmin = Math.min(cur.vmin, lo);
+      cur.vmax = Math.max(cur.vmax, hi);
+      bySym.set(sym, cur);
+    });
+    if (_gvpState && lastSnap) {
+      const pos = lastSnap.positions[_gvpState.posKey];
+      if (pos && !bySym.has(pos.full_sym)) {
+        try {
+          const { view } = _gvpComputeView(pos);
+          if (view && view.max > view.min) bySym.set(pos.full_sym, { vmin: view.min, vmax: view.max });
+        } catch (_) {}
+      }
+    }
+    if (!bySym.size) return;
+
+    const now = Date.now();
+    await Promise.all(Array.from(bySym.entries()).map(async ([sym, grp]) => {
+      const cached = _energyCache.get(sym);
+      if (cached && now - cached.ts < 3500) return;
+      try {
+        const url = `/api/energy/${encodeURIComponent(sym)}`
+          + `?view_min=${grp.vmin}&view_max=${grp.vmax}`;
+        const r = await fetch(url);
+        if (!r.ok) return;
+        _energyCache.set(sym, { ts: now, data: await r.json() });
+      } catch (_) {}
+    }));
+
+    paintGravFromCache();
+    if (typeof _gvpTick === 'function' && _gvpState) _gvpTick();
+
+    const active = new Set(bySym.keys());
+    Array.from(_energyCache.keys()).forEach(k => { if (!active.has(k)) _energyCache.delete(k); });
+  } finally {
+    _energyBusy = false;
+  }
+}
+
+setInterval(_gravTick,   2000);
+setInterval(_pilotTick,  3000);
+setInterval(_etaTick,    5000);
+setInterval(_trailsTick, 8000);
+setInterval(_energyTick, 4000);
+setTimeout(_gravTick,    400);
+setTimeout(_pilotTick,   600);
+setTimeout(_etaTick,     800);
+setTimeout(_trailsTick,  1200);
+setTimeout(_energyTick,  1000);
 
 // ── Gravity Vertical Panel — drawer independiente, expandido ────────────────
 // Reusa /api/liquidity y respeta el zoom de la pos-card de origen. Cada tick
@@ -2251,10 +2628,203 @@ async function _gvpTick() {
     if (!r.ok) return;
     const data  = await r.json();
     const panel = _gvpEl();
-    if (panel && _gvpState) QtsGravityVertical.render(panel, data, { view, geom });
+    const tr    = _trailsCache.get(pos.full_sym);
+    const en    = _energyCache.get(pos.full_sym);
+    const ht    = _getPriceHeat(pos.full_sym);
+    if (panel && _gvpState) {
+      QtsGravityVertical.render(panel, data, {
+        view, geom,
+        trails: tr ? tr.trails : null,
+        energy: en ? en.data   : null,
+        heat:   ht,
+        heatOpacity: QtsConfig.heatOpacity,
+      });
+    }
   } catch (_) { /* swallow */ }
   finally { _gvpBusy = false; }
 }
+
+// ── Replay scrubber ─────────────────────────────────────────────────────────
+let _replayOffsetMs = 0;   // 0 = vivo. >0 = retroceder N ms.
+
+function _updateReplaySlider() {
+  const slider = document.getElementById('gvp-replay-range');
+  const lbl    = document.querySelector('[data-gvp-replay-time]');
+  if (!slider || !_gvpState || !lastSnap) return;
+  const pos = lastSnap.positions[_gvpState.posKey];
+  if (!pos) return;
+  const arr = _priceHeat.get(pos.full_sym) || [];
+  const now = Date.now();
+  const oldest = arr.length ? (now - arr[0].ts) : 0;
+  const maxOffset = Math.min(5 * 60 * 1000, oldest);
+  slider.max = String(maxOffset);
+  if (_replayOffsetMs > maxOffset) _replayOffsetMs = maxOffset;
+  slider.value = String(_replayOffsetMs);
+  if (lbl) {
+    if (_replayOffsetMs <= 0) { lbl.textContent = 'LIVE'; lbl.classList.remove('active'); }
+    else {
+      const s = _replayOffsetMs / 1000;
+      lbl.textContent = s < 60 ? `−${s.toFixed(0)}s` : `−${(s/60).toFixed(1)}m`;
+      lbl.classList.add('active');
+    }
+  }
+}
+
+function _replayPriceFor(sym) {
+  if (_replayOffsetMs <= 0) return null;
+  const arr = _priceHeat.get(sym);
+  if (!arr || !arr.length) return null;
+  const targetTs = Date.now() - _replayOffsetMs;
+  // Búsqueda lineal — buffer pequeño
+  let best = arr[0];
+  let bestDiff = Math.abs(arr[0].ts - targetTs);
+  for (const s of arr) {
+    const d = Math.abs(s.ts - targetTs);
+    if (d < bestDiff) { best = s; bestDiff = d; }
+  }
+  return best;
+}
+
+function _renderReplayMarker() {
+  const panel = document.getElementById('gvp-panel');
+  if (!panel) return;
+  let marker = panel.querySelector('.gvp-replay-marker');
+  if (_replayOffsetMs <= 0 || !_gvpState || !lastSnap) {
+    if (marker) marker.remove();
+    return;
+  }
+  const pos = lastSnap.positions[_gvpState.posKey];
+  if (!pos) { if (marker) marker.remove(); return; }
+  const sample = _replayPriceFor(pos.full_sym);
+  if (!sample) { if (marker) marker.remove(); return; }
+  const view = _gvpComputeView(pos).view;
+  if (!(view.max > view.min)) return;
+  const y = (1 - (sample.price - view.min) / (view.max - view.min)) * 100;
+  if (y < 0 || y > 100) { if (marker) marker.remove(); return; }
+  const chart = panel.querySelector('.gvp-chart');
+  if (!chart) return;
+  if (!marker) {
+    marker = document.createElement('div');
+    marker.className = 'gvp-replay-marker';
+    chart.appendChild(marker);
+  }
+  marker.style.top = `${y.toFixed(2)}%`;
+}
+
+document.getElementById('gvp-replay-range')?.addEventListener('input', (e) => {
+  _replayOffsetMs = parseInt(e.target.value, 10) || 0;
+  _updateReplaySlider();
+  _renderReplayMarker();
+});
+document.getElementById('gvp-replay-live')?.addEventListener('click', () => {
+  _replayOffsetMs = 0;
+  _updateReplaySlider();
+  _renderReplayMarker();
+});
+setInterval(() => {
+  if (_gvpState) { _updateReplaySlider(); _renderReplayMarker(); }
+}, 1500);
+
+// ── Sonificación opcional (Web Audio) ───────────────────────────────────────
+let _audioCtx        = null;
+let _soundEnabled    = localStorage.getItem('gvp_sound') === '1';
+const _lastAnomKey   = { val: '' };
+
+function _ensureAudio() {
+  if (_audioCtx) return _audioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  _audioCtx = new AC();
+  return _audioCtx;
+}
+
+function _beep(freq, durMs, type) {
+  const ctx = _ensureAudio();
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.value = freq;
+  gain.gain.value = 0;
+  osc.connect(gain).connect(ctx.destination);
+  const now = ctx.currentTime;
+  gain.gain.linearRampToValueAtTime(0.08, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + durMs / 1000);
+  osc.start(now);
+  osc.stop(now + durMs / 1000);
+}
+
+function _maybePlayAnomalySound() {
+  if (!_soundEnabled || !_gvpState || !lastSnap) return;
+  const pos = lastSnap.positions[_gvpState.posKey];
+  if (!pos) return;
+  const en = _energyCache.get(pos.full_sym);
+  if (!en || !en.data) return;
+  const d = en.data;
+  const spikes = (d.levels || []).filter(e => e.energy >= 70).length;
+  const liqs = ((lastSnap && d.fast_notional > 0) ? Math.floor(d.fast_notional / 100000) : 0);
+  const key = `${spikes}|${(d.vitality | 0)}|${liqs}|${(d.pulse_hz * 10) | 0}`;
+  if (key === _lastAnomKey.val) return;
+  _lastAnomKey.val = key;
+  // Sólo emite si crece (más spikes que antes, no si bajan)
+  if (spikes > 0)          _beep(880 + spikes * 60, 90, 'triangle');
+  else if (d.vitality >= 80) _beep(420, 70, 'sine');
+  else if (d.pulse_hz >= 6)  _beep(660, 60, 'square');
+}
+
+document.getElementById('gvp-sound')?.addEventListener('click', () => {
+  _soundEnabled = !_soundEnabled;
+  localStorage.setItem('gvp_sound', _soundEnabled ? '1' : '0');
+  const btn = document.getElementById('gvp-sound');
+  if (btn) {
+    btn.textContent = _soundEnabled ? '🔊' : '🔇';
+    btn.classList.toggle('on', _soundEnabled);
+  }
+  if (_soundEnabled) _ensureAudio();
+});
+// Estado inicial del botón
+{
+  const btn = document.getElementById('gvp-sound');
+  if (btn) {
+    btn.textContent = _soundEnabled ? '🔊' : '🔇';
+    btn.classList.toggle('on', _soundEnabled);
+  }
+}
+setInterval(_maybePlayAnomalySound, 2500);
+
+{
+  const slider = document.getElementById('gvp-heat-opacity');
+  if (slider) {
+    slider.value = String(Math.round((QtsConfig?.heatOpacity ?? 0.5) * 100));
+    slider.addEventListener('input', e => {
+      const v = parseFloat(e.target.value) / 100;
+      QtsConfig.setHeatOpacity(v);
+    });
+  }
+}
+
+// ── Modal de leyenda visual ────────────────────────────────────────────────
+function _openHelpModal() {
+  const m = document.getElementById('gvp-help-modal');
+  const b = document.getElementById('gvp-help-backdrop');
+  if (m) m.hidden = false;
+  if (b) b.hidden = false;
+}
+function _closeHelpModal() {
+  const m = document.getElementById('gvp-help-modal');
+  const b = document.getElementById('gvp-help-backdrop');
+  if (m) m.hidden = true;
+  if (b) b.hidden = true;
+}
+document.getElementById('gvp-help')?.addEventListener('click', _openHelpModal);
+document.getElementById('gvp-help-close')?.addEventListener('click', _closeHelpModal);
+document.getElementById('gvp-help-backdrop')?.addEventListener('click', _closeHelpModal);
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const m = document.getElementById('gvp-help-modal');
+    if (m && !m.hidden) _closeHelpModal();
+  }
+});
 
 document.getElementById('gvp-close')?.addEventListener('click', closeGravPanel);
 document.getElementById('gvp-backdrop')?.addEventListener('click', closeGravPanel);

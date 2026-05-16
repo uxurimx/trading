@@ -37,6 +37,9 @@ from web.calculator import calc_position_metrics, format_elapsed
 from web.zone_tracker import tracker as _zone_tracker
 from web.liquidity_map import build_liquidity_map
 from web.sentiment import compute_pilot
+from web.eta_estimator import compute_eta
+from web.level_tracker import tracker as _level_tracker
+from web.energy_tracker import compute_energy
 
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger("qts.web")
@@ -258,6 +261,13 @@ def _build_snapshot() -> dict:
                 ms        = _market.states.get(sym)
                 ms_price  = ms.ticker.last_price if (ms and ms.connected and ms.ticker.last_price > 0) else 0.0
                 live_mark = _mark_prices.get(sym) or ms_price or 0.0
+
+                # Touch counter — barato (O(tracks) por símbolo)
+                if live_mark > 0:
+                    try:
+                        _level_tracker.touch_tick(sym, live_mark)
+                    except Exception:
+                        pass
 
                 # Duración: confiar en createdTime de Bybit cuando es razonable.
                 # Sobrevive reinicios del server porque createdTime viene del exchange.
@@ -674,6 +684,119 @@ async def api_liquidity(
         view_max=view_max,
         bucket_mult=max(0.25, min(8.0, bucket_mult)),
     )
+    if payload is None:
+        return JSONResponse({"error": "no data"}, status_code=503)
+
+    try:
+        _level_tracker.record(sym, payload.get("levels") or [])
+    except Exception:
+        pass
+
+    return JSONResponse(payload)
+
+
+@app.get("/api/energy/{symbol}")
+async def api_energy(
+    symbol: str,
+    view_min: float = 0.0,
+    view_max: float = 0.0,
+):
+    """Energía instantánea + dirección por nivel estructural + vitalidad global."""
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    ms = _market.states.get(sym)
+    if not ms:
+        return JSONResponse({"error": "symbol not streaming"}, status_code=404)
+
+    price = ms.ticker.last_price or ms.orderbook.mid_price
+    if view_min <= 0 or view_max <= 0 or view_max <= view_min:
+        if price > 0:
+            view_min = price * 0.98
+            view_max = price * 1.02
+
+    try:
+        lmap = _liq_an.analyze(ms)
+        levels = []
+        for lv in lmap.levels:
+            if view_min and (lv.price < view_min or lv.price > view_max):
+                continue
+            levels.append({"price": lv.price, "type": lv.level_type})
+    except Exception:
+        levels = []
+
+    payload = compute_energy(ms, levels, view_min, view_max)
+    if payload is None:
+        return JSONResponse({"error": "no data"}, status_code=503)
+    return JSONResponse(payload)
+
+
+@app.get("/api/level_trails/{symbol}")
+async def api_level_trails(
+    symbol: str,
+    view_min: float = 0.0,
+    view_max: float = 0.0,
+):
+    """Trayectoria reciente de niveles estructurales dentro del viewport."""
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    ms = _market.states.get(sym)
+    if not ms:
+        return JSONResponse({"trails": [], "error": "symbol not streaming"}, status_code=404)
+    price = ms.ticker.last_price or ms.orderbook.mid_price
+    if view_min <= 0 or view_max <= 0 or view_max <= view_min:
+        if price <= 0:
+            return JSONResponse({"trails": []})
+        view_min = price * 0.98
+        view_max = price * 1.02
+    trails = _level_tracker.get_trails(sym, view_min, view_max)
+    return JSONResponse({
+        "symbol":   sym,
+        "view_min": view_min,
+        "view_max": view_max,
+        "ts":       int(time.time() * 1000),
+        "trails":   trails,
+    })
+
+
+@app.get("/api/eta/{symbol}")
+async def api_eta(
+    symbol: str,
+    sl: float = 0.0,
+    entry: float = 0.0,
+    be: float = 0.0,
+    tp: float = 0.0,
+    is_long: bool = True,
+    milestones: str = "",   # "25:79000,50:80000,75:81000"
+):
+    """Proyecta ETA a SL/BE/TP/milestones desde el precio actual."""
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    ms = _market.states.get(sym)
+    if not ms:
+        return JSONResponse({"error": "symbol not streaming"}, status_code=404)
+
+    ms_list = []
+    for tok in (milestones or "").split(","):
+        tok = tok.strip()
+        if not tok or ":" not in tok:
+            continue
+        try:
+            pct_s, px_s = tok.split(":", 1)
+            ms_list.append({"pct": int(float(pct_s)), "price": float(px_s)})
+        except Exception:
+            continue
+
+    geom = {
+        "sl": sl, "entry": entry, "be": be, "tp": tp,
+        "is_long": bool(is_long), "milestones": ms_list,
+    }
+    sig    = _signals.get(sym, {})
+    rg     = sig.get("regime")
+    regime = rg.regime if rg else "UNKNOWN"
+    payload = compute_eta(ms, geom, regime=regime)
     if payload is None:
         return JSONResponse({"error": "no data"}, status_code=503)
     return JSONResponse(payload)

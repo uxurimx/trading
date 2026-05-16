@@ -38,6 +38,11 @@ ZONE_LABELS = {
     'above_tp': 'TP+',
 }
 
+# Histograma de alta resolución sobre el rango SL→TP (40 buckets).
+# In-memory only: revela patrones de dwell ("dónde se pasea el precio")
+# dentro de cada zona. Se reinicia con el server (parent-zone seconds persisten).
+HIST_BUCKETS = 40
+
 # Debounce de flush a DB: cada 10s o cada 30 samples por pos_key.
 FLUSH_INTERVAL_S = 10.0
 FLUSH_EVERY_N    = 30
@@ -118,6 +123,7 @@ class ZoneTracker:
                 'last_zone': s.get("last_zone"),
                 'last_ts':   s.get("last_ts") or now,
                 'zones':     full_zones,
+                'histogram': [0.0] * HIST_BUCKETS,  # se reconstruye in-memory
             }
             self._last_flush[pk] = now
         log.info("ZoneTracker: rehidratadas %d posiciones desde DB", len(saved))
@@ -164,7 +170,30 @@ class ZoneTracker:
                     'last_entered':   None,
                 } for z in ZONES
             },
+            'histogram': [0.0] * HIST_BUCKETS,
         }
+
+    @staticmethod
+    def _bucket_idx(geom: dict, mark: float) -> Optional[int]:
+        """Mapea mark → índice de bucket [0..HIST_BUCKETS-1] sobre SL→TP.
+        Valores fuera del rango se clampean al borde. None si geom inválida."""
+        try:
+            sl = float(geom.get('sl', 0))
+            tp = float(geom.get('tp', 0))
+            if sl <= 0 or tp <= 0 or sl == tp:
+                return None
+        except Exception:
+            return None
+        # Normalizar: 0 = SL, 1 = TP. SHORT tiene sl > tp, igual de válido (signo invertido).
+        t = (mark - sl) / (tp - sl)
+        if t < 0.0:
+            t = 0.0
+        elif t > 1.0:
+            t = 1.0
+        idx = int(t * HIST_BUCKETS)
+        if idx >= HIST_BUCKETS:
+            idx = HIST_BUCKETS - 1
+        return idx
 
     # ── API ──────────────────────────────────────────────────────────────────
     def sample(
@@ -202,6 +231,15 @@ class ZoneTracker:
 
             prev = st['last_zone']
             dt   = max(0.0, now - st['last_ts'])
+
+            # Histograma fino SL→TP — acumular dt en el bucket actual.
+            bidx = self._bucket_idx(geom, mark)
+            if bidx is not None and dt > 0.0:
+                hist = st.get('histogram')
+                if hist is None:
+                    hist = [0.0] * HIST_BUCKETS
+                    st['histogram'] = hist
+                hist[bidx] += dt
 
             if prev is None:
                 z = st['zones'][zone]
@@ -258,11 +296,14 @@ class ZoneTracker:
                     'pct_of_life':  round(z['seconds'] / denom * 100, 1),
                     'last_entered': z['last_entered'],
                 })
+            hist = st.get('histogram') or []
             return {
                 'opened_at':     st['opened_at'],
                 'current_zone':  st['last_zone'],
                 'total_seconds': round(total_s, 1),
                 'zones':         out_zones,
+                'histogram':     [round(v, 1) for v in hist],
+                'hist_buckets':  HIST_BUCKETS,
             }
 
     def forget(self, pos_key: str) -> None:
