@@ -61,6 +61,12 @@ _signals:        dict = {}
 _mark_prices:    dict = {}   # sym → float, actualizado por WS público (tick a tick)
 _pos_first_seen: dict = {}   # pos_key → server timestamp when first observed
 
+# Runtime stats por pos_key: peaks, MFE/MAE, sample_count, signals_at_open.
+# Se alimenta tick a tick durante el snapshot loop y se archiva al cerrarse la
+# posición (antes del forget) en closed_trade_analysis.
+_pos_runtime:  dict = {}     # pos_key → dict con peaks/pnl/signals
+_pos_last:     dict = {}     # pos_key → último snapshot info (para archivar al cierre)
+
 # ─── Análisis mentales persistidos ───────────────────────────────────────────
 
 _ANALYSES_PATH = Path(__file__).parent.parent / "storage" / "analyses.json"
@@ -245,6 +251,49 @@ def _enrich_analyses() -> list:
     return result
 
 
+def _archive_closed_trade(pos_key: str) -> None:
+    """Persiste el snapshot completo del trade al detectarse su cierre.
+    Captura zonas+histograma del tracker antes del forget."""
+    rt   = _pos_runtime.get(pos_key)
+    last = _pos_last.get(pos_key, {})
+    if not rt:
+        return
+    zsnap = _zone_tracker().final_snapshot(pos_key) or {}
+    opened_ms = int(rt.get("opened_at_ms", 0))
+    closed_ms = int(time.time() * 1000)
+    duration_s = max(0, (closed_ms - opened_ms) // 1000) if opened_ms > 0 else 0
+
+    record = {
+        "pos_key":      pos_key,
+        "symbol":       last.get("symbol", pos_key.split("_")[0]),
+        "side":         last.get("side", pos_key.split("_")[-1] if "_" in pos_key else ""),
+        "direction":    last.get("direction", ""),
+        "opened_at":    opened_ms,
+        "closed_at":    closed_ms,
+        "duration_s":   duration_s,
+        "entry_price":  rt.get("entry_price", 0),
+        "last_mark":    last.get("last_mark", 0),
+        "sl_price":     last.get("sl") or rt.get("sl_initial", 0),
+        "tp_price":     last.get("tp") or rt.get("tp_initial", 0),
+        "qty":          last.get("qty") or rt.get("qty_initial", 0),
+        "leverage":     rt.get("leverage", 1),
+        "max_mark":     rt.get("max_mark", 0),
+        "min_mark":     rt.get("min_mark", 0),
+        "max_pnl":      rt.get("max_pnl", 0),
+        "min_pnl":      rt.get("min_pnl", 0),
+        "last_pnl":     last.get("last_pnl", 0),
+        "sample_count": rt.get("samples", 0),
+        "zones":        zsnap,
+        "signals_open": rt.get("signals_open", {}),
+        "signals_close": last.get("signals_close", {}),
+    }
+    try:
+        from core.db import save_closed_trade_analysis
+        save_closed_trade_analysis(record)
+    except Exception as e:
+        log.error("save_closed_trade_analysis fallo: %s", e)
+
+
 def _build_snapshot() -> dict:
     """Construye el snapshot completo. Nunca lanza excepción — devuelve lo que puede."""
     try:
@@ -297,6 +346,61 @@ def _build_snapshot() -> dict:
                 tr  = sig.get("trend")
                 rg  = sig.get("regime")
 
+                # Runtime stats: peaks, MFE/MAE, snapshot de señales al abrir.
+                # Estos datos se archivan al detectar el cierre de la posición.
+                cur_mark = live_mark or pos.entry_price
+                cur_pnl  = float(metrics.get("net_pnl_now") or 0.0)
+                rt = _pos_runtime.get(pos_key)
+                if rt is None:
+                    rt = {
+                        "opened_at_ms": int(pos.created_time) if pos.created_time > 0 else int(time.time() * 1000),
+                        "entry_price": pos.entry_price,
+                        "sl_initial":  pos.stop_loss,
+                        "tp_initial":  pos.take_profit,
+                        "leverage":    float(pos.leverage),
+                        "qty_initial": pos.size,
+                        "max_mark":    cur_mark,
+                        "min_mark":    cur_mark,
+                        "max_pnl":     cur_pnl,
+                        "min_pnl":     cur_pnl,
+                        "samples":     0,
+                        "signals_open": {
+                            "opp_score": opp.score if opp else 0,
+                            "ab_side":   ab.side   if ab  else "NEUTRAL",
+                            "trend_dir": tr.direction if tr else "NEUTRAL",
+                            "regime":    rg.regime if rg else "UNKNOWN",
+                            "atr":       round(sig.get("atr", 0), 6),
+                            "rsi":       round(sig.get("rsi", 50), 1),
+                        },
+                    }
+                    _pos_runtime[pos_key] = rt
+                else:
+                    if cur_mark > rt["max_mark"]: rt["max_mark"] = cur_mark
+                    if cur_mark < rt["min_mark"] or rt["min_mark"] == 0: rt["min_mark"] = cur_mark
+                    if cur_pnl > rt["max_pnl"]: rt["max_pnl"] = cur_pnl
+                    if cur_pnl < rt["min_pnl"]: rt["min_pnl"] = cur_pnl
+                rt["samples"] += 1
+
+                # Snapshot ligero para archivar si la posición desaparece.
+                _pos_last[pos_key] = {
+                    "symbol":    sym,
+                    "side":      pos.side,
+                    "direction": "LONG" if pos.is_long else "SHORT",
+                    "last_mark": cur_mark,
+                    "last_pnl":  cur_pnl,
+                    "qty":       pos.size,
+                    "sl":        pos.stop_loss,
+                    "tp":        pos.take_profit,
+                    "signals_close": {
+                        "opp_score": opp.score if opp else 0,
+                        "ab_side":   ab.side   if ab  else "NEUTRAL",
+                        "trend_dir": tr.direction if tr else "NEUTRAL",
+                        "regime":    rg.regime if rg else "UNKNOWN",
+                        "atr":       round(sig.get("atr", 0), 6),
+                        "rsi":       round(sig.get("rsi", 50), 1),
+                    },
+                }
+
                 orders_data = [
                     {
                         "order_id": o.order_id,
@@ -342,6 +446,19 @@ def _build_snapshot() -> dict:
         for k in list(_pos_first_seen):
             if k not in active_keys:
                 del _pos_first_seen[k]
+
+        # Detectar cierre: posición que estaba siendo trackeada y desaparece.
+        # Antes de olvidarla, archivar el snapshot completo en DB para análisis.
+        closed_keys = [k for k in list(_pos_runtime) if k not in active_keys]
+        for k in closed_keys:
+            try:
+                _archive_closed_trade(k)
+            except Exception as e:
+                log.error("archive_closed_trade %s: %s", k, e)
+            finally:
+                _pos_runtime.pop(k, None)
+                _pos_last.pop(k, None)
+
         for k in _zone_tracker().known_keys():
             if k not in active_keys:
                 _zone_tracker().forget(k)
@@ -418,6 +535,12 @@ async def _account_refresh_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        from core.db import initialize_db
+        initialize_db()
+    except Exception as e:
+        log.warning("initialize_db: %s", e)
+
+    try:
         await _exec.detect_position_mode()
     except Exception as e:
         log.warning("detect_position_mode: %s", e)
@@ -480,6 +603,29 @@ async def ws_endpoint(ws: WebSocket):
 @app.get("/api/snapshot")
 async def api_snapshot():
     return JSONResponse(_build_snapshot())
+
+
+@app.get("/api/closed-trades")
+async def api_closed_trades(limit: int = 100):
+    """Archivo enriquecido de trades cerrados con contexto completo
+    (zonas, histograma, peaks, MFE/MAE, señales al abrir y cerrar)."""
+    try:
+        from core.db import get_closed_trade_analyses
+        items = get_closed_trade_analyses(limit=min(int(limit), 500))
+        for it in items:
+            it["duration_fmt"] = format_elapsed(it.get("duration_s", 0))
+            entry = it.get("entry_price", 0)
+            qty   = it.get("qty", 0)
+            if entry > 0 and qty > 0:
+                dirn = 1 if (it.get("direction") == "LONG" or it.get("side") == "Buy") else -1
+                it["mfe_usd"] = round((it["max_mark"] - entry) * qty * dirn, 4) if dirn == 1 else round((entry - it["min_mark"]) * qty, 4)
+                it["mae_usd"] = round((it["min_mark"] - entry) * qty * dirn, 4) if dirn == 1 else round((entry - it["max_mark"]) * qty, 4)
+            else:
+                it["mfe_usd"] = it["mae_usd"] = 0.0
+        return JSONResponse({"trades": items})
+    except Exception as e:
+        log.error("api_closed_trades: %s", e)
+        return JSONResponse({"trades": [], "error": str(e)})
 
 
 @app.get("/api/history")

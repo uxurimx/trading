@@ -297,14 +297,40 @@ class ZoneTracker:
                     'last_entered': z['last_entered'],
                 })
             hist = st.get('histogram') or []
+            opened = float(st['opened_at'] or 0.0)
+            wall_clock = max(0.0, time.time() - opened) if opened > 0 else 0.0
             return {
-                'opened_at':     st['opened_at'],
-                'current_zone':  st['last_zone'],
-                'total_seconds': round(total_s, 1),
-                'zones':         out_zones,
-                'histogram':     [round(v, 1) for v in hist],
-                'hist_buckets':  HIST_BUCKETS,
+                'opened_at':            opened,
+                'current_zone':         st['last_zone'],
+                'total_seconds':        round(total_s, 1),
+                'wall_clock_elapsed_s': round(wall_clock, 1),
+                'zones':                out_zones,
+                'histogram':            [round(v, 1) for v in hist],
+                'hist_buckets':         HIST_BUCKETS,
             }
+
+    def final_snapshot(self, pos_key: str) -> Optional[dict]:
+        """Snapshot completo para archivar antes de forget(). Incluye summary +
+        breakdown crudo de cada zona (no filtra las vacías).
+        """
+        summary = self.summary(pos_key)
+        if not summary:
+            return None
+        with self._lock:
+            st = self._st.get(pos_key)
+            if not st:
+                return summary
+            raw_zones = {
+                zk: {
+                    'seconds':      round(float(z.get('seconds', 0.0)), 2),
+                    'visits':       int(z.get('visits', 0)),
+                    'max_streak':   round(float(z.get('max_streak', 0.0)), 2),
+                    'first_entered': z.get('first_entered'),
+                    'last_entered':  z.get('last_entered'),
+                } for zk, z in st['zones'].items()
+            }
+            summary['zones_raw'] = raw_zones
+            return summary
 
     def forget(self, pos_key: str) -> None:
         with self._lock:

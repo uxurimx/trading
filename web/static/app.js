@@ -352,7 +352,8 @@ function buildProgressBar(pos) {
   // tiempo cocinado suficiente para que la visualización tenga señal (>5s).
   const zonesData = pos.zones;
   let timeLayer = '';
-  if (zonesData && (zonesData.total_seconds || 0) > 5 && Array.isArray(zonesData.zones)) {
+  if (zonesData && Array.isArray(zonesData.zones) &&
+      ((zonesData.total_seconds || 0) > 5 || (zonesData.wall_clock_elapsed_s || 0) > 5)) {
     const m = geom.milestones || [];
     const m25p = m[0]?.price, m50p = m[1]?.price, m75p = m[2]?.price;
     const rngTotal = Math.abs((geom.tp || 0) - (geom.sl || 0)) || 1;
@@ -406,10 +407,13 @@ function buildProgressBar(pos) {
     const curZ = zonesData.zones.find(z => z.key === zonesData.current_zone);
     const curHtml = curZ ? `<span class="prog-legend-current">ahora: ${esc(curZ.label)} (${fmtElapsedShort(curZ.max_streak)})</span>` : '';
 
+    // Tiempo de vida real desde la apertura del trade en Bybit
+    // (wall_clock_elapsed_s) — sobrevive reinicios del server.
+    const lifeS = zonesData.wall_clock_elapsed_s || totalS;
     timeLayer = `
       <div class="prog-time-heat" title="Tiempo cocinado por zona — opacidad ∝ log(t)">${heatSegs}</div>
       <div class="prog-time-stack" title="Proporción temporal por zona">${stack}</div>
-      <div class="prog-time-legend">Fases ${esc(fmtElapsedShort(totalS))}: ${top}${curHtml ? ' · ' + curHtml : ''}</div>`;
+      <div class="prog-time-legend">Vida ${esc(fmtElapsedShort(lifeS))}: ${top}${curHtml ? ' · ' + curHtml : ''}</div>`;
   }
 
   // ── Sub-zone dwell: histograma fino dentro de la track ───────────────────

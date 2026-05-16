@@ -213,6 +213,43 @@ def initialize_db() -> None:
         )
     """)
 
+    # Archivo completo de trades cerrados — capturado desde el dashboard al
+    # detectar el cierre de una posición. Persiste contexto rico (peaks, MFE/MAE,
+    # zonas, histograma, señales al apertura y cierre) para análisis futuro.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS closed_trade_analysis (
+            id              VARCHAR PRIMARY KEY,
+            pos_key         VARCHAR NOT NULL,
+            symbol          VARCHAR NOT NULL,
+            side            VARCHAR NOT NULL,
+            direction       VARCHAR,
+            opened_at       BIGINT  NOT NULL,
+            closed_at       BIGINT  NOT NULL,
+            duration_s      BIGINT  DEFAULT 0,
+            entry_price     DOUBLE  DEFAULT 0,
+            last_mark       DOUBLE  DEFAULT 0,
+            sl_price        DOUBLE  DEFAULT 0,
+            tp_price        DOUBLE  DEFAULT 0,
+            qty             DOUBLE  DEFAULT 0,
+            leverage        DOUBLE  DEFAULT 1,
+            max_mark        DOUBLE  DEFAULT 0,
+            min_mark        DOUBLE  DEFAULT 0,
+            max_pnl         DOUBLE  DEFAULT 0,
+            min_pnl         DOUBLE  DEFAULT 0,
+            last_pnl        DOUBLE  DEFAULT 0,
+            sample_count    BIGINT  DEFAULT 0,
+            zones_json      TEXT,
+            signals_open    TEXT,
+            signals_close   TEXT,
+            created_at      TIMESTAMP DEFAULT now()
+        )
+    """)
+    try:
+        con.execute("CREATE INDEX IF NOT EXISTS idx_cta_symbol ON closed_trade_analysis (symbol)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_cta_closed ON closed_trade_analysis (closed_at)")
+    except Exception:
+        pass
+
     # Migraciones: agregar columnas si no existen (bases de datos previas)
     for migration in [
         "ALTER TABLE trade_journal ADD COLUMN strategy_tag VARCHAR DEFAULT 'absorcion'",
@@ -1129,3 +1166,108 @@ def delete_zone_state(pos_key: str) -> None:
         con.close()
     except Exception as e:
         log.error("delete_zone_state(%s) falló: %s", pos_key, e)
+
+
+# ─── Archivo de trades cerrados (dashboard) ─────────────────────────────────
+
+def save_closed_trade_analysis(record: dict) -> None:
+    """Persiste el snapshot completo de un trade al detectarse su cierre."""
+    try:
+        import uuid as _uuid
+        rid = record.get("id") or _uuid.uuid4().hex[:12]
+        con = get_connection()
+        con.execute("""
+            INSERT OR REPLACE INTO closed_trade_analysis
+                (id, pos_key, symbol, side, direction, opened_at, closed_at, duration_s,
+                 entry_price, last_mark, sl_price, tp_price, qty, leverage,
+                 max_mark, min_mark, max_pnl, min_pnl, last_pnl, sample_count,
+                 zones_json, signals_open, signals_close)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            rid,
+            record.get("pos_key", ""),
+            record.get("symbol", ""),
+            record.get("side", ""),
+            record.get("direction", ""),
+            int(record.get("opened_at", 0) or 0),
+            int(record.get("closed_at", 0) or 0),
+            int(record.get("duration_s", 0) or 0),
+            float(record.get("entry_price", 0) or 0),
+            float(record.get("last_mark", 0) or 0),
+            float(record.get("sl_price", 0) or 0),
+            float(record.get("tp_price", 0) or 0),
+            float(record.get("qty", 0) or 0),
+            float(record.get("leverage", 1) or 1),
+            float(record.get("max_mark", 0) or 0),
+            float(record.get("min_mark", 0) or 0),
+            float(record.get("max_pnl", 0) or 0),
+            float(record.get("min_pnl", 0) or 0),
+            float(record.get("last_pnl", 0) or 0),
+            int(record.get("sample_count", 0) or 0),
+            json.dumps(record.get("zones") or {}),
+            json.dumps(record.get("signals_open") or {}),
+            json.dumps(record.get("signals_close") or {}),
+        ))
+        con.close()
+        log.info("closed_trade_analysis guardado: %s %s pnl=%.2f",
+                 record.get("symbol"), record.get("side"), record.get("last_pnl", 0))
+    except Exception as e:
+        log.error("save_closed_trade_analysis falló: %s", e)
+
+
+def get_closed_trade_analyses(limit: int = 100) -> list:
+    """Retorna el archivo de trades cerrados ordenado por fecha de cierre."""
+    try:
+        con = get_connection()
+        rows = con.execute("""
+            SELECT id, pos_key, symbol, side, direction, opened_at, closed_at, duration_s,
+                   entry_price, last_mark, sl_price, tp_price, qty, leverage,
+                   max_mark, min_mark, max_pnl, min_pnl, last_pnl, sample_count,
+                   zones_json, signals_open, signals_close
+            FROM closed_trade_analysis
+            ORDER BY closed_at DESC LIMIT ?
+        """, (int(limit),)).fetchall()
+        con.close()
+        out = []
+        for r in rows:
+            try:
+                zones = json.loads(r[20]) if r[20] else {}
+            except Exception:
+                zones = {}
+            try:
+                sig_o = json.loads(r[21]) if r[21] else {}
+            except Exception:
+                sig_o = {}
+            try:
+                sig_c = json.loads(r[22]) if r[22] else {}
+            except Exception:
+                sig_c = {}
+            out.append({
+                "id":            r[0],
+                "pos_key":       r[1],
+                "symbol":        r[2],
+                "side":          r[3],
+                "direction":     r[4] or "",
+                "opened_at":     int(r[5] or 0),
+                "closed_at":     int(r[6] or 0),
+                "duration_s":    int(r[7] or 0),
+                "entry_price":   float(r[8] or 0),
+                "last_mark":     float(r[9] or 0),
+                "sl_price":      float(r[10] or 0),
+                "tp_price":      float(r[11] or 0),
+                "qty":           float(r[12] or 0),
+                "leverage":      float(r[13] or 1),
+                "max_mark":      float(r[14] or 0),
+                "min_mark":      float(r[15] or 0),
+                "max_pnl":       float(r[16] or 0),
+                "min_pnl":       float(r[17] or 0),
+                "last_pnl":      float(r[18] or 0),
+                "sample_count":  int(r[19] or 0),
+                "zones":         zones,
+                "signals_open":  sig_o,
+                "signals_close": sig_c,
+            })
+        return out
+    except Exception as e:
+        log.error("get_closed_trade_analyses falló: %s", e)
+        return []
