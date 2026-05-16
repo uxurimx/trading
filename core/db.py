@@ -241,6 +241,13 @@ def initialize_db() -> None:
             zones_json      TEXT,
             signals_open    TEXT,
             signals_close   TEXT,
+            ai_analysis     TEXT,
+            ai_model        VARCHAR DEFAULT '',
+            ai_generated_at BIGINT  DEFAULT 0,
+            bybit_pnl       DOUBLE  DEFAULT 0,
+            total_fees      DOUBLE  DEFAULT 0,
+            exit_price      DOUBLE  DEFAULT 0,
+            avg_entry       DOUBLE  DEFAULT 0,
             created_at      TIMESTAMP DEFAULT now()
         )
     """)
@@ -249,6 +256,20 @@ def initialize_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_cta_closed ON closed_trade_analysis (closed_at)")
     except Exception:
         pass
+    # Migraciones para bases antiguas que no traen las columnas IA
+    for migration in [
+        "ALTER TABLE closed_trade_analysis ADD COLUMN ai_analysis TEXT",
+        "ALTER TABLE closed_trade_analysis ADD COLUMN ai_model VARCHAR DEFAULT ''",
+        "ALTER TABLE closed_trade_analysis ADD COLUMN ai_generated_at BIGINT DEFAULT 0",
+        "ALTER TABLE closed_trade_analysis ADD COLUMN bybit_pnl DOUBLE DEFAULT 0",
+        "ALTER TABLE closed_trade_analysis ADD COLUMN total_fees DOUBLE DEFAULT 0",
+        "ALTER TABLE closed_trade_analysis ADD COLUMN exit_price DOUBLE DEFAULT 0",
+        "ALTER TABLE closed_trade_analysis ADD COLUMN avg_entry DOUBLE DEFAULT 0",
+    ]:
+        try:
+            con.execute(migration)
+        except Exception:
+            pass
 
     # Migraciones: agregar columnas si no existen (bases de datos previas)
     for migration in [
@@ -1181,8 +1202,10 @@ def save_closed_trade_analysis(record: dict) -> None:
                 (id, pos_key, symbol, side, direction, opened_at, closed_at, duration_s,
                  entry_price, last_mark, sl_price, tp_price, qty, leverage,
                  max_mark, min_mark, max_pnl, min_pnl, last_pnl, sample_count,
-                 zones_json, signals_open, signals_close)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 zones_json, signals_open, signals_close,
+                 ai_analysis, ai_model, ai_generated_at,
+                 bybit_pnl, total_fees, exit_price, avg_entry)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,?, ?,?,?,?)
         """, (
             rid,
             record.get("pos_key", ""),
@@ -1207,6 +1230,13 @@ def save_closed_trade_analysis(record: dict) -> None:
             json.dumps(record.get("zones") or {}),
             json.dumps(record.get("signals_open") or {}),
             json.dumps(record.get("signals_close") or {}),
+            json.dumps(record["ai_analysis"]) if record.get("ai_analysis") else None,
+            str(record.get("ai_model", "")),
+            int(record.get("ai_generated_at", 0) or 0),
+            float(record.get("bybit_pnl", 0) or 0),
+            float(record.get("total_fees", 0) or 0),
+            float(record.get("exit_price", 0) or 0),
+            float(record.get("avg_entry", 0) or 0),
         ))
         con.close()
         log.info("closed_trade_analysis guardado: %s %s pnl=%.2f",
@@ -1223,25 +1253,23 @@ def get_closed_trade_analyses(limit: int = 100) -> list:
             SELECT id, pos_key, symbol, side, direction, opened_at, closed_at, duration_s,
                    entry_price, last_mark, sl_price, tp_price, qty, leverage,
                    max_mark, min_mark, max_pnl, min_pnl, last_pnl, sample_count,
-                   zones_json, signals_open, signals_close
+                   zones_json, signals_open, signals_close,
+                   ai_analysis, ai_model, ai_generated_at,
+                   bybit_pnl, total_fees, exit_price, avg_entry
             FROM closed_trade_analysis
             ORDER BY closed_at DESC LIMIT ?
         """, (int(limit),)).fetchall()
         con.close()
         out = []
         for r in rows:
-            try:
-                zones = json.loads(r[20]) if r[20] else {}
-            except Exception:
-                zones = {}
-            try:
-                sig_o = json.loads(r[21]) if r[21] else {}
-            except Exception:
-                sig_o = {}
-            try:
-                sig_c = json.loads(r[22]) if r[22] else {}
-            except Exception:
-                sig_c = {}
+            try:    zones = json.loads(r[20]) if r[20] else {}
+            except Exception: zones = {}
+            try:    sig_o = json.loads(r[21]) if r[21] else {}
+            except Exception: sig_o = {}
+            try:    sig_c = json.loads(r[22]) if r[22] else {}
+            except Exception: sig_c = {}
+            try:    ai = json.loads(r[23]) if r[23] else None
+            except Exception: ai = None
             out.append({
                 "id":            r[0],
                 "pos_key":       r[1],
@@ -1266,8 +1294,57 @@ def get_closed_trade_analyses(limit: int = 100) -> list:
                 "zones":         zones,
                 "signals_open":  sig_o,
                 "signals_close": sig_c,
+                "ai_analysis":   ai,
+                "ai_model":      r[24] or "",
+                "ai_generated_at": int(r[25] or 0),
+                "bybit_pnl":     float(r[26] or 0),
+                "total_fees":    float(r[27] or 0),
+                "exit_price":    float(r[28] or 0),
+                "avg_entry":     float(r[29] or 0),
             })
         return out
     except Exception as e:
         log.error("get_closed_trade_analyses falló: %s", e)
         return []
+
+
+def get_closed_trade_by_id(trade_id: str) -> Optional[dict]:
+    """Retorna un trade cerrado específico por su id."""
+    items = get_closed_trade_analyses(limit=500)
+    for it in items:
+        if it["id"] == trade_id:
+            return it
+    return None
+
+
+def update_closed_trade_ai(trade_id: str, analysis: dict, model: str) -> None:
+    """Persiste el resultado IA y timestamp en el registro."""
+    try:
+        con = get_connection()
+        con.execute("""
+            UPDATE closed_trade_analysis
+            SET ai_analysis = ?, ai_model = ?, ai_generated_at = ?
+            WHERE id = ?
+        """, (json.dumps(analysis), model, int(time.time() * 1000), trade_id))
+        con.close()
+    except Exception as e:
+        log.error("update_closed_trade_ai falló: %s", e)
+
+
+def update_closed_trade_bybit_fields(trade_id: str, bybit_pnl: float,
+                                     total_fees: float, exit_price: float,
+                                     avg_entry: float) -> None:
+    """Enriquece el registro con datos definitivos de Bybit closed-pnl."""
+    try:
+        con = get_connection()
+        con.execute("""
+            UPDATE closed_trade_analysis
+            SET bybit_pnl = ?, total_fees = ?, exit_price = ?, avg_entry = ?
+            WHERE id = ?
+        """, (
+            float(bybit_pnl), float(total_fees), float(exit_price),
+            float(avg_entry), trade_id,
+        ))
+        con.close()
+    except Exception as e:
+        log.error("update_closed_trade_bybit_fields falló: %s", e)

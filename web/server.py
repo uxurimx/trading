@@ -253,7 +253,8 @@ def _enrich_analyses() -> list:
 
 def _archive_closed_trade(pos_key: str) -> None:
     """Persiste el snapshot completo del trade al detectarse su cierre.
-    Captura zonas+histograma del tracker antes del forget."""
+    Captura zonas+histograma del tracker antes del forget y dispara el
+    análisis IA estilo mentor en background."""
     rt   = _pos_runtime.get(pos_key)
     last = _pos_last.get(pos_key, {})
     if not rt:
@@ -262,8 +263,10 @@ def _archive_closed_trade(pos_key: str) -> None:
     opened_ms = int(rt.get("opened_at_ms", 0))
     closed_ms = int(time.time() * 1000)
     duration_s = max(0, (closed_ms - opened_ms) // 1000) if opened_ms > 0 else 0
+    trade_id = uuid.uuid4().hex[:12]
 
     record = {
+        "id":           trade_id,
         "pos_key":      pos_key,
         "symbol":       last.get("symbol", pos_key.split("_")[0]),
         "side":         last.get("side", pos_key.split("_")[-1] if "_" in pos_key else ""),
@@ -292,6 +295,248 @@ def _archive_closed_trade(pos_key: str) -> None:
         save_closed_trade_analysis(record)
     except Exception as e:
         log.error("save_closed_trade_analysis fallo: %s", e)
+        return
+
+    # Disparar análisis mentor IA en background (no bloquea el snapshot loop).
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_run_mentor_analysis(trade_id, record))
+    except RuntimeError:
+        log.debug("no event loop running — IA mentor diferido")
+
+
+def _build_mentor_prompt(rec: dict) -> str:
+    """Construye un prompt rico, con datos reales del seguimiento del trade."""
+    sym       = rec.get("symbol", "?")
+    direction = rec.get("direction") or ("LONG" if rec.get("side") == "Buy" else "SHORT")
+    lev       = rec.get("leverage", 1)
+    entry     = rec.get("entry_price", 0) or rec.get("avg_entry", 0)
+    exit_p    = rec.get("exit_price") or rec.get("last_mark", 0)
+    sl, tp    = rec.get("sl_price", 0), rec.get("tp_price", 0)
+    qty       = rec.get("qty", 0)
+    dur_s     = int(rec.get("duration_s", 0))
+    dur_fmt   = format_elapsed(dur_s)
+    pnl       = rec.get("bybit_pnl") or rec.get("last_pnl", 0)
+    fees      = rec.get("total_fees", 0)
+    mfe       = rec.get("max_pnl", 0)
+    mae       = rec.get("min_pnl", 0)
+    max_mark  = rec.get("max_mark", 0)
+    min_mark  = rec.get("min_mark", 0)
+    samples   = rec.get("sample_count", 0)
+
+    # Distribución por zonas
+    zones    = rec.get("zones") or {}
+    z_list   = zones.get("zones") or []
+    life_s   = zones.get("wall_clock_elapsed_s") or zones.get("total_seconds") or dur_s
+    cur_zone = zones.get("current_zone", "?")
+
+    zones_text_lines = []
+    for z in sorted(z_list, key=lambda x: -x.get("seconds", 0))[:6]:
+        zones_text_lines.append(
+            f"  · {z.get('label','?')}: {format_elapsed(z.get('seconds',0))} "
+            f"({z.get('pct_of_life',0):.0f}% · racha máx {format_elapsed(z.get('max_streak',0))} · "
+            f"{z.get('visits',0)} visitas)"
+        )
+    zones_text = "\n".join(zones_text_lines) or "  (sin datos de zona)"
+
+    # Histograma fino — buckets donde más estancado (top 5)
+    hist        = zones.get("histogram") or []
+    hist_buckets= zones.get("hist_buckets") or len(hist) or 40
+    dwell_text  = "  (sin datos)"
+    if hist and any(h > 0 for h in hist):
+        idx_sorted = sorted(range(len(hist)), key=lambda i: -hist[i])[:5]
+        parts = []
+        for i in idx_sorted:
+            if hist[i] <= 0: continue
+            # Bucket i mapea linealmente entre SL→TP
+            if sl > 0 and tp > 0:
+                price = sl + (tp - sl) * (i + 0.5) / hist_buckets
+            else:
+                price = 0
+            pct_in_zone = 100.0 * (i + 0.5) / hist_buckets
+            parts.append(f"  · @{price:.4f} (~{pct_in_zone:.0f}% del rango SL→TP): {format_elapsed(hist[i])}")
+        dwell_text = "\n".join(parts)
+
+    sig_o = rec.get("signals_open") or {}
+    sig_c = rec.get("signals_close") or {}
+
+    # Movimiento del precio durante la vida del trade
+    if entry > 0:
+        upside   = (max_mark - entry) / entry * 100 if max_mark > 0 else 0
+        downside = (min_mark - entry) / entry * 100 if min_mark > 0 else 0
+    else:
+        upside = downside = 0
+
+    # Diagnósticos pre-computados (heurística simple para guiar al modelo)
+    diagnostics = []
+    if dur_s > 4 * 3600:
+        diagnostics.append(f"Duración alta ({dur_fmt}) — riesgo de fatiga de tesis o funding negativo.")
+    if mfe > 0 and pnl < mfe * 0.5:
+        diagnostics.append(
+            f"MFE no capturado: llegó a +${mfe:.2f} pero cerró con ${pnl:.2f} "
+            f"(reciste {((mfe-pnl)/max(mfe,1e-6))*100:.0f}% del peak)."
+        )
+    if mae < 0 and abs(mae) > abs(pnl) and pnl >= 0:
+        diagnostics.append(f"Aguantó drawdown profundo (mae=${mae:.2f}) antes de salir verde.")
+    if cur_zone in ("below_sl", "sl_entry") and pnl < 0:
+        diagnostics.append("Cerró en zona perdedora (cerca de SL o entre SL y entry).")
+    if direction == "LONG" and exit_p > 0 and entry > 0 and exit_p < entry and max_mark > entry * 1.005:
+        diagnostics.append("LONG verde durante el trade pero cerró por debajo de entry — devolvió ganancia.")
+    if not diagnostics:
+        diagnostics.append("Sin alertas heurísticas obvias.")
+    diag_text = "\n".join(f"  - {d}" for d in diagnostics)
+
+    return f"""Eres un mentor experto de trading de futuros perpetuos (Bybit, USDT-M). Analiza este trade REAL con datos detallados de seguimiento minuto a minuto. Tu objetivo es enseñar al trader a no repetir errores y a repetir aciertos. Sé directo, específico, accionable. Nada de generalidades.
+
+═══ TRADE ═══
+Par: {sym}   Dirección: {direction} {lev}x   Cantidad: {qty}
+Entrada: {entry:.6f}   Salida: {exit_p:.6f}
+SL: {sl:.6f}   TP: {tp:.6f}
+Duración: {dur_fmt} ({dur_s}s · {samples} muestras de seguimiento)
+PnL final: ${pnl:.4f}   Fees: ${fees:.4f}
+
+═══ EXTREMOS DURANTE LA VIDA DEL TRADE ═══
+Mark máximo: {max_mark:.6f} ({upside:+.3f}% vs entry)
+Mark mínimo: {min_mark:.6f} ({downside:+.3f}% vs entry)
+MFE (peak PnL ganador):  ${mfe:.4f}
+MAE (peor PnL no realizado): ${mae:.4f}
+
+═══ TIEMPO POR ZONAS (cronotopología SL→TP) ═══
+Vida total observada: {format_elapsed(life_s)}   Zona al cierre: {cur_zone}
+Distribución (top zonas):
+{zones_text}
+
+═══ DWELL FINO (top 5 buckets donde el precio se quedó más tiempo) ═══
+{dwell_text}
+
+═══ SEÑALES AL ABRIR vs CERRAR ═══
+Apertura: opp_score={sig_o.get('opp_score',0)}  absorción={sig_o.get('ab_side','?')}  tendencia={sig_o.get('trend_dir','?')}  régimen={sig_o.get('regime','?')}  rsi={sig_o.get('rsi',0)}
+Cierre:   opp_score={sig_c.get('opp_score',0)}  absorción={sig_c.get('ab_side','?')}  tendencia={sig_c.get('trend_dir','?')}  régimen={sig_c.get('regime','?')}  rsi={sig_c.get('rsi',0)}
+
+═══ DIAGNÓSTICOS PRE-COMPUTADOS ═══
+{diag_text}
+
+Responde SOLO con este JSON (sin markdown):
+{{
+  "veredicto": "win|loss|breakeven",
+  "score": 1-10,
+  "resumen": "1-2 oraciones precisas con lo más importante",
+  "fortalezas": ["frase corta accionable", "..."],
+  "debilidades": ["frase corta con causa concreta", "..."],
+  "momentos_clave": [
+    {{"cuando": "ej. 'minuto 0-10' o 'tras tocar +1R'", "que_paso": "...", "que_hacer_distinto": "..."}}
+  ],
+  "leccion_principal": "la única regla que el trader debe interiorizar de este trade",
+  "proximo_trade": ["sugerencia concreta 1", "sugerencia concreta 2", "..."],
+  "patron_recurrente": "si detectas un patrón de comportamiento típico del trader (o null)",
+  "alertas": ["riesgo específico a vigilar la próxima vez", "..."]
+}}"""
+
+
+async def _run_mentor_analysis(trade_id: str, record: dict) -> None:
+    """Llama al LLM con prompt mentor y persiste el resultado en DB."""
+    try:
+        # Enriquecer con datos de Bybit closed-pnl (fees, exit_price reales)
+        await _enrich_with_bybit_closed_pnl(trade_id, record)
+
+        from core.ai_strategy import AIStrategyAgent
+        agent = AIStrategyAgent()
+        client, _model_default, use_json = agent._make_client_and_model()
+        # Mentor task = barato + rápido. Override del modelo de estrategia.
+        mentor_model = getattr(settings, "ai_mentor_model", None) or "gpt-4o-mini"
+
+        prompt = _build_mentor_prompt(record)
+        kwargs: dict = {
+            "model": mentor_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.4,
+            "max_tokens": 900,
+        }
+        if use_json:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        resp = await client.chat.completions.create(**kwargs)
+        raw  = resp.choices[0].message.content.strip()
+
+        import json as _json
+        try:
+            analysis = _json.loads(raw)
+        except Exception:
+            import re
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            analysis = _json.loads(m.group()) if m else {"resumen": raw}
+
+        from core.db import update_closed_trade_ai
+        update_closed_trade_ai(trade_id, analysis, mentor_model)
+        log.warning("Mentor IA ✓ %s (%s) score=%s",
+                    record.get("symbol"), trade_id, analysis.get("score", "?"))
+    except Exception as e:
+        log.error("_run_mentor_analysis %s: %s", trade_id, e)
+
+
+async def _enrich_with_bybit_closed_pnl(trade_id: str, record: dict) -> None:
+    """Consulta closed-pnl de Bybit para el símbolo y enriquece el registro
+    con fees reales y exit_price. Coincide por ventana temporal."""
+    try:
+        sym       = record.get("symbol", "")
+        opened_ms = int(record.get("opened_at", 0))
+        closed_ms = int(record.get("closed_at", 0))
+        if not sym or not opened_ms:
+            return
+        data = await _exec._get("/v5/position/closed-pnl", {
+            "category": "linear",
+            "symbol":   sym,
+            "limit":    "20",
+        })
+        items = data.get("result", {}).get("list", []) or []
+        # Match: posiciones cuya updatedTime está cerca de closed_ms (±5 min)
+        best = None
+        best_dt = 10 * 60 * 1000
+        for x in items:
+            up = int(x.get("updatedTime") or 0)
+            dt = abs(up - closed_ms)
+            if dt < best_dt:
+                best, best_dt = x, dt
+        if not best:
+            return
+        pnl       = float(best.get("closedPnl") or 0)
+        cum_entry = float(best.get("cumEntryValue") or 0)
+        cum_exit  = float(best.get("cumExitValue") or 0)
+        fees      = abs(cum_entry - cum_exit - pnl) if (cum_entry or cum_exit) else 0.0
+        avg_entry = float(best.get("avgEntryPrice") or record.get("entry_price", 0))
+        avg_exit  = float(best.get("avgExitPrice")  or record.get("last_mark", 0))
+        # Tomar opened_at REAL de Bybit (createdTime de la closed-pnl) si nuestro
+        # registro no lo tenía o difiere
+        bybit_open = int(best.get("createdTime") or 0)
+        if bybit_open > 0:
+            record["opened_at"] = bybit_open
+            record["duration_s"] = max(0, (closed_ms - bybit_open) // 1000)
+
+        record["bybit_pnl"]  = pnl
+        record["total_fees"] = fees
+        record["exit_price"] = avg_exit
+        record["avg_entry"]  = avg_entry
+
+        from core.db import update_closed_trade_bybit_fields
+        update_closed_trade_bybit_fields(trade_id, pnl, fees, avg_exit, avg_entry)
+        # También corregir opened_at/duration si cambió
+        if bybit_open > 0:
+            try:
+                con = get_conn_quick()
+                con.execute(
+                    "UPDATE closed_trade_analysis SET opened_at = ?, duration_s = ? WHERE id = ?",
+                    (bybit_open, record["duration_s"], trade_id),
+                )
+                con.close()
+            except Exception as e:
+                log.debug("update opened_at en archive: %s", e)
+    except Exception as e:
+        log.debug("_enrich_with_bybit_closed_pnl: %s", e)
+
+
+def get_conn_quick():
+    from core.db import get_connection
+    return get_connection()
 
 
 def _build_snapshot() -> dict:
@@ -630,14 +875,27 @@ async def api_closed_trades(limit: int = 100):
 
 @app.get("/api/history")
 async def api_history(limit: int = 50):
-    """Historial de trades cerrados vía Bybit closed-pnl."""
+    """Historial de trades cerrados — fusiona closed-pnl de Bybit con el archivo
+    enriquecido (closed_trade_analysis) que sí trae fechas reales, MFE/MAE,
+    zonas, señales al abrir/cerrar y análisis IA mentor cuando ya se generó.
+    """
     try:
+        # 1) Archivo enriquecido del dashboard (fuente de verdad para dates+IA)
+        from core.db import get_closed_trade_analyses
+        archive = get_closed_trade_analyses(limit=max(limit, 200))
+        # Index por (symbol, closed_at_minuto) para matching tolerante al jitter
+        arch_by_key: dict = {}
+        for a in archive:
+            key = (a.get("symbol", ""), (int(a.get("closed_at", 0)) // 60000))
+            arch_by_key[key] = a
+
         data = await _exec._get("/v5/position/closed-pnl", {
             "category": "linear",
             "limit":    str(min(limit, 200)),
         })
         items = data.get("result", {}).get("list", [])
         history = []
+        consumed_archives = set()
         for x in items:
             sym        = x.get("symbol", "")
             open_ts    = int(x.get("createdTime")  or 0)
@@ -660,7 +918,7 @@ async def api_history(limit: int = 50):
                 # Fallback al campo side cuando el movimiento es despreciable
                 is_long = (x.get("side", "Buy").lower() == "buy")
 
-            history.append({
+            entry_h = {
                 "symbol":      sym.replace("USDT", ""),
                 "full_sym":    sym,
                 "side":        "Buy" if is_long else "Sell",
@@ -675,11 +933,103 @@ async def api_history(limit: int = 50):
                 "close_ts":    close_ts,
                 "duration_s":  duration_s,
                 "duration_fmt": format_elapsed(duration_s),
+            }
+
+            # Match con archivo enriquecido del dashboard (ventana ±2 min)
+            ck = close_ts // 60000
+            matched = None
+            for delta in (0, -1, 1, -2, 2):
+                cand = arch_by_key.get((sym, ck + delta))
+                if cand and cand["id"] not in consumed_archives:
+                    matched = cand
+                    consumed_archives.add(cand["id"])
+                    break
+
+            if matched:
+                # Dashboard archive es la fuente de verdad para tiempos+contexto
+                entry_h["id"]            = matched["id"]
+                entry_h["open_ts"]       = matched["opened_at"] or open_ts
+                entry_h["close_ts"]      = matched["closed_at"] or close_ts
+                entry_h["duration_s"]    = matched["duration_s"] or duration_s
+                entry_h["duration_fmt"]  = format_elapsed(entry_h["duration_s"])
+                entry_h["max_mark"]      = matched["max_mark"]
+                entry_h["min_mark"]      = matched["min_mark"]
+                entry_h["max_pnl"]       = matched["max_pnl"]
+                entry_h["min_pnl"]       = matched["min_pnl"]
+                entry_h["sample_count"]  = matched["sample_count"]
+                entry_h["sl_price"]      = matched["sl_price"]
+                entry_h["tp_price"]      = matched["tp_price"]
+                entry_h["zones"]         = matched["zones"]
+                entry_h["signals_open"]  = matched["signals_open"]
+                entry_h["signals_close"] = matched["signals_close"]
+                entry_h["ai_analysis"]   = matched["ai_analysis"]
+                entry_h["ai_model"]      = matched["ai_model"]
+                entry_h["ai_generated_at"] = matched["ai_generated_at"]
+            history.append(entry_h)
+
+        # Trades del archivo que NO matchearon (no aparecen aún en closed-pnl o
+        # son demasiado nuevos) — los agregamos arriba del listado.
+        extras = []
+        for a in archive:
+            if a["id"] in consumed_archives:
+                continue
+            extras.append({
+                "id":          a["id"],
+                "symbol":      a["symbol"].replace("USDT", ""),
+                "full_sym":    a["symbol"],
+                "side":        a["side"],
+                "direction":   a["direction"] or ("LONG" if a["side"] == "Buy" else "SHORT"),
+                "qty":         a["qty"],
+                "entry_price": a["avg_entry"] or a["entry_price"],
+                "exit_price":  a["exit_price"] or a["last_mark"],
+                "closed_pnl":  a["bybit_pnl"] or a["last_pnl"],
+                "total_fees":  a["total_fees"],
+                "leverage":    int(a["leverage"] or 1),
+                "open_ts":     a["opened_at"],
+                "close_ts":    a["closed_at"],
+                "duration_s":  a["duration_s"],
+                "duration_fmt": format_elapsed(a["duration_s"]),
+                "max_mark":    a["max_mark"],
+                "min_mark":    a["min_mark"],
+                "max_pnl":     a["max_pnl"],
+                "min_pnl":     a["min_pnl"],
+                "sample_count": a["sample_count"],
+                "sl_price":    a["sl_price"],
+                "tp_price":    a["tp_price"],
+                "zones":       a["zones"],
+                "signals_open": a["signals_open"],
+                "signals_close": a["signals_close"],
+                "ai_analysis": a["ai_analysis"],
+                "ai_model":    a["ai_model"],
+                "ai_generated_at": a["ai_generated_at"],
+                "from_archive": True,
             })
+        # Mezclar: archivos huérfanos arriba, resto por close_ts desc
+        history = sorted(extras + history, key=lambda h: -(h.get("close_ts") or 0))
         return JSONResponse({"history": history})
     except Exception as e:
         log.error("api_history: %s", e)
         return JSONResponse({"history": [], "error": str(e)})
+
+
+@app.post("/api/mentor-analysis/{trade_id}")
+async def api_mentor_analysis(trade_id: str):
+    """Re-genera (o genera por primera vez) el análisis mentor IA para un trade
+    archivado. Devuelve el análisis completo."""
+    try:
+        from core.db import get_closed_trade_by_id
+        rec = get_closed_trade_by_id(trade_id)
+        if not rec:
+            return JSONResponse({"ok": False, "error": "trade no encontrado"}, status_code=404)
+        await _run_mentor_analysis(trade_id, rec)
+        # Recargar con resultado IA
+        rec2 = get_closed_trade_by_id(trade_id) or rec
+        return JSONResponse({"ok": True, "analysis": rec2.get("ai_analysis"),
+                             "model": rec2.get("ai_model"),
+                             "generated_at": rec2.get("ai_generated_at")})
+    except Exception as e:
+        log.error("api_mentor_analysis: %s", e)
+        return JSONResponse({"ok": False, "error": str(e)})
 
 
 @app.post("/api/trade-analysis")

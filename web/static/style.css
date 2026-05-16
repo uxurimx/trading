@@ -1220,6 +1220,52 @@ body {
 .hist-ai-list li::before { content: "›  "; color: var(--accent); }
 .hist-ai-patron { font-style: italic; color: var(--text-sub); margin-top: 6px; font-size: 9px; }
 
+/* Mentor IA: layout enriquecido */
+.hist-ai-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
+.hist-ai-header .hist-ai-score { float: none; margin: 0; flex-shrink: 0; }
+.hist-ai-verdict { flex: 1; }
+.hist-ai-verdict-tag {
+  display: inline-block; padding: 2px 8px; border-radius: 3px;
+  background: rgba(255,255,255,.06); font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;
+}
+.hist-ai-lesson {
+  background: rgba(255,200,80,.07); border-left: 3px solid #fbbf24;
+  padding: 8px 10px; border-radius: 3px;
+}
+.hist-ai-alerts { background: rgba(255,80,80,.05); border-left: 3px solid var(--red); padding: 6px 10px; border-radius: 3px; }
+.hist-ai-moments li { padding: 4px 0; border-bottom: 1px dashed rgba(255,255,255,.04); }
+.hist-ai-moments li:last-child { border-bottom: 0; }
+.hist-ai-tip { color: #93c5fd; font-size: 9px; margin-top: 2px; padding-left: 12px; }
+.hist-ai-btn-mentor {
+  background: linear-gradient(90deg, rgba(34,211,238,.10), rgba(168,85,247,.10));
+  border-color: #67e8f9; color: #67e8f9;
+}
+.hist-ai-btn-mentor:hover:not(:disabled) { background: linear-gradient(90deg, rgba(34,211,238,.20), rgba(168,85,247,.20)); }
+
+/* Runtime block (MFE/MAE/peaks) */
+.hist-runtime, .hist-signals {
+  margin-top: 10px; padding: 8px 10px;
+  background: rgba(255,255,255,.02); border: 1px solid var(--border); border-radius: 5px;
+}
+.hist-runtime-title {
+  font-size: 8px; letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--text-dim); margin-bottom: 6px;
+}
+.hist-runtime-grid, .hist-signals-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px;
+  font-size: 10px;
+}
+.hist-runtime-grid > div, .hist-signals-grid > div {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 4px 6px; background: var(--bg-card); border-radius: 3px;
+}
+.hist-runtime-grid .lbl, .hist-signals-grid .lbl {
+  font-size: 8px; letter-spacing: 1px; color: var(--text-dim); text-transform: uppercase;
+}
+.hist-runtime-grid .val, .hist-signals-grid .val { font-weight: 600; }
+.hist-runtime-grid em { font-style: normal; opacity: 0.6; font-size: 9px; }
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 /* CONFIGURACIÓN                                                              */
 /* ══════════════════════════════════════════════════════════════════════════ */

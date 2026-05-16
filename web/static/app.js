@@ -1149,7 +1149,7 @@ let _histFilterRes  = 'all';       // 'all' | 'win' | 'loss'
 let _histFilterSym  = '';          // texto de búsqueda
 
 function _histId(t) {
-  return `${t.full_sym}_${t.open_ts}_${t.close_ts}`;
+  return t.id || `${t.full_sym}_${t.open_ts}_${t.close_ts}`;
 }
 
 function _histFiltered() {
@@ -1198,32 +1198,97 @@ function buildHistoryCard(t) {
   let detailHtml = '';
   if (expanded) {
     const gross   = (t.exit_price - t.entry_price) * t.qty * (isLong ? 1 : -1);
-    const aiRes   = _histAICache.get(id);
+    // Mentor IA: prioridad — backend ya guarda en t.ai_analysis. El cache local
+    // solo aplica para trades antiguos sin id de archivo.
+    const aiRes     = t.ai_analysis || _histAICache.get(id);
     const aiLoading = _histAILoading.has(id);
+    const hasMentor = !!t.id;     // tiene archivo enriquecido + endpoint mentor
+
+    // Bloque runtime: MFE/MAE/peaks (solo si vienen del archivo)
+    const hasRuntime = (t.sample_count || 0) > 0;
+    let runtimeBlock = '';
+    if (hasRuntime) {
+      const mfeCls = t.max_pnl > 0 ? 'c-green' : '';
+      const maeCls = t.min_pnl < 0 ? 'c-red'   : '';
+      const upPct  = (t.entry_price > 0 && t.max_mark > 0)
+        ? ((t.max_mark - t.entry_price) / t.entry_price * 100 * (isLong ? 1 : -1)) : 0;
+      const dnPct  = (t.entry_price > 0 && t.min_mark > 0)
+        ? ((t.min_mark - t.entry_price) / t.entry_price * 100 * (isLong ? 1 : -1)) : 0;
+      const captured = t.max_pnl > 0 ? (t.closed_pnl / t.max_pnl * 100).toFixed(0) : '—';
+      runtimeBlock = `<div class="hist-runtime">
+        <div class="hist-runtime-title">Seguimiento durante el trade (${t.sample_count} muestras)</div>
+        <div class="hist-runtime-grid">
+          <div><span class="lbl">MFE peak</span><span class="val ${mfeCls}">${fmtMoney(t.max_pnl)}</span></div>
+          <div><span class="lbl">MAE bottom</span><span class="val ${maeCls}">${fmtMoney(t.min_pnl)}</span></div>
+          <div><span class="lbl">Mark máx</span><span class="val">${fmtPrice(t.max_mark)} <em>(${upPct>=0?'+':''}${upPct.toFixed(2)}%)</em></span></div>
+          <div><span class="lbl">Mark mín</span><span class="val">${fmtPrice(t.min_mark)} <em>(${dnPct>=0?'+':''}${dnPct.toFixed(2)}%)</em></span></div>
+          <div><span class="lbl">% MFE capturado</span><span class="val">${captured}${captured!=='—'?'%':''}</span></div>
+          <div><span class="lbl">SL</span><span class="val">${fmtPrice(t.sl_price||0)}</span></div>
+          <div><span class="lbl">TP</span><span class="val">${fmtPrice(t.tp_price||0)}</span></div>
+        </div>
+      </div>`;
+    }
+
+    // Bloque señales al abrir vs cerrar
+    let signalsBlock = '';
+    if (t.signals_open && t.signals_close) {
+      const so = t.signals_open, sc = t.signals_close;
+      const arrow = (a, b) => (a === b) ? '=' : `${esc(a)}→${esc(b)}`;
+      signalsBlock = `<div class="hist-signals">
+        <div class="hist-runtime-title">Contexto: apertura → cierre</div>
+        <div class="hist-signals-grid">
+          <div><span class="lbl">Régimen</span><span class="val">${arrow(so.regime, sc.regime)}</span></div>
+          <div><span class="lbl">Tendencia</span><span class="val">${arrow(so.trend_dir, sc.trend_dir)}</span></div>
+          <div><span class="lbl">Absorción</span><span class="val">${arrow(so.ab_side, sc.ab_side)}</span></div>
+          <div><span class="lbl">Opp score</span><span class="val">${so.opp_score} → ${sc.opp_score}</span></div>
+          <div><span class="lbl">RSI</span><span class="val">${so.rsi} → ${sc.rsi}</span></div>
+        </div>
+      </div>`;
+    }
 
     let aiBlock = '';
     if (aiRes) {
       const v = aiRes;
-      const scoreColor = v.score >= 7 ? 'var(--green)' : v.score >= 4 ? 'var(--orange)' : 'var(--red)';
+      const score = v.score || '?';
+      const scoreColor = score >= 7 ? 'var(--green)' : score >= 4 ? 'var(--orange)' : 'var(--red)';
       const fmtList = arr => (arr || []).map(s => `<li>${esc(s)}</li>`).join('');
+      const moments = (v.momentos_clave || []).map(m => `<li>
+        <strong>${esc(m.cuando || '')}</strong>: ${esc(m.que_paso || '')}
+        ${m.que_hacer_distinto ? `<div class="hist-ai-tip">→ ${esc(m.que_hacer_distinto)}</div>` : ''}
+      </li>`).join('');
       aiBlock = `<div class="hist-ai-result">
-        <div class="hist-ai-score" style="border-color:${scoreColor};color:${scoreColor}">${v.score||'?'}</div>
-        <div class="hist-ai-section">
-          <div class="hist-ai-section-title">Resumen</div>
-          <div>${esc(v.resumen || '')}</div>
+        <div class="hist-ai-header">
+          <div class="hist-ai-score" style="border-color:${scoreColor};color:${scoreColor}">${score}</div>
+          <div class="hist-ai-verdict">
+            <div class="hist-ai-verdict-tag ${pnlCls}">${esc(v.veredicto || '?')}</div>
+            <div>${esc(v.resumen || '')}</div>
+          </div>
         </div>
+        ${v.leccion_principal ? `<div class="hist-ai-section hist-ai-lesson">
+          <div class="hist-ai-section-title">⭐ Lección principal</div>
+          <div>${esc(v.leccion_principal)}</div></div>` : ''}
         ${v.fortalezas?.length ? `<div class="hist-ai-section">
-          <div class="hist-ai-section-title">Fortalezas</div>
+          <div class="hist-ai-section-title">✓ Fortalezas</div>
           <ul class="hist-ai-list">${fmtList(v.fortalezas)}</ul></div>` : ''}
         ${v.debilidades?.length ? `<div class="hist-ai-section">
-          <div class="hist-ai-section-title">Debilidades</div>
+          <div class="hist-ai-section-title">✗ Debilidades</div>
           <ul class="hist-ai-list">${fmtList(v.debilidades)}</ul></div>` : ''}
-        ${v.lecciones?.length ? `<div class="hist-ai-section">
-          <div class="hist-ai-section-title">Lecciones</div>
-          <ul class="hist-ai-list">${fmtList(v.lecciones)}</ul></div>` : ''}
-        ${v.patron ? `<div class="hist-ai-patron">Patrón detectado: ${esc(v.patron)}</div>` : ''}
+        ${moments ? `<div class="hist-ai-section">
+          <div class="hist-ai-section-title">⏱ Momentos clave</div>
+          <ul class="hist-ai-list hist-ai-moments">${moments}</ul></div>` : ''}
+        ${v.proximo_trade?.length ? `<div class="hist-ai-section">
+          <div class="hist-ai-section-title">→ Próximo trade</div>
+          <ul class="hist-ai-list">${fmtList(v.proximo_trade)}</ul></div>` : ''}
+        ${v.alertas?.length ? `<div class="hist-ai-section hist-ai-alerts">
+          <div class="hist-ai-section-title">⚠ Alertas</div>
+          <ul class="hist-ai-list">${fmtList(v.alertas)}</ul></div>` : ''}
+        ${v.patron_recurrente ? `<div class="hist-ai-patron">Patrón detectado: ${esc(v.patron_recurrente)}</div>` : ''}
       </div>`;
     }
+
+    const btnLabel = aiLoading ? '⏳ Generando análisis mentor…'
+                   : aiRes     ? '↺ Re-generar análisis mentor'
+                               : '✦ Generar análisis mentor';
 
     detailHtml = `<div class="hist-detail-panel">
       <div class="hist-detail-grid">
@@ -1252,10 +1317,13 @@ function buildHistoryCard(t) {
           <div class="val">${fmtTs(t.close_ts)}</div>
         </div>
       </div>
-      <button class="hist-ai-btn" ${aiLoading ? 'disabled' : ''}
+      ${runtimeBlock}
+      ${signalsBlock}
+      <button class="hist-ai-btn ${hasMentor ? 'hist-ai-btn-mentor' : ''}" ${aiLoading ? 'disabled' : ''}
         data-analyze-trade="${esc(id)}"
-        data-trade-idx="${_historyData.indexOf(t)}">
-        ${aiLoading ? '⏳ Analizando…' : aiRes ? '↺ Re-analizar con IA' : '✦ Analizar con IA'}
+        data-trade-idx="${_historyData.indexOf(t)}"
+        data-mentor="${hasMentor ? '1' : '0'}">
+        ${btnLabel}
       </button>
       ${aiBlock}
     </div>`;
@@ -1309,26 +1377,40 @@ async function _analyzeTradeWithAI(id, tradeIdx) {
   _histAILoading.add(id);
   _renderHistoryList();
   try {
-    // Intentar obtener velas del período del trade
-    let klines = [];
-    try {
-      const elapsed = t.duration_s || 0;
-      const tf = elapsed < 7200 ? '5' : elapsed < 43200 ? '15' : '60';
-      const kr = await fetch(`/api/klines/${t.full_sym}?tf=${tf}&limit=60`);
-      const kd = await kr.json();
-      klines = kd.klines || [];
-    } catch (_) {}
-
-    const res  = await fetch('/api/trade-analysis', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ trade: t, klines }),
-    });
-    const data = await res.json();
-    if (data.ok && data.analysis) {
-      _histAICache.set(id, data.analysis);
+    if (t.id) {
+      // Endpoint mentor con todos los datos del archivo
+      const res  = await fetch(`/api/mentor-analysis/${encodeURIComponent(t.id)}`, {method: 'POST'});
+      const data = await res.json();
+      if (data.ok && data.analysis) {
+        t.ai_analysis     = data.analysis;
+        t.ai_model        = data.model;
+        t.ai_generated_at = data.generated_at;
+        _histAICache.set(id, data.analysis);
+      } else {
+        _histAICache.set(id, { resumen: data.error || 'Error al analizar', score: null });
+      }
     } else {
-      _histAICache.set(id, { resumen: data.error || 'Error al analizar', score: null });
+      // Fallback legacy para trades sin archivo enriquecido
+      let klines = [];
+      try {
+        const elapsed = t.duration_s || 0;
+        const tf = elapsed < 7200 ? '5' : elapsed < 43200 ? '15' : '60';
+        const kr = await fetch(`/api/klines/${t.full_sym}?tf=${tf}&limit=60`);
+        const kd = await kr.json();
+        klines = kd.klines || [];
+      } catch (_) {}
+
+      const res  = await fetch('/api/trade-analysis', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ trade: t, klines }),
+      });
+      const data = await res.json();
+      if (data.ok && data.analysis) {
+        _histAICache.set(id, data.analysis);
+      } else {
+        _histAICache.set(id, { resumen: data.error || 'Error al analizar', score: null });
+      }
     }
   } catch (e) {
     _histAICache.set(id, { resumen: String(e), score: null });
