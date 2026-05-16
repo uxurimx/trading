@@ -942,6 +942,109 @@ async def api_close_position(symbol: str, side: str):
         return JSONResponse({"success": False, "error": str(e)})
 
 
+@app.post("/api/partial-close/{symbol}/{side}")
+async def api_partial_close(symbol: str, side: str, pct: float = 50.0):
+    """Cierra una fracción (pct ∈ (0, 100]) de la posición a mercado."""
+    sym = symbol.upper()
+    pct = max(1.0, min(100.0, float(pct)))
+    pos = next(
+        (p for p in _account.state.open_positions() if p.symbol == sym and p.side == side),
+        None,
+    )
+    if not pos:
+        return JSONResponse({"success": False, "error": "Posición no encontrada"})
+    try:
+        info = await _exec.load_instrument_info(sym)
+        step = float(info.qty_step)
+        raw  = pos.size * (pct / 100.0)
+        # Redondear al step más cercano, asegurar mínimo
+        qty  = max(float(info.min_qty), round(round(raw / step) * step, 8))
+        # Si pct=100, usa qty total exacta para no dejar polvo
+        if pct >= 100.0:
+            qty = pos.size
+        close_side = "Sell" if pos.is_long else "Buy"
+        body = {
+            "category":    "linear",
+            "symbol":      sym,
+            "side":        close_side,
+            "orderType":   "Market",
+            "qty":         str(qty),
+            "timeInForce": "IOC",
+            "reduceOnly":  True,
+            "positionIdx": _exec._pos_idx(side),
+        }
+        data = await _exec._post("/v5/order/create", body)
+        if data.get("retCode") == 0:
+            log.warning("Partial close: %s %s %.1f%% (qty=%s)", sym, side, pct, qty)
+            asyncio.create_task(_account_refresh_loop_once())
+            return JSONResponse({"success": True, "qty": qty, "order_id": data["result"].get("orderId", "")})
+        return JSONResponse({"success": False, "error": data.get("retMsg", "error")})
+    except Exception as e:
+        log.error("api_partial_close: %s", e)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
+@app.post("/api/quick-trade")
+async def api_quick_trade(req: Request):
+    """Trade rápido a mercado: side + size_usdt + (sl_pct, tp_pct opcionales).
+    Calcula SL/TP automáticamente desde el mark si no se proveen.
+    """
+    try:
+        body      = await req.json()
+        symbol    = str(body.get("symbol", "")).upper()
+        if symbol and not symbol.endswith("USDT"):
+            symbol += "USDT"
+        side      = str(body.get("side", "Buy"))
+        size_usdt = float(body.get("size_usdt", 0))
+        sl_pct    = float(body.get("sl_pct", 1.0))     # % distancia desde mark
+        tp_pct    = float(body.get("tp_pct", 2.0))
+        leverage  = int(body.get("leverage", 10))
+        if not symbol or size_usdt <= 0:
+            return JSONResponse({"success": False, "error": "Parámetros incompletos"})
+
+        mark = _mark_prices.get(symbol) or 0.0
+        ms   = _market.states.get(symbol)
+        if not mark and ms and ms.connected:
+            mark = ms.ticker.last_price
+        if mark <= 0:
+            return JSONResponse({"success": False, "error": "Mark price no disponible"})
+
+        is_buy = side == "Buy"
+        sl = mark * (1 - sl_pct / 100.0) if is_buy else mark * (1 + sl_pct / 100.0)
+        tp = mark * (1 + tp_pct / 100.0) if is_buy else mark * (1 - tp_pct / 100.0)
+
+        info    = await _exec.load_instrument_info(symbol)
+        step    = float(info.qty_step)
+        raw_qty = size_usdt / mark
+        qty     = max(float(info.min_qty), round(round(raw_qty / step) * step, 8))
+
+        order = OrderRequest(
+            symbol     = symbol,
+            side       = side,
+            qty        = qty,
+            order_type = "Market",
+            price      = 0.0,
+            sl_price   = sl,
+            tp_price   = tp,
+            entry_price= mark,
+            leverage   = leverage,
+            trace_id   = str(uuid.uuid4())[:8],
+            strategy_tag = "quick_web",
+        )
+        result = await _exec.place_market_bracket(order)
+        return JSONResponse({
+            "success":  result.success,
+            "order_id": result.order_id,
+            "qty":      qty,
+            "sl":       sl,
+            "tp":       tp,
+            "error":    result.error_msg,
+        })
+    except Exception as e:
+        log.error("api_quick_trade: %s", e)
+        return JSONResponse({"success": False, "error": str(e)})
+
+
 @app.post("/api/move-sl")
 async def api_move_sl_endpoint(req: Request):
     """Mueve el SL de una posición al precio indicado."""

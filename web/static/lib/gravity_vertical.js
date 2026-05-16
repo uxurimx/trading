@@ -387,14 +387,21 @@
     return { halos: halos.join(''), arrows: arrows.join('') };
   }
 
+  // Label flotante para el axis-y: pegado al precio actual, sin invadir el chart.
+  function buildCurrentAxisLabel(current, vmin, vmax) {
+    if (current == null) return '';
+    const y = priceToY(current, vmin, vmax);
+    return `<div class="gvp-current-axis-lbl" style="top:${y}%">${fmtPrice(current)}</div>`;
+  }
+
   function buildCurrent(current, vmin, vmax) {
     if (!current || current < vmin || current > vmax) return '';
     const y = priceToY(current, vmin, vmax).toFixed(2);
+    // El label vive ahora en el axis-y (no en el chart) para no tapar velas.
     return `
       <div class="gvp-current-glow" style="top:${y}%"></div>
       <div class="gvp-current-line" style="top:${y}%"></div>
-      <div class="gvp-current-diamond" style="top:${y}%"></div>
-      <div class="gvp-current-lbl"  style="top:${y}%">${fmtPrice(current)}</div>`;
+      <div class="gvp-current-diamond" style="top:${y}%"></div>`;
   }
 
   // ── Stats footer ───────────────────────────────────────────────────────────
@@ -464,6 +471,41 @@
 
   // ── API pública ────────────────────────────────────────────────────────────
 
+  // Velas OHLC: cada vela ocupa un slot horizontal proporcional.
+  // top/height calculados sobre vmin/vmax (precio). La más reciente a la derecha.
+  function buildCandles(klines, vmin, vmax) {
+    if (!klines || klines.length === 0) return '';
+    if (!(vmax > vmin)) return '';
+    const n = klines.length;
+    const slotPct = 100 / n;
+    const bodyPct = Math.max(slotPct - 0.6, slotPct * 0.55);   // gap entre velas
+    const wickPct = Math.max(bodyPct * 0.18, 0.4);
+    let html = '';
+    for (let i = 0; i < n; i++) {
+      const k = klines[i];
+      const o = k.o, c = k.c, h = k.h, l = k.l;
+      if (!(o && c && h && l)) continue;
+      const up   = c >= o;
+      const cls  = up ? 'gvp-cdl-up' : 'gvp-cdl-dn';
+      const topH = priceToY(h, vmin, vmax);
+      const topL = priceToY(l, vmin, vmax);
+      const topB = priceToY(Math.max(o, c), vmin, vmax);
+      const botB = priceToY(Math.min(o, c), vmin, vmax);
+      const wickH = Math.max(0.05, topL - topH);
+      const bodyH = Math.max(0.25, botB - topB);
+      const slotL = i * slotPct;
+      const bodyL = slotL + (slotPct - bodyPct) / 2;
+      const wickL = slotL + (slotPct - wickPct) / 2;
+      // Última vela = live; un highlight tenue
+      const live = (i === n - 1) ? ' gvp-cdl-live' : '';
+      html += `<div class="gvp-cdl-wick ${cls}${live}"
+                    style="left:${wickL.toFixed(2)}%;width:${wickPct.toFixed(2)}%;top:${topH.toFixed(2)}%;height:${wickH.toFixed(2)}%"></div>`;
+      html += `<div class="gvp-cdl-body ${cls}${live}"
+                    style="left:${bodyL.toFixed(2)}%;width:${bodyPct.toFixed(2)}%;top:${topB.toFixed(2)}%;height:${bodyH.toFixed(2)}%"></div>`;
+    }
+    return html;
+  }
+
   function render(panelEl, data, opts) {
     if (!panelEl || !data) return;
     const view = (opts && opts.view) || { min: data.view_min, max: data.view_max };
@@ -493,16 +535,20 @@
     const trails = buildTrails(opts && opts.trails, vmin, vmax);
     const energy = buildEnergy(opts && opts.energy, vmin, vmax);
     const heat   = buildHeat(opts && opts.heat, vmin, vmax, opts && opts.heatOpacity);
+    const candles= buildCandles(opts && opts.klines, vmin, vmax);
     const axisY  = buildAxisY(vmin, vmax, data.current);
 
+    const curAxis = buildCurrentAxisLabel(data.current, vmin, vmax);
+
     bodyEl.innerHTML = `
-      <div class="gvp-axis-y">${axisY}</div>
+      <div class="gvp-axis-y">${axisY}${curAxis}</div>
       <div class="gvp-chart">
         <div class="gvp-heat">${heat}</div>
         <div class="gvp-vp-bg">${vp}</div>
         <div class="gvp-bids-col">${bids}</div>
         <div class="gvp-asks-col">${asks}</div>
         <div class="gvp-trails">${trails}</div>
+        <div class="gvp-candles">${candles}</div>
         <div class="gvp-energy">${energy.halos}</div>
         <div class="gvp-overlay">
           ${gx.lines}

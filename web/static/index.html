@@ -503,6 +503,12 @@
       <span class="gvp-hdr-current" data-gvp-current>—</span>
     </div>
     <span class="gvp-hdr-range" data-gvp-range>—</span>
+    <div class="gvp-zoom-ctrl" title="Zoom de la vista">
+      <button id="gvp-zoom-out"   class="gvp-zoom-btn" title="Zoom out (alejar)">−</button>
+      <span    id="gvp-zoom-lbl"  class="gvp-zoom-lbl">L0</span>
+      <button id="gvp-zoom-in"    class="gvp-zoom-btn" title="Zoom in (acercar)">+</button>
+      <button id="gvp-zoom-reset" class="gvp-zoom-btn gvp-zoom-reset" title="Reset zoom">⤬</button>
+    </div>
     <div class="gvp-heat-ctrl" title="Opacidad del heat memory">
       <span class="gvp-heat-icon">🔥</span>
       <input id="gvp-heat-opacity" type="range" min="0" max="100" step="5" value="50"/>
@@ -511,6 +517,7 @@
     <button id="gvp-sound" class="gvp-sound" aria-label="Sonificación" title="Sonificar anomalías">🔇</button>
     <button id="gvp-close" class="gvp-close" aria-label="Cerrar">✕</button>
   </div>
+  <div class="gvp-converge" data-gvp-converge hidden></div>
   <div class="gvp-anomalies" data-gvp-anomalies></div>
   <div class="gvp-replay">
     <label class="gvp-replay-lbl" for="gvp-replay-range">Replay</label>
@@ -520,6 +527,31 @@
     <button id="gvp-replay-live" class="gvp-replay-live" title="Volver a vivo">⏵ live</button>
   </div>
   <div class="gvp-body"></div>
+  <div class="gvp-trade" data-gvp-trade>
+    <div class="gvp-trade-row">
+      <button class="gvp-tbtn gvp-tbtn-long"  data-gvp-act="long"  title="Comprar / Long market">▲ LONG</button>
+      <button class="gvp-tbtn gvp-tbtn-short" data-gvp-act="short" title="Vender / Short market">▼ SHORT</button>
+    </div>
+    <div class="gvp-trade-row gvp-trade-cfg">
+      <label class="gvp-trade-lbl">$
+        <input id="gvp-size"   type="number" value="50" min="5" step="5" />
+      </label>
+      <label class="gvp-trade-lbl">SL%
+        <input id="gvp-slpct"  type="number" value="1.0" min="0.1" step="0.1" />
+      </label>
+      <label class="gvp-trade-lbl">TP%
+        <input id="gvp-tppct"  type="number" value="2.0" min="0.1" step="0.1" />
+      </label>
+      <label class="gvp-trade-lbl" title="Pedir confirmación antes de ejecutar">
+        <input id="gvp-confirm" type="checkbox" checked /> conf
+      </label>
+    </div>
+    <div class="gvp-trade-row gvp-trade-close" data-gvp-close-row hidden>
+      <button class="gvp-tbtn gvp-tbtn-close" data-gvp-act="close-50"  title="Cerrar 50% de la posición">cerrar 50%</button>
+      <button class="gvp-tbtn gvp-tbtn-close" data-gvp-act="close-100" title="Cerrar 100% de la posición">cerrar 100%</button>
+    </div>
+    <div class="gvp-trade-status" data-gvp-trade-status></div>
+  </div>
   <div class="gvp-stats"></div>
   <div class="gvp-legend">
     <span><i class="gvp-lg gvp-lg-bid"></i> bids</span>

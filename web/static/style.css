@@ -1789,6 +1789,40 @@ body {
 .gvp-sound.on { color: #22d3ee; border-color: #22d3ee; }
 .gvp-sound:hover { color: var(--text); }
 
+.gvp-zoom-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+.gvp-zoom-btn {
+  background: transparent;
+  border: 0;
+  color: var(--text-sub);
+  width: 22px; height: 22px;
+  cursor: pointer;
+  font: 700 14px ui-monospace, Menlo, monospace;
+  line-height: 1;
+  border-radius: 3px;
+}
+.gvp-zoom-btn:hover:not(:disabled) {
+  color: #22d3ee;
+  background: rgba(34, 211, 238, 0.1);
+}
+.gvp-zoom-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.gvp-zoom-reset { font-size: 12px; }
+.gvp-zoom-lbl {
+  font: 700 10px ui-monospace, Menlo, monospace;
+  color: var(--text-sub);
+  padding: 0 4px;
+  min-width: 22px;
+  text-align: center;
+}
+
 .gvp-heat-ctrl {
   display: flex; align-items: center; gap: 4px;
   margin-right: 4px;
@@ -1929,10 +1963,23 @@ body {
   position: relative;
   overflow: hidden;
 }
-.gvp-vp-bg, .gvp-bids-col, .gvp-asks-col, .gvp-trails, .gvp-energy, .gvp-heat, .gvp-overlay {
+.gvp-vp-bg, .gvp-bids-col, .gvp-asks-col, .gvp-trails, .gvp-energy, .gvp-heat, .gvp-candles, .gvp-overlay {
   position: absolute;
   inset: 0;
 }
+
+/* ── Velas OHLC: time→X, price→Y compartido con el strip ─────────────────── */
+.gvp-candles { z-index: 2; pointer-events: none; }
+.gvp-cdl-body, .gvp-cdl-wick {
+  position: absolute;
+  transform: translateY(0);
+}
+.gvp-cdl-up   { background: #22c55e; }
+.gvp-cdl-dn   { background: #ef4444; }
+.gvp-cdl-body { opacity: 0.85; border-radius: 1px; }
+.gvp-cdl-wick { opacity: 0.7; }
+.gvp-cdl-live { box-shadow: 0 0 4px currentColor; opacity: 1; }
+.gvp-cdl-live.gvp-cdl-body { outline: 1px solid rgba(255, 255, 255, 0.45); }
 .gvp-heat  { z-index: 0; pointer-events: none; }
 .gvp-heat-cell { position: absolute; left: 0; right: 0; pointer-events: none; }
 .gvp-vp-bg { z-index: 1; pointer-events: none; }
@@ -2081,19 +2128,38 @@ body {
   pointer-events: none;
   box-shadow: 0 0 8px rgba(34,211,238,0.7);
 }
-.gvp-current-lbl {
+/* Label legado dentro del chart — ya no se renderiza, se mantiene la regla por seguridad */
+.gvp-current-lbl { display: none; }
+
+/* Label del precio actual pegado al axis-y, fuera del área de velas */
+.gvp-current-axis-lbl {
   position: absolute;
-  right: 4px;
+  right: -1px;
   transform: translateY(-50%);
   background: #22d3ee;
   color: #0c1220;
-  font: 700 10px ui-monospace, Menlo, monospace;
-  padding: 2px 6px;
-  border-radius: 3px;
+  font: 800 10px ui-monospace, Menlo, monospace;
+  padding: 2px 5px 2px 7px;
+  border-radius: 3px 0 0 3px;
   z-index: 7;
   pointer-events: none;
-  box-shadow: 0 0 8px rgba(34,211,238,0.45);
+  box-shadow: -2px 0 6px rgba(34, 211, 238, 0.45),
+              0 0 8px rgba(34, 211, 238, 0.35);
+  white-space: nowrap;
+  letter-spacing: 0.2px;
 }
+/* Triángulo pequeño que apunta al chart para reforzar el anclaje */
+.gvp-current-axis-lbl::after {
+  content: "";
+  position: absolute;
+  top: 50%; right: -6px;
+  transform: translateY(-50%);
+  border: 5px solid transparent;
+  border-left-color: #22d3ee;
+  border-right: 0;
+}
+/* Oculta el tick "is-current" duplicado para no superponer */
+.gvp-axis-y .gvp-axis-tick.is-current { visibility: hidden; }
 
 /* labels-col (col 3) — etiquetas detalladas alineadas al precio */
 .gvp-labels-col {
@@ -2155,6 +2221,106 @@ body {
 .gvp-order-qty  { color: var(--text-sub); }
 
 /* stats footer */
+/* ── Botones de trading rápido en panel vertical ─────────────────────────── */
+.gvp-trade {
+  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg);
+}
+.gvp-trade-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.gvp-trade-row[hidden] { display: none !important; }
+.gvp-tbtn {
+  flex: 1;
+  padding: 8px 4px;
+  font-weight: 800;
+  font-size: 12px;
+  letter-spacing: 0.4px;
+  border-radius: 4px;
+  border: 1px solid;
+  cursor: pointer;
+  background: transparent;
+  transition: all 0.15s;
+}
+.gvp-tbtn:active { transform: scale(0.97); }
+.gvp-tbtn:disabled { opacity: 0.4; cursor: wait; }
+.gvp-tbtn-long {
+  color: #22c55e;
+  border-color: rgba(34, 197, 94, 0.5);
+  background: rgba(34, 197, 94, 0.06);
+}
+.gvp-tbtn-long:hover { background: rgba(34, 197, 94, 0.15); }
+.gvp-tbtn-short {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.06);
+}
+.gvp-tbtn-short:hover { background: rgba(239, 68, 68, 0.15); }
+.gvp-tbtn-close {
+  color: var(--text-sub);
+  border-color: var(--border);
+  font-weight: 600;
+  font-size: 11px;
+}
+.gvp-tbtn-close:hover { color: var(--text); border-color: var(--text-dim); }
+
+.gvp-trade-cfg { font-size: 11px; }
+.gvp-trade-lbl {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-sub);
+}
+.gvp-trade-lbl input[type=number] {
+  width: 44px;
+  padding: 3px 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 3px;
+  font: 600 11px ui-monospace, Menlo, monospace;
+}
+.gvp-trade-lbl input[type=checkbox] { margin-right: 2px; }
+.gvp-trade-status {
+  font-size: 10px;
+  min-height: 14px;
+  color: var(--text-sub);
+  font-family: ui-monospace, Menlo, monospace;
+}
+.gvp-trade-status.is-ok    { color: #22c55e; }
+.gvp-trade-status.is-error { color: #ef4444; }
+.gvp-trade-status.is-busy  { color: #f59e0b; }
+
+/* ── Alerta de convergencia (≥3 señales misma dirección) ─────────────────── */
+.gvp-converge[hidden] { display: none !important; }
+.gvp-converge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  animation: gvp-cv-pulse 2.2s ease-in-out infinite;
+}
+.gvp-converge.is-bull { color: #22c55e; background: rgba(34, 197, 94, 0.10); border-top-color: rgba(34, 197, 94, 0.4); }
+.gvp-converge.is-bear { color: #ef4444; background: rgba(239, 68, 68, 0.10); border-top-color: rgba(239, 68, 68, 0.4); }
+.gvp-cv-icon { font-size: 16px; line-height: 1; }
+.gvp-cv-dir  { font-size: 13px; font-weight: 900; letter-spacing: 0.5px; }
+.gvp-cv-sigs { color: var(--text-sub); font-weight: 500; flex: 1; }
+.gvp-cv-cnt  { background: rgba(255, 255, 255, 0.1); padding: 2px 6px; border-radius: 3px; }
+@keyframes gvp-cv-pulse {
+  0%, 100% { box-shadow: inset 0 0 0 rgba(0,0,0,0); }
+  50%      { box-shadow: inset 0 0 24px currentColor; }
+}
+
 .gvp-anomalies {
   display: flex;
   flex-wrap: wrap;

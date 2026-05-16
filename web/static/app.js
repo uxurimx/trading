@@ -2613,6 +2613,30 @@ function closeGravPanel() {
   _gvpState = null;
 }
 
+// ── Klines cache para mini chart de velas ────────────────────────────────
+const _klinesCache = new Map();   // sym → { ts, klines, tf }
+const _KLINES_TTL  = 8000;        // 8s — vela 1m se actualiza dentro del minuto
+let   _klinesBusy  = new Set();   // syms en fetch activo
+
+async function _ensureKlines(sym, tf = '1', limit = 40) {
+  const cached = _klinesCache.get(sym);
+  if (cached && (Date.now() - cached.ts) < _KLINES_TTL && cached.tf === tf) return cached.klines;
+  if (_klinesBusy.has(sym)) return cached ? cached.klines : null;
+  _klinesBusy.add(sym);
+  try {
+    const r = await fetch(`/api/klines/${encodeURIComponent(sym)}?tf=${tf}&limit=${limit}`);
+    if (!r.ok) return cached ? cached.klines : null;
+    const j = await r.json();
+    const klines = j.klines || [];
+    _klinesCache.set(sym, { ts: Date.now(), klines, tf });
+    return klines;
+  } catch (_) {
+    return cached ? cached.klines : null;
+  } finally {
+    _klinesBusy.delete(sym);
+  }
+}
+
 async function _gvpTick() {
   if (!_gvpState || _gvpBusy) return;
   const pos = _findPosByKey(_gvpState.posKey);
@@ -2631,12 +2655,14 @@ async function _gvpTick() {
     const tr    = _trailsCache.get(pos.full_sym);
     const en    = _energyCache.get(pos.full_sym);
     const ht    = _getPriceHeat(pos.full_sym);
+    const kl    = await _ensureKlines(pos.full_sym, '1', 40);
     if (panel && _gvpState) {
       QtsGravityVertical.render(panel, data, {
         view, geom,
         trails: tr ? tr.trails : null,
         energy: en ? en.data   : null,
         heat:   ht,
+        klines: kl,
         heatOpacity: QtsConfig.heatOpacity,
       });
     }
@@ -2754,6 +2780,117 @@ function _beep(freq, durMs, type) {
   osc.stop(now + durMs / 1000);
 }
 
+// ── Detector de convergencia ───────────────────────────────────────────────
+// Combina varias señales del panel. Cuando ≥3 apuntan en la misma dirección
+// con magnitud relevante, dispara una alerta visual + beep (si sonido on).
+const _lastCvKey = { val: '' };
+
+function _detectConvergence(pos) {
+  if (!pos) return null;
+  const sym = pos.full_sym;
+  const en  = _energyCache.get(sym);
+  const pl  = _pilotCache.get(sym);
+  const enData = en && en.data;
+  const plData = pl && pl.data;
+  const signals = [];   // { dir: 'up'|'down', label }
+
+  // 1. Tendencia multi-TF
+  if (pos.trend_dir === 'UP')   signals.push({ dir: 'up',   label: 'trend↑' });
+  if (pos.trend_dir === 'DOWN') signals.push({ dir: 'down', label: 'trend↓' });
+
+  // 2. Absorción (CVD)
+  if (pos.ab_side === 'BUY')  signals.push({ dir: 'up',   label: 'abs↑' });
+  if (pos.ab_side === 'SELL') signals.push({ dir: 'down', label: 'abs↓' });
+
+  // 3. Presión emocional (solo si magnitud alta)
+  if (plData && plData.pressure && (plData.pressure.score || 0) >= 60) {
+    if (plData.pressure.side === 'greed') signals.push({ dir: 'up',   label: 'pres↑' });
+    if (plData.pressure.side === 'fear')  signals.push({ dir: 'down', label: 'pres↓' });
+  }
+
+  // 4. Velocidad direccional (>0.05% por minuto + score relevante)
+  if (plData && plData.velocity) {
+    const pct = plData.velocity.pct_per_min || 0;
+    const vs  = plData.velocity.score || 0;
+    if (vs >= 40) {
+      if (pct >= 0.05) signals.push({ dir: 'up',   label: 'vel↑' });
+      if (pct <= -0.05) signals.push({ dir: 'down', label: 'vel↓' });
+    }
+  }
+
+  // 5. Energía agregada de niveles (cuántos con dir clara y energy alta)
+  if (enData && Array.isArray(enData.levels)) {
+    let up = 0, dn = 0;
+    enData.levels.forEach(L => {
+      if ((L.energy || 0) < 60) return;
+      if (L.dir === 'up')   up++;
+      if (L.dir === 'down') dn++;
+    });
+    if (up >= 2 && up > dn) signals.push({ dir: 'up',   label: `nivels↑×${up}` });
+    if (dn >= 2 && dn > up) signals.push({ dir: 'down', label: `nivels↓×${dn}` });
+  }
+
+  // 6. RSI extremo: vector contrario (reversal probable)
+  // Cuenta como señal a favor del rebote esperado.
+  const rsi = pos.rsi || 50;
+  if (rsi <= 30) signals.push({ dir: 'up',   label: `rsi${rsi.toFixed(0)}` });
+  if (rsi >= 70) signals.push({ dir: 'down', label: `rsi${rsi.toFixed(0)}` });
+
+  if (signals.length < 3) return null;
+
+  const ups   = signals.filter(s => s.dir === 'up');
+  const downs = signals.filter(s => s.dir === 'down');
+  if (ups.length >= 3 && ups.length > downs.length) {
+    return { dir: 'up',   count: ups.length,   signals: ups };
+  }
+  if (downs.length >= 3 && downs.length > ups.length) {
+    return { dir: 'down', count: downs.length, signals: downs };
+  }
+  return null;
+}
+
+function _renderConvergence(cv) {
+  const el = document.querySelector('[data-gvp-converge]');
+  if (!el) return;
+  if (!cv) {
+    el.hidden = true;
+    el.innerHTML = '';
+    el.classList.remove('is-bull', 'is-bear');
+    return;
+  }
+  el.hidden = false;
+  el.classList.toggle('is-bull', cv.dir === 'up');
+  el.classList.toggle('is-bear', cv.dir === 'down');
+  const icon = cv.dir === 'up' ? '▲' : '▼';
+  const word = cv.dir === 'up' ? 'CONVERGENCIA ALCISTA' : 'CONVERGENCIA BAJISTA';
+  const sigs = cv.signals.map(s => s.label).join(' · ');
+  el.innerHTML = `<span class="gvp-cv-icon">${icon}</span>
+                  <span class="gvp-cv-dir">${word}</span>
+                  <span class="gvp-cv-sigs">${sigs}</span>
+                  <span class="gvp-cv-cnt">${cv.count}/6</span>`;
+}
+
+function _checkConvergence() {
+  if (!_gvpState || !lastSnap) {
+    _renderConvergence(null);
+    return;
+  }
+  const pos = lastSnap.positions[_gvpState.posKey];
+  if (!pos) {
+    _renderConvergence(null);
+    return;
+  }
+  const cv = _detectConvergence(pos);
+  _renderConvergence(cv);
+
+  // Beep distintivo (solo cuando cambia el estado de convergencia)
+  const key = cv ? `${cv.dir}|${cv.count}` : '';
+  if (cv && key !== _lastCvKey.val && _soundEnabled) {
+    _beep(cv.dir === 'up' ? 880 : 220, 220, 'sawtooth');
+  }
+  _lastCvKey.val = key;
+}
+
 function _maybePlayAnomalySound() {
   if (!_soundEnabled || !_gvpState || !lastSnap) return;
   const pos = lastSnap.positions[_gvpState.posKey];
@@ -2791,6 +2928,7 @@ document.getElementById('gvp-sound')?.addEventListener('click', () => {
   }
 }
 setInterval(_maybePlayAnomalySound, 2500);
+setInterval(_checkConvergence, 2000);
 
 {
   const slider = document.getElementById('gvp-heat-opacity');
@@ -2825,6 +2963,154 @@ window.addEventListener('keydown', e => {
     if (m && !m.hidden) _closeHelpModal();
   }
 });
+
+// ── Botones de trading rápido en panel vertical ───────────────────────────
+function _gvpSetTradeStatus(msg, cls) {
+  const el = document.querySelector('[data-gvp-trade-status]');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.classList.remove('is-ok', 'is-error', 'is-busy');
+  if (cls) el.classList.add(cls);
+}
+
+function _gvpCurrentSym() {
+  if (!_gvpState) return null;
+  const pos = lastSnap && lastSnap.positions[_gvpState.posKey];
+  return pos ? pos.full_sym : null;
+}
+
+function _gvpCurrentPos() {
+  if (!_gvpState) return null;
+  return (lastSnap && lastSnap.positions[_gvpState.posKey]) || null;
+}
+
+function _gvpRefreshCloseRow() {
+  const row = document.querySelector('[data-gvp-close-row]');
+  if (!row) return;
+  const pos = _gvpCurrentPos();
+  row.hidden = !pos;
+}
+
+async function _gvpQuickTrade(side) {
+  const sym = _gvpCurrentSym();
+  if (!sym) { _gvpSetTradeStatus('Sin símbolo activo', 'is-error'); return; }
+  const sz  = parseFloat(document.getElementById('gvp-size')?.value || '0');
+  const sl  = parseFloat(document.getElementById('gvp-slpct')?.value || '1');
+  const tp  = parseFloat(document.getElementById('gvp-tppct')?.value || '2');
+  if (!(sz > 0)) { _gvpSetTradeStatus('Tamaño inválido', 'is-error'); return; }
+  if (!(sl > 0) || !(tp > 0)) { _gvpSetTradeStatus('SL/TP inválidos', 'is-error'); return; }
+  const confirmFirst = document.getElementById('gvp-confirm')?.checked;
+  if (confirmFirst) {
+    const ok = window.confirm(`${side === 'Buy' ? 'LONG' : 'SHORT'} ${sym}\n${sz} USDT · SL ${sl}% · TP ${tp}%\n¿Confirmar?`);
+    if (!ok) { _gvpSetTradeStatus('Cancelado', null); return; }
+  }
+  const btns = document.querySelectorAll('.gvp-tbtn-long, .gvp-tbtn-short');
+  btns.forEach(b => b.disabled = true);
+  _gvpSetTradeStatus(`Enviando ${side === 'Buy' ? 'LONG' : 'SHORT'}…`, 'is-busy');
+  try {
+    const r = await fetch('/api/quick-trade', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: sym, side, size_usdt: sz, sl_pct: sl, tp_pct: tp }),
+    });
+    const j = await r.json();
+    if (j.success) {
+      _gvpSetTradeStatus(`OK · qty ${j.qty} · SL ${j.sl?.toFixed(4) || '—'} · TP ${j.tp?.toFixed(4) || '—'}`, 'is-ok');
+    } else {
+      _gvpSetTradeStatus(`Error: ${j.error || 'desconocido'}`, 'is-error');
+    }
+  } catch (e) {
+    _gvpSetTradeStatus(`Red: ${e.message}`, 'is-error');
+  } finally {
+    btns.forEach(b => b.disabled = false);
+  }
+}
+
+async function _gvpQuickClose(pct) {
+  const pos = _gvpCurrentPos();
+  if (!pos) { _gvpSetTradeStatus('Sin posición', 'is-error'); return; }
+  const confirmFirst = document.getElementById('gvp-confirm')?.checked;
+  if (confirmFirst) {
+    const ok = window.confirm(`Cerrar ${pct}% de ${pos.full_sym} ${pos.side}\n¿Confirmar?`);
+    if (!ok) { _gvpSetTradeStatus('Cancelado', null); return; }
+  }
+  const btns = document.querySelectorAll('.gvp-tbtn-close');
+  btns.forEach(b => b.disabled = true);
+  _gvpSetTradeStatus(`Cerrando ${pct}%…`, 'is-busy');
+  try {
+    const url = `/api/partial-close/${encodeURIComponent(pos.full_sym)}/${encodeURIComponent(pos.side)}?pct=${pct}`;
+    const r = await fetch(url, { method: 'POST' });
+    const j = await r.json();
+    if (j.success) {
+      _gvpSetTradeStatus(`Cerrado ${pct}% · qty ${j.qty || '—'}`, 'is-ok');
+    } else {
+      _gvpSetTradeStatus(`Error: ${j.error || 'desconocido'}`, 'is-error');
+    }
+  } catch (e) {
+    _gvpSetTradeStatus(`Red: ${e.message}`, 'is-error');
+  } finally {
+    btns.forEach(b => b.disabled = false);
+  }
+}
+
+document.querySelector('[data-gvp-trade]')?.addEventListener('click', e => {
+  const btn = e.target.closest('[data-gvp-act]');
+  if (!btn) return;
+  const act = btn.dataset.gvpAct;
+  if      (act === 'long')      _gvpQuickTrade('Buy');
+  else if (act === 'short')     _gvpQuickTrade('Sell');
+  else if (act === 'close-50')  _gvpQuickClose(50);
+  else if (act === 'close-100') _gvpQuickClose(100);
+});
+
+// Toggle close row visibility when panel state changes
+setInterval(_gvpRefreshCloseRow, 1500);
+
+// ── Zoom dentro del modal vertical ────────────────────────────────────────
+function _gvpZoom(act) {
+  if (!_gvpState) return;
+  const pos = _gvpCurrentPos();
+  if (!pos) return;
+  const key = `${pos.full_sym}_${pos.side}`;
+  const z = _getZoom(key);
+  let next = z;
+  if      (act === 'inc')   next = { levelIdx: QtsScale.clampIdx(z.levelIdx + 1) };
+  else if (act === 'dec')   next = { levelIdx: QtsScale.clampIdx(z.levelIdx - 1) };
+  else if (act === 'reset') next = { levelIdx: 0, anchor: 'mark' };
+  else return;
+  _setZoom(key, next);
+  _gvpRefreshZoomUI();
+  _gvpTick();
+  // Refresca la card de la posición (progress bar) para mantenerlas en sync
+  if (typeof renderPositions === 'function' && lastSnap) renderPositions(lastSnap);
+}
+
+function _gvpRefreshZoomUI() {
+  const lbl  = document.getElementById('gvp-zoom-lbl');
+  const inc  = document.getElementById('gvp-zoom-in');
+  const dec  = document.getElementById('gvp-zoom-out');
+  const rst  = document.getElementById('gvp-zoom-reset');
+  if (!_gvpState) {
+    if (lbl) lbl.textContent = '—';
+    [inc, dec, rst].forEach(b => b && (b.disabled = true));
+    return;
+  }
+  const pos = _gvpCurrentPos();
+  if (!pos) return;
+  const key = `${pos.full_sym}_${pos.side}`;
+  const z   = _getZoom(key);
+  const lv  = QtsScale.level(z.levelIdx);
+  if (lbl) lbl.textContent = lv.label;
+  if (inc) inc.disabled = z.levelIdx >= QtsScale.MAX_IDX;
+  if (dec) dec.disabled = z.levelIdx <= QtsScale.MIN_IDX;
+  if (rst) rst.disabled = z.levelIdx === 0 && z.anchor === 'mark';
+}
+
+document.getElementById('gvp-zoom-in')   ?.addEventListener('click', () => _gvpZoom('inc'));
+document.getElementById('gvp-zoom-out')  ?.addEventListener('click', () => _gvpZoom('dec'));
+document.getElementById('gvp-zoom-reset')?.addEventListener('click', () => _gvpZoom('reset'));
+// Sincroniza el estado de los botones cuando cambia la posición
+setInterval(_gvpRefreshZoomUI, 1500);
 
 document.getElementById('gvp-close')?.addEventListener('click', closeGravPanel);
 document.getElementById('gvp-backdrop')?.addEventListener('click', closeGravPanel);
