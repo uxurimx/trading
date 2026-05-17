@@ -1841,11 +1841,16 @@ connect();
 
 // State
 let _tpOpen      = false;
-let _tpMode      = 'manual';      // 'manual' | 'analysis'
+let _tpMode      = 'manual';      // 'manual' | 'analysis' | 'main'
 let _tmDir       = 'Buy';
 let _tmType      = 'Market';
 let _taDir       = 'Buy';
 let _liveMarks   = {};            // sym → price from WS snapshot
+let _mainDir     = 'Buy';
+let _mainStyle   = 'medium';      // 'fast' | 'medium' | 'slow'
+let _syntheticPositions = {};     // posKey → fake pos (used by GVP in MAIN mode)
+let _mainAnalysisBusy = false;
+let _mainSuggestBusy  = false;
 
 // ── Open / close ─────────────────────────────────────────────────────────────
 
@@ -1876,7 +1881,10 @@ document.querySelectorAll('.trade-mode-btn').forEach(btn => {
     document.querySelectorAll('.trade-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === _tpMode));
     document.getElementById('trade-manual').style.display   = _tpMode === 'manual'   ? 'flex' : 'none';
     document.getElementById('trade-analysis').style.display = _tpMode === 'analysis' ? 'flex' : 'none';
+    const mainEl = document.getElementById('trade-main');
+    if (mainEl) mainEl.style.display = _tpMode === 'main' ? 'flex' : 'none';
     if (_tpMode === 'analysis') _updateAnalysisPreview();
+    if (_tpMode === 'main')     _mainRefreshAnalysis();
   });
 });
 
@@ -2255,7 +2263,222 @@ setInterval(() => {
   if (!_tpOpen || !lastSnap) return;
   _updateMarkFromSnap(lastSnap);
   if (_tpMode === 'analysis') _updateAnalysisPreview();
+  if (_tpMode === 'main')     _updateMarkLabelMain();
 }, 1000);
+
+// ── MAIN mode (strip vertical sin posición activa) ───────────────────────────
+
+function _updateMarkLabelMain() {
+  const sym  = document.getElementById('tmain-symbol')?.value || '';
+  const mark = _getMark(sym);
+  const el   = document.getElementById('tmain-mark');
+  if (el) el.textContent = mark ? fmtPrice(mark) : '—';
+}
+
+document.querySelectorAll('#trade-main .trade-dir-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _mainDir = btn.dataset.dir;
+    document.querySelectorAll('#trade-main .trade-dir-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.dir === _mainDir));
+  });
+});
+
+document.getElementById('tmain-symbol')?.addEventListener('input', () => {
+  _updateMarkLabelMain();
+  _mainRefreshAnalysis();
+});
+
+function _mainBuildSyntheticPos() {
+  const symLabel = document.getElementById('tmain-symbol')?.value || '';
+  const full     = _symFull(symLabel);
+  if (!full) return null;
+  const mark = _getMark(symLabel);
+  if (!mark) return null;
+  const slPct = Math.max(0.1, parseFloat(document.getElementById('tmain-slpct')?.value) || 1.0);
+  const tpPct = Math.max(0.1, parseFloat(document.getElementById('tmain-tppct')?.value) || 2.0);
+  const isLong = _mainDir === 'Buy';
+  const side   = isLong ? 'Buy' : 'Sell';
+  const entry  = mark;
+  const sl     = isLong ? mark * (1 - slPct / 100) : mark * (1 + slPct / 100);
+  const tp     = isLong ? mark * (1 + tpPct / 100) : mark * (1 - tpPct / 100);
+  // Milestones 25/50/75 entre entry y TP
+  const milestones = [25, 50, 75].map(pct => ({
+    pct,
+    price: entry + (tp - entry) * (pct / 100),
+  }));
+  return {
+    full_sym: full,
+    symbol:   symLabel.toUpperCase(),
+    side,
+    direction: isLong ? 'LONG' : 'SHORT',
+    entry, sl, tp,
+    mark,
+    breakeven_price: entry,
+    milestones,
+    qty: 0,
+    leverage: 1,
+    pnl: 0,
+    pnl_pct: 0,
+    synthetic: true,
+    // No fijamos pos.geometry para que _gvpComputeView use pos.mark refrescado
+  };
+}
+
+async function _mainRefreshAnalysis() {
+  if (_mainAnalysisBusy) return;
+  const symLabel = document.getElementById('tmain-symbol')?.value || '';
+  const full = _symFull(symLabel);
+  const reg  = document.getElementById('tmain-regime');
+  const tr   = document.getElementById('tmain-trend');
+  const ab   = document.getElementById('tmain-absorption');
+  const sc   = document.getElementById('tmain-score');
+  const ra   = document.getElementById('tmain-rsi-atr');
+  const sg   = document.getElementById('tmain-suggest');
+  if (!full) {
+    if (reg) reg.textContent = '—';
+    if (tr)  tr.textContent  = '—';
+    if (ab)  ab.textContent  = '—';
+    if (sc)  sc.textContent  = '—';
+    if (ra)  ra.textContent  = '—';
+    if (sg)  { sg.textContent = '—'; sg.className = 'tmain-suggest'; }
+    return;
+  }
+  _mainAnalysisBusy = true;
+  try {
+    const r = await fetch(`/api/analyze/${encodeURIComponent(full)}`);
+    if (!r.ok) return;
+    const j = await r.json();
+    if (reg) reg.textContent = j.regime || '—';
+    if (tr)  tr.textContent  = j.trend_dir || '—';
+    if (ab)  ab.textContent  = j.ab_side || '—';
+    if (sc)  sc.textContent  = (j.score != null) ? String(j.score) : '—';
+    if (ra)  ra.textContent  = `${(j.rsi || 0).toFixed(1)} / ${(j.atr || 0).toFixed(4)}`;
+    if (sg) {
+      const isLong = _mainDir === 'Buy';
+      const trendAligned = (isLong && j.trend_dir === 'UP') || (!isLong && j.trend_dir === 'DOWN');
+      const absAligned   = (isLong && j.ab_side === 'BUY')  || (!isLong && j.ab_side === 'SELL');
+      const score = j.score || 0;
+      let txt = '—', cls = 'tmain-suggest';
+      if (score >= 70 && trendAligned && absAligned) {
+        txt = `Setup fuerte para ${isLong ? 'LONG' : 'SHORT'}`;
+        cls += ' tmain-suggest-strong';
+      } else if (score >= 50 && (trendAligned || absAligned)) {
+        txt = 'Setup parcial — esperar confirmación';
+        cls += ' tmain-suggest-mid';
+      } else if (score < 30) {
+        txt = 'Sin edge — mejor esperar';
+        cls += ' tmain-suggest-weak';
+      } else {
+        txt = `Condiciones mixtas (régimen ${j.regime || '—'})`;
+        cls += ' tmain-suggest-mid';
+      }
+      sg.textContent = txt;
+      sg.className   = cls;
+    }
+  } catch (_) { /* swallow */ }
+  finally { _mainAnalysisBusy = false; }
+}
+
+document.getElementById('tmain-slpct')?.addEventListener('input', () => { /* live geom regen at open time */ });
+document.getElementById('tmain-tppct')?.addEventListener('input', () => { /* idem */ });
+
+document.querySelectorAll('.tmain-style-toggle [data-style]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _mainStyle = btn.dataset.style;
+    document.querySelectorAll('.tmain-style-toggle [data-style]').forEach(b =>
+      b.classList.toggle('active', b.dataset.style === _mainStyle));
+  });
+});
+
+function _renderSuggestBox(s) {
+  const box = document.getElementById('tmain-suggest-box');
+  if (!box) return;
+  if (!s) { box.hidden = true; box.innerHTML = ''; return; }
+  const speedCls = s.speed === 'RÁPIDO' ? 'tmain-speed-fast'
+                 : s.speed === 'LENTO'  ? 'tmain-speed-slow'
+                                        : 'tmain-speed-mid';
+  const etaTxt = s.eta_min < 60 ? `~${s.eta_min} min`
+               : s.eta_min < 60*24 ? `~${(s.eta_min/60).toFixed(1)} h`
+                                   : `~${(s.eta_min/(60*24)).toFixed(1)} d`;
+  const rrCls = s.rr >= 2.0 ? 'c-green' : s.rr >= 1.5 ? 'c-yellow' : 'c-red';
+  const reasonHtml = (s.reasoning || []).map(r => `<li>${esc(r)}</li>`).join('');
+  const clustersHtml = (s.liq_clusters || []).length
+    ? `<div class="tmain-sb-row"><span class="c-dim">Clusters liq</span><span>${
+        s.liq_clusters.map(c => `${fmtPrice(c.price)} ($${(c.notional/1000).toFixed(1)}k)`).join(' · ')
+      }</span></div>`
+    : '';
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="tmain-sb-hdr">
+      <span class="tmain-speed-tag ${speedCls}">${esc(s.speed)}</span>
+      <span class="c-dim">ETA est.</span><span>${etaTxt}</span>
+      <span class="c-dim">R:R</span><span class="${rrCls}">${s.rr.toFixed(2)}</span>
+    </div>
+    <div class="tmain-sb-grid">
+      <div class="tmain-sb-row"><span class="c-dim">SL sugerido</span><span class="c-red">${fmtPrice(s.sl_price)} (${s.sl_pct.toFixed(2)}%)</span></div>
+      <div class="tmain-sb-row"><span class="c-dim">TP sugerido</span><span class="c-green">${fmtPrice(s.tp_price)} (${s.tp_pct.toFixed(2)}%)</span></div>
+      ${clustersHtml}
+    </div>
+    <ul class="tmain-sb-reason">${reasonHtml}</ul>
+    <div class="tmain-sb-actions">
+      <button id="tmain-apply-suggest" class="trade-btn primary full">APLICAR SL/TP SUGERIDOS</button>
+    </div>
+  `;
+  document.getElementById('tmain-apply-suggest')?.addEventListener('click', () => {
+    const slEl = document.getElementById('tmain-slpct');
+    const tpEl = document.getElementById('tmain-tppct');
+    if (slEl) slEl.value = s.sl_pct.toFixed(2);
+    if (tpEl) tpEl.value = s.tp_pct.toFixed(2);
+  });
+}
+
+document.getElementById('tmain-btn-suggest')?.addEventListener('click', async () => {
+  if (_mainSuggestBusy) return;
+  const symLabel = document.getElementById('tmain-symbol')?.value || '';
+  const full = _symFull(symLabel);
+  const box  = document.getElementById('tmain-suggest-box');
+  if (!full) {
+    if (box) { box.hidden = false; box.innerHTML = '<div class="tmain-sb-err">Selecciona un par primero</div>'; }
+    return;
+  }
+  _mainSuggestBusy = true;
+  const btn = document.getElementById('tmain-btn-suggest');
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Analizando…'; }
+  try {
+    const r = await fetch(`/api/suggest-levels/${encodeURIComponent(full)}?dir=${_mainDir}&style=${_mainStyle}`);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      if (box) { box.hidden = false; box.innerHTML = `<div class="tmain-sb-err">${esc(err.error || 'Error')}</div>`; }
+      return;
+    }
+    const s = await r.json();
+    _renderSuggestBox(s);
+  } catch (e) {
+    if (box) { box.hidden = false; box.innerHTML = `<div class="tmain-sb-err">Red: ${esc(e.message)}</div>`; }
+  } finally {
+    _mainSuggestBusy = false;
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+});
+
+document.getElementById('tmain-btn-open')?.addEventListener('click', () => {
+  const pos = _mainBuildSyntheticPos();
+  if (!pos) {
+    const sg = document.getElementById('tmain-suggest');
+    if (sg) { sg.textContent = 'Selecciona un par con precio disponible'; sg.className = 'tmain-suggest tmain-suggest-weak'; }
+    return;
+  }
+  const posKey = `${pos.full_sym}_${pos.side}`;
+  _syntheticPositions[posKey] = pos;
+  closeTradePanel();
+  openGravPanel(posKey);
+});
+
+// Refresca análisis MAIN cada 5s mientras el panel esté abierto en este modo
+setInterval(() => {
+  if (_tpOpen && _tpMode === 'main') _mainRefreshAnalysis();
+}, 5000);
 
 // ── Gravity poller — refresca el mapa de liquidez de cada pos-card Pro ──────
 // Cada canvas trae data-grav-sym + view_min/view_max (sincronizados con el
@@ -2533,8 +2756,8 @@ async function _trailsTick() {
   _trailsBusy = true;
   try {
     const canvases = document.querySelectorAll('canvas[data-grav-sym]');
-    const gvpSym   = _gvpState && lastSnap && lastSnap.positions[_gvpState.posKey]
-                       ? lastSnap.positions[_gvpState.posKey].full_sym : null;
+    const _gvpPos  = _gvpState ? _findPosByKey(_gvpState.posKey) : null;
+    const gvpSym   = _gvpPos ? _gvpPos.full_sym : null;
 
     const bySym = new Map();   // sym → {vmin, vmax}
     canvases.forEach(c => {
@@ -2547,10 +2770,9 @@ async function _trailsTick() {
       cur.vmax = Math.max(cur.vmax, hi);
       bySym.set(sym, cur);
     });
-    if (gvpSym && !bySym.has(gvpSym)) {
+    if (gvpSym && !bySym.has(gvpSym) && _gvpPos) {
       try {
-        const pos = lastSnap.positions[_gvpState.posKey];
-        const { view } = _gvpComputeView(pos);
+        const { view } = _gvpComputeView(_gvpPos);
         if (view && view.max > view.min) bySym.set(gvpSym, { vmin: view.min, vmax: view.max });
       } catch (_) {}
     }
@@ -2596,8 +2818,8 @@ async function _energyTick() {
       cur.vmax = Math.max(cur.vmax, hi);
       bySym.set(sym, cur);
     });
-    if (_gvpState && lastSnap) {
-      const pos = lastSnap.positions[_gvpState.posKey];
+    if (_gvpState) {
+      const pos = _findPosByKey(_gvpState.posKey);
       if (pos && !bySym.has(pos.full_sym)) {
         try {
           const { view } = _gvpComputeView(pos);
@@ -2650,8 +2872,12 @@ let _gvpBusy  = false;
 const _gvpEl  = () => document.getElementById('gvp-panel');
 
 function _findPosByKey(posKey) {
-  if (!lastSnap || !lastSnap.positions) return null;
-  return lastSnap.positions.find(p => `${p.full_sym}_${p.side}` === posKey) || null;
+  if (lastSnap && lastSnap.positions) {
+    const real = lastSnap.positions.find(p => `${p.full_sym}_${p.side}` === posKey);
+    if (real) return real;
+  }
+  // Posición sintética para modo MAIN (análisis sin operación real)
+  return _syntheticPositions[posKey] || null;
 }
 
 function _gvpComputeView(pos) {
@@ -2696,6 +2922,10 @@ function closeGravPanel() {
   document.body.style.overflow = '';
   // Mantener el aria-hidden tras la transición
   setTimeout(() => { if (!panel.classList.contains('open')) panel.setAttribute('aria-hidden', 'true'); }, 250);
+  // Limpieza de pos sintética asociada (si la hay)
+  if (_gvpState && _syntheticPositions[_gvpState.posKey]) {
+    delete _syntheticPositions[_gvpState.posKey];
+  }
   _gvpState = null;
 }
 
@@ -2727,6 +2957,11 @@ async function _gvpTick() {
   if (!_gvpState || _gvpBusy) return;
   const pos = _findPosByKey(_gvpState.posKey);
   if (!pos) { closeGravPanel(); return; }
+  // Para posiciones sintéticas, refrescar mark desde _liveMarks cada tick
+  if (pos.synthetic) {
+    const liveMark = _liveMarks[pos.full_sym];
+    if (liveMark) pos.mark = liveMark;
+  }
 
   _gvpBusy = true;
   try {
@@ -2762,8 +2997,8 @@ let _replayOffsetMs = 0;   // 0 = vivo. >0 = retroceder N ms.
 function _updateReplaySlider() {
   const slider = document.getElementById('gvp-replay-range');
   const lbl    = document.querySelector('[data-gvp-replay-time]');
-  if (!slider || !_gvpState || !lastSnap) return;
-  const pos = lastSnap.positions[_gvpState.posKey];
+  if (!slider || !_gvpState) return;
+  const pos = _findPosByKey(_gvpState.posKey);
   if (!pos) return;
   const arr = _priceHeat.get(pos.full_sym) || [];
   const now = Date.now();
@@ -2801,11 +3036,11 @@ function _renderReplayMarker() {
   const panel = document.getElementById('gvp-panel');
   if (!panel) return;
   let marker = panel.querySelector('.gvp-replay-marker');
-  if (_replayOffsetMs <= 0 || !_gvpState || !lastSnap) {
+  if (_replayOffsetMs <= 0 || !_gvpState) {
     if (marker) marker.remove();
     return;
   }
-  const pos = lastSnap.positions[_gvpState.posKey];
+  const pos = _findPosByKey(_gvpState.posKey);
   if (!pos) { if (marker) marker.remove(); return; }
   const sample = _replayPriceFor(pos.full_sym);
   if (!sample) { if (marker) marker.remove(); return; }
@@ -2957,11 +3192,11 @@ function _renderConvergence(cv) {
 }
 
 function _checkConvergence() {
-  if (!_gvpState || !lastSnap) {
+  if (!_gvpState) {
     _renderConvergence(null);
     return;
   }
-  const pos = lastSnap.positions[_gvpState.posKey];
+  const pos = _findPosByKey(_gvpState.posKey);
   if (!pos) {
     _renderConvergence(null);
     return;
@@ -2978,8 +3213,8 @@ function _checkConvergence() {
 }
 
 function _maybePlayAnomalySound() {
-  if (!_soundEnabled || !_gvpState || !lastSnap) return;
-  const pos = lastSnap.positions[_gvpState.posKey];
+  if (!_soundEnabled || !_gvpState) return;
+  const pos = _findPosByKey(_gvpState.posKey);
   if (!pos) return;
   const en = _energyCache.get(pos.full_sym);
   if (!en || !en.data) return;
@@ -3060,14 +3295,13 @@ function _gvpSetTradeStatus(msg, cls) {
 }
 
 function _gvpCurrentSym() {
-  if (!_gvpState) return null;
-  const pos = lastSnap && lastSnap.positions[_gvpState.posKey];
+  const pos = _gvpCurrentPos();
   return pos ? pos.full_sym : null;
 }
 
 function _gvpCurrentPos() {
   if (!_gvpState) return null;
-  return (lastSnap && lastSnap.positions[_gvpState.posKey]) || null;
+  return _findPosByKey(_gvpState.posKey);
 }
 
 function _gvpRefreshCloseRow() {

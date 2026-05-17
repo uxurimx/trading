@@ -1340,6 +1340,190 @@ async def api_analyze(symbol: str):
     })
 
 
+@app.get("/api/suggest-levels/{symbol}")
+async def api_suggest_levels(
+    symbol: str,
+    dir: str = "Buy",
+    style: str = "medium",     # fast | medium | slow
+):
+    """Sugiere SL/TP basados en HVN/LVN, S/R, clusters de liquidación y ATR."""
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    ms = _market.states.get(sym)
+    if not ms:
+        return JSONResponse({"error": "symbol not streaming"}, status_code=404)
+
+    price = _mark_prices.get(sym) or ms.ticker.last_price or ms.orderbook.mid_price
+    if price <= 0:
+        return JSONResponse({"error": "no price"}, status_code=503)
+
+    sig    = _signals.get(sym, {})
+    atr    = float(sig.get("atr", 0) or 0)
+    rsi    = float(sig.get("rsi", 50) or 50)
+    regime = sig.get("regime")
+    regime_name = regime.regime if regime else "UNKNOWN"
+    is_long = (dir.lower() in ("buy", "long"))
+
+    # ATR multipliers por estilo
+    style = (style or "medium").lower()
+    sl_mult = {"fast": 0.6, "medium": 1.2, "slow": 2.0}.get(style, 1.2)
+    tp_mult = {"fast": 1.5, "medium": 3.0, "slow": 5.0}.get(style, 3.0)
+    rr_min  = {"fast": 1.5, "medium": 2.0, "slow": 2.5}.get(style, 2.0)
+
+    # Viewport amplio para capturar niveles relevantes (±3%)
+    view_lo = price * 0.97
+    view_hi = price * 1.03
+    payload = build_liquidity_map(ms, _account.state.open_orders, view_lo, view_hi)
+    if payload is None:
+        return JSONResponse({"error": "no liquidity data"}, status_code=503)
+
+    levels = payload.get("levels") or []
+    liqs   = payload.get("liqs") or []
+
+    # ── Clusters de liquidaciones (suma notional por bucket de 0.1%) ────────
+    liq_clusters: list[dict] = []
+    bucket_pct = 0.001
+    bk: dict[float, float] = {}
+    for lq in liqs:
+        p = float(lq.get("price", 0))
+        n = float(lq.get("notional", 0))
+        if p <= 0 or n <= 0:
+            continue
+        key = round(p / (price * bucket_pct)) * (price * bucket_pct)
+        bk[key] = bk.get(key, 0.0) + n
+    for p, n in bk.items():
+        if n >= 5000:   # cluster significativo
+            liq_clusters.append({"price": round(p, 6), "notional": round(n, 0)})
+    liq_clusters.sort(key=lambda x: x["price"])
+
+    # ── Candidatos para SL (en contra) y TP (a favor) ───────────────────────
+    if is_long:
+        below = sorted([lv for lv in levels if lv["price"] < price], key=lambda lv: price - lv["price"])
+        above = sorted([lv for lv in levels if lv["price"] > price], key=lambda lv: lv["price"] - price)
+        sl_side, tp_side = below, above
+    else:
+        above = sorted([lv for lv in levels if lv["price"] > price], key=lambda lv: lv["price"] - price)
+        below = sorted([lv for lv in levels if lv["price"] < price], key=lambda lv: price - lv["price"])
+        sl_side, tp_side = above, below
+
+    def pick_sl(candidates: list[dict]) -> tuple[float, str]:
+        """Primer HVN/EQ relevante en contra, con buffer del 0.1%."""
+        for lv in candidates:
+            if lv["type"] in ("HVN", "EQ", "ROUND") and lv.get("strength", 0) >= 0.3:
+                buffer_dir = -1 if is_long else 1
+                px = lv["price"] * (1 + buffer_dir * 0.001)
+                return px, f"{lv['type']} a {lv['price']:.4f} (fuerza {lv['strength']:.2f})"
+        return 0.0, ""
+
+    def pick_tp(candidates: list[dict]) -> tuple[float, str]:
+        """HVN/EQ a favor, o liq cluster si hay; preferir el que respete rr_min."""
+        for lv in candidates:
+            if lv["type"] in ("HVN", "EQ", "ROUND") and lv.get("strength", 0) >= 0.25:
+                return lv["price"], f"{lv['type']} a {lv['price']:.4f} (fuerza {lv['strength']:.2f})"
+        return 0.0, ""
+
+    sl_struct, sl_reason = pick_sl(sl_side)
+    tp_struct, tp_reason = pick_tp(tp_side)
+
+    # ── Fallback ATR si no hay estructura ───────────────────────────────────
+    sl_atr = price - sl_mult * atr if is_long else price + sl_mult * atr
+    tp_atr = price + tp_mult * atr if is_long else price - tp_mult * atr
+
+    reasoning: list[str] = []
+    if sl_struct > 0:
+        sl_price = sl_struct
+        reasoning.append(f"SL detrás de {sl_reason}")
+    elif atr > 0:
+        sl_price = sl_atr
+        reasoning.append(f"SL por ATR×{sl_mult:.1f} (sin estructura cercana)")
+    else:
+        sl_pct_fallback = {"fast": 0.5, "medium": 1.0, "slow": 1.8}.get(style, 1.0) / 100
+        sl_price = price * (1 - sl_pct_fallback) if is_long else price * (1 + sl_pct_fallback)
+        reasoning.append(f"SL por % fijo {sl_pct_fallback*100:.1f}% (sin ATR ni niveles)")
+
+    if tp_struct > 0:
+        tp_price = tp_struct
+        reasoning.append(f"TP en {tp_reason}")
+    elif atr > 0:
+        tp_price = tp_atr
+        reasoning.append(f"TP por ATR×{tp_mult:.1f} (sin estructura cercana)")
+    else:
+        tp_pct_fallback = {"fast": 1.0, "medium": 2.0, "slow": 4.0}.get(style, 2.0) / 100
+        tp_price = price * (1 + tp_pct_fallback) if is_long else price * (1 - tp_pct_fallback)
+        reasoning.append(f"TP por % fijo {tp_pct_fallback*100:.1f}%")
+
+    # ── Validar R:R y estirar TP si hace falta ──────────────────────────────
+    risk   = abs(price - sl_price)
+    reward = abs(tp_price - price)
+    rr = (reward / risk) if risk > 0 else 0.0
+    if rr < rr_min and risk > 0:
+        # Reposicionar TP para alcanzar rr_min mínimo
+        need = risk * rr_min
+        tp_price = price + need if is_long else price - need
+        reward   = need
+        rr       = rr_min
+        reasoning.append(f"TP extendido para asegurar R:R ≥ {rr_min}")
+
+    sl_pct = abs(sl_price - price) / price * 100
+    tp_pct = abs(tp_price - price) / price * 100
+
+    # ── Estimación de "velocidad" del setup ─────────────────────────────────
+    # Combina ATR%, régimen, densidad de liqs recientes y RSI extremos
+    atr_pct = (atr / price * 100) if price > 0 else 0
+    recent_liqs = sum(1 for lq in liqs if lq.get("age_s", 999) < 60)
+    speed_score = 0
+    if atr_pct >= 0.5: speed_score += 2
+    elif atr_pct >= 0.3: speed_score += 1
+    if regime_name in ("VOLATILE", "TRENDING_UP", "TRENDING_DOWN"): speed_score += 2
+    elif regime_name == "RANGING": speed_score -= 1
+    if recent_liqs >= 3: speed_score += 1
+    if rsi <= 25 or rsi >= 75: speed_score += 1
+
+    if speed_score >= 4:
+        speed = "RÁPIDO"
+        eta_min = max(2, int(60 * tp_pct / max(0.05, atr_pct)))
+    elif speed_score >= 2:
+        speed = "MEDIO"
+        eta_min = max(10, int(120 * tp_pct / max(0.05, atr_pct))) if atr_pct > 0 else 60
+    else:
+        speed = "LENTO"
+        eta_min = max(30, int(240 * tp_pct / max(0.05, atr_pct))) if atr_pct > 0 else 180
+
+    # Cap razonable
+    eta_min = min(eta_min, 60 * 24)
+
+    reasoning.insert(0, f"Régimen {regime_name} · ATR {atr_pct:.2f}% · RSI {rsi:.0f}")
+    if liq_clusters:
+        nearest = min(liq_clusters, key=lambda c: abs(c["price"] - price))
+        side = "arriba" if nearest["price"] > price else "abajo"
+        reasoning.append(f"Cluster de liqs {side} a {nearest['price']:.4f} (~${nearest['notional']:,.0f})")
+
+    return JSONResponse({
+        "symbol":     sym,
+        "mark":       round(price, 6),
+        "direction":  "LONG" if is_long else "SHORT",
+        "style":      style,
+        "sl_price":   round(sl_price, 6),
+        "tp_price":   round(tp_price, 6),
+        "sl_pct":     round(sl_pct, 3),
+        "tp_pct":     round(tp_pct, 3),
+        "rr":         round(rr, 2),
+        "speed":      speed,
+        "eta_min":    eta_min,
+        "atr":        round(atr, 6),
+        "atr_pct":    round(atr_pct, 3),
+        "regime":     regime_name,
+        "rsi":        round(rsi, 1),
+        "reasoning":  reasoning,
+        "liq_clusters": liq_clusters[:5],
+        "levels_used": {
+            "sl": sl_reason or None,
+            "tp": tp_reason or None,
+        },
+    })
+
+
 @app.post("/api/trade")
 async def api_trade(req: Request):
     """Ejecuta una orden de mercado o límite vía BybitExecutor."""

@@ -297,6 +297,7 @@
   <div class="trade-panel-hdr">
     <span class="trade-panel-title">NUEVA OPERACIÓN</span>
     <div class="trade-mode-toggle">
+      <button class="trade-mode-btn" data-mode="main">MAIN</button>
       <button class="trade-mode-btn active" data-mode="manual">MANUAL</button>
       <button class="trade-mode-btn" data-mode="analysis">ANÁLISIS</button>
     </div>
@@ -486,6 +487,93 @@
 
     <div class="c-dim" style="font-size:9px;letter-spacing:.5px;text-align:center;padding:8px 0">
       Los análisis guardados aparecen en <strong>Trades → Análisis</strong>
+    </div>
+
+  </div>
+
+  <!-- ── Main mode (strip vertical + análisis pre-trade) ─────────────── -->
+  <div id="trade-main" class="trade-section trade-section-main" style="display:none">
+
+    <div class="tmain-intro">
+      Selecciona un par para abrir el strip vertical en modo análisis.
+      Liquidez, S/R y zonas se cargan como si fuera un trade activo.
+    </div>
+
+    <div class="trade-form-grid">
+
+      <div class="trade-field">
+        <label>SÍMBOLO</label>
+        <div class="trade-sym-wrap">
+          <input id="tmain-symbol" class="trade-input" placeholder="BTC" list="trade-sym-list" autocomplete="off">
+          <span id="tmain-mark" class="trade-mark-lbl">—</span>
+        </div>
+      </div>
+
+      <div class="trade-field">
+        <label>DIRECCIÓN HIPOTÉTICA</label>
+        <div class="trade-dir-toggle">
+          <button class="trade-dir-btn active" data-dir="Buy" data-for="main">▲ LONG</button>
+          <button class="trade-dir-btn" data-dir="Sell" data-for="main">▼ SHORT</button>
+        </div>
+      </div>
+
+      <div class="trade-field">
+        <label>RANGO SL%</label>
+        <input id="tmain-slpct" class="trade-input" type="number" step="0.1" min="0.1" value="1.0">
+      </div>
+
+      <div class="trade-field">
+        <label>RANGO TP%</label>
+        <input id="tmain-tppct" class="trade-input" type="number" step="0.1" min="0.1" value="2.0">
+      </div>
+
+      <div class="trade-field" style="grid-column: 1 / -1">
+        <label>ESTILO DEL TRADE</label>
+        <div class="trade-dir-toggle tmain-style-toggle">
+          <button class="trade-dir-btn" data-style="fast">⚡ RÁPIDO</button>
+          <button class="trade-dir-btn active" data-style="medium">⊙ MEDIO</button>
+          <button class="trade-dir-btn" data-style="slow">⊚ LENTO</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Sugerencias automáticas SL/TP -->
+    <div class="tmain-suggest-actions">
+      <button id="tmain-btn-suggest" class="trade-btn secondary full">✦ SUGERIR SL / TP</button>
+    </div>
+    <div id="tmain-suggest-box" class="tmain-suggest-box" hidden></div>
+
+    <!-- Decision tools (poblado por _mainRefreshAnalysis) -->
+    <div id="tmain-tools" class="tmain-tools">
+      <div class="tmain-tools-row">
+        <span class="c-dim">Régimen</span>
+        <span id="tmain-regime">—</span>
+      </div>
+      <div class="tmain-tools-row">
+        <span class="c-dim">Tendencia</span>
+        <span id="tmain-trend">—</span>
+      </div>
+      <div class="tmain-tools-row">
+        <span class="c-dim">Absorción</span>
+        <span id="tmain-absorption">—</span>
+      </div>
+      <div class="tmain-tools-row">
+        <span class="c-dim">Opp score</span>
+        <span id="tmain-score">—</span>
+      </div>
+      <div class="tmain-tools-row">
+        <span class="c-dim">RSI / ATR</span>
+        <span id="tmain-rsi-atr">—</span>
+      </div>
+      <div class="tmain-tools-row">
+        <span class="c-dim">Sugerencia</span>
+        <span id="tmain-suggest" class="tmain-suggest">—</span>
+      </div>
+    </div>
+
+    <div class="trade-footer">
+      <button id="tmain-btn-open" class="trade-btn primary full">ABRIR STRIP</button>
     </div>
 
   </div>
