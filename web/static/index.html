@@ -38,6 +38,10 @@
       <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
       Historial
     </button>
+    <button class="side-tab" data-tab="mercado">
+      <svg viewBox="0 0 24 24"><rect x="2" y="14" width="4" height="7" rx=".5"/><rect x="9" y="9" width="4" height="12" rx=".5"/><rect x="16" y="4" width="4" height="17" rx=".5"/></svg>
+      Mercado
+    </button>
     <button class="side-tab" data-tab="config">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       Config
@@ -202,6 +206,22 @@
     </section>
   </div>
 
+  <!-- ── MERCADO ──────────────────────────────────────────────────────── -->
+  <div class="view" id="view-mercado">
+    <div class="mkt-topbar">
+      <div class="mkt-group-tabs" id="mkt-group-tabs">
+        <button class="mkt-group-btn active" data-group="constelacion">CONSTELACIONES</button>
+        <button class="mkt-group-btn" data-group="estado">ESTADO</button>
+        <button class="mkt-group-btn" data-group="sector">SECTOR</button>
+        <button class="mkt-group-btn" data-group="narrativa">NARRATIVA</button>
+        <button class="mkt-group-btn" data-group="senal">SEÑAL</button>
+      </div>
+      <button id="mkt-refresh" class="ctrl-btn" title="Refrescar">↻</button>
+    </div>
+    <div id="mkt-loading" class="mkt-loading">Cargando mercado…</div>
+    <div id="mkt-body" class="mkt-body"></div>
+  </div>
+
   <!-- ── CONFIG ────────────────────────────────────────────────────────── -->
   <div class="view" id="view-config">
     <section class="section">
@@ -276,6 +296,10 @@
   <button class="nav-tab" data-tab="historial">
     <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
     Historial
+  </button>
+  <button class="nav-tab" data-tab="mercado">
+    <svg viewBox="0 0 24 24"><rect x="2" y="14" width="4" height="7" rx=".5"/><rect x="9" y="9" width="4" height="12" rx=".5"/><rect x="16" y="4" width="4" height="17" rx=".5"/></svg>
+    Mercado
   </button>
   <button class="nav-tab" data-tab="config">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -544,6 +568,32 @@
     </div>
     <div id="tmain-suggest-box" class="tmain-suggest-box" hidden></div>
 
+    <!-- Tejido narrativo: qué es este par (sector, narrativas, ecosistema, peers) -->
+    <div id="tmain-narrative" class="tmain-narrative" hidden>
+      <div class="tmain-nar-hdr">
+        <span class="tmain-nar-name">—</span>
+        <span class="tmain-nar-sector">—</span>
+        <span class="tmain-nar-rank c-dim"></span>
+      </div>
+      <div class="tmain-nar-desc">—</div>
+      <div class="tmain-nar-row">
+        <span class="c-dim">Narrativas</span>
+        <span class="tmain-nar-tags" id="tmain-nar-tags"></span>
+      </div>
+      <div class="tmain-nar-row">
+        <span class="c-dim">Ecosistema</span>
+        <span class="tmain-nar-eco" id="tmain-nar-eco">—</span>
+      </div>
+      <div class="tmain-nar-row tmain-nar-row-block">
+        <span class="c-dim">Peers del sector</span>
+        <div class="tmain-nar-peers" id="tmain-nar-peers"></div>
+      </div>
+      <div class="tmain-nar-row tmain-nar-row-block">
+        <span class="c-dim">Correlaciones 30d</span>
+        <div class="tmain-nar-corr" id="tmain-nar-corr"></div>
+      </div>
+    </div>
+
     <!-- Decision tools (poblado por _mainRefreshAnalysis) -->
     <div id="tmain-tools" class="tmain-tools">
       <div class="tmain-tools-row">
@@ -616,10 +666,40 @@
   </div>
   <div class="gvp-body"></div>
   <div class="gvp-trade" data-gvp-trade>
-    <div class="gvp-trade-row">
-      <button class="gvp-tbtn gvp-tbtn-long"  data-gvp-act="long"  title="Comprar / Long market">▲ LONG</button>
-      <button class="gvp-tbtn gvp-tbtn-short" data-gvp-act="short" title="Vender / Short market">▼ SHORT</button>
-    </div>
+
+  <!-- Capital disponible + slider -->
+  <div class="gvp-cap-hdr">
+    <span class="gvp-cap-lbl">CAPITAL</span>
+    <span id="gvp-cap-avail" class="gvp-cap-avail">—</span>
+  </div>
+  <div class="gvp-cap-slider-wrap">
+    <input id="gvp-cap-slider" type="range" min="5" max="1000" step="5" value="50" class="gvp-cap-slider"/>
+    <span id="gvp-cap-display" class="gvp-cap-display">$50</span>
+  </div>
+  <div class="gvp-pct-row">
+    <button class="gvp-pct-btn" data-pct="10">10%</button>
+    <button class="gvp-pct-btn" data-pct="25">25%</button>
+    <button class="gvp-pct-btn" data-pct="50">50%</button>
+    <button class="gvp-pct-btn" data-pct="75">75%</button>
+    <button class="gvp-pct-btn" data-pct="100">MAX</button>
+  </div>
+
+  <!-- Apalancamiento -->
+  <div class="gvp-lev-row">
+    <span class="gvp-lev-lbl">LEV</span>
+    <button class="gvp-lev-btn" data-lev="1">1x</button>
+    <button class="gvp-lev-btn" data-lev="3">3x</button>
+    <button class="gvp-lev-btn" data-lev="5">5x</button>
+    <button class="gvp-lev-btn active" data-lev="10">10x</button>
+    <button class="gvp-lev-btn" data-lev="20">20x</button>
+    <button class="gvp-lev-btn" data-lev="50">50x</button>
+    <button class="gvp-lev-btn" data-lev="100">100x</button>
+  </div>
+
+  <div class="gvp-trade-row">
+    <button class="gvp-tbtn gvp-tbtn-long"  data-gvp-act="long"  title="Comprar / Long market">▲ LONG</button>
+    <button class="gvp-tbtn gvp-tbtn-short" data-gvp-act="short" title="Vender / Short market">▼ SHORT</button>
+  </div>
     <div class="gvp-trade-row gvp-trade-cfg">
       <label class="gvp-trade-lbl">$
         <input id="gvp-size"   type="number" value="50" min="5" step="5" />

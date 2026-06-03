@@ -959,6 +959,7 @@ class TradeController:
             trade.opened_at   = int(time.time())
             trade.ai_reasoning = req.ai_reasoning
             log.info("Orden ejecutada con éxito: %s a %.5g", req.symbol, trade.entry_price)
+            self._pg_open_trade(trade, req)
             notifier.trade_opened(
                 req.symbol, req.side, trade.entry_price, 
                 req.sl_price, req.tp_price, req.goal_usd
@@ -1225,6 +1226,7 @@ class TradeController:
             save_trade(trade)
             save_symbol_trade_detail(trade, self._last_ms.get(symbol))
             notifier.trade_closed(symbol, trade.pnl_usd, trade.close_reason)
+            self._pg_close_trade(trade)
             self._track_symbol_perf(symbol, trade.pnl_usd, trade.duration_s, trade.close_reason)
 
             # ── Shield: mostrar cuánto se ahorró vs llegar al SL original ──────────
@@ -2176,3 +2178,82 @@ class TradeController:
         st = self.get_state()
         for cb in self._callbacks:
             cb(st)
+
+    # ── PostgreSQL bridge ─────────────────────────────────────────────────────
+
+    def _pg_open_trade(self, trade, req) -> None:
+        try:
+            from core.trading_db import trade_open, decision_save
+            from core.config import settings as _s
+            pg_sid = getattr(_s, "_active_trading_session_id", None)
+            if not pg_sid:
+                return
+            side_lbl = "LONG" if req.side == "Buy" else "SHORT"
+            sl_dist  = abs(req.entry_price - req.sl_price)
+            rr = abs(req.tp_price - req.entry_price) / sl_dist if sl_dist > 0 else 0
+            pg_tid = trade_open(
+                session_id=pg_sid,
+                symbol=trade.symbol,
+                side=side_lbl,
+                entry_price=req.entry_price,
+                sl_price=req.sl_price,
+                tp_price=req.tp_price,
+                qty=req.qty,
+                leverage=req.leverage or 10,
+                opportunity_type=getattr(req, "strategy_tag", "QUICK_SCALP").upper(),
+                confidence_score=int(req.confidence or 0),
+                risk_usd=float(req.risk_usd or 0),
+                rr_planned=round(rr, 3),
+                paper_mode=bool(getattr(_s, "paper_trading", True)),
+                pre_notes=req.ai_reasoning or "",
+            )
+            trade._pg_trade_id = pg_tid
+            decision_save(
+                session_id=pg_sid,
+                trade_id=pg_tid,
+                symbol=trade.symbol,
+                decision_type="ENTER",
+                action=req.side,
+                reasoning=req.ai_reasoning or "",
+                confidence=int(req.confidence or 0),
+                entry_price=req.entry_price,
+                sl_price=req.sl_price,
+                tp_price=req.tp_price,
+                executed=True,
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger("qts.controller").warning("pg_open_trade error: %s", e)
+
+    def _pg_close_trade(self, trade) -> None:
+        try:
+            from core.trading_db import trade_close, session_count_trade, session_update, decision_save
+            from core.config import settings as _s
+            pg_sid = getattr(_s, "_active_trading_session_id", None)
+            pg_tid = getattr(trade, "_pg_trade_id", None)
+            if not pg_sid or not pg_tid:
+                return
+            sl_dist = abs(trade.entry_price - (trade.request.sl_price if trade.request else trade.entry_price))
+            r_mult  = trade.pnl_usd / (sl_dist * trade.qty) if sl_dist > 0 and trade.qty > 0 else 0
+            trade_close(
+                trade_id=pg_tid,
+                exit_price=trade.exit_price or trade.entry_price,
+                pnl_usd=trade.pnl_usd,
+                r_multiple=round(r_mult, 4),
+                close_reason=trade.close_reason or "UNKNOWN",
+            )
+            decision_save(
+                session_id=pg_sid,
+                trade_id=pg_tid,
+                symbol=trade.symbol,
+                decision_type="EXIT",
+                action="CLOSE",
+                reasoning=f"Cerrado por {trade.close_reason}. PnL={trade.pnl_usd:.4f}",
+                executed=True,
+            )
+            session_count_trade(pg_sid, won=trade.pnl_usd > 0)
+            if self._session:
+                session_update(pg_sid, self._session.current_balance)
+        except Exception as e:
+            import logging
+            logging.getLogger("qts.controller").warning("pg_close_trade error: %s", e)

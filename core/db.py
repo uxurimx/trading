@@ -289,6 +289,13 @@ def initialize_db() -> None:
 
     con.close()
 
+    # Tejido narrativo (sector/narrativas/ecosistema + matriz de correlaciones)
+    try:
+        from core import narrative as _narrative
+        _narrative.init_tables()
+    except Exception as e:
+        log.warning("narrative.init_tables falló: %s", e)
+
 
 def save_trade(trade: "TradeRecord") -> None:
     """Persiste un trade cerrado/fallido en trade_journal."""

@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config import settings, SPEED_CONFIGS
+from core import narrative as _narrative
 from core.absorption import AbsorptionDetector
 from core.liquidity import LiquidityAnalyzer
 from core.trend import TrendAnalyzer
@@ -777,6 +778,31 @@ async def _account_refresh_loop() -> None:
 
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
 
+async def _narrative_warmup_loop():
+    """Pre-carga el contexto narrativo de los símbolos en streaming.
+
+    Se ejecuta una vez (tras 45s para dejar que MarketStream pueble states) y
+    después cada hora refresca lo que haya entrado nuevo y re-cruza peers.
+    Respeta el rate limit de CoinGecko (~24 req/min).
+    """
+    await asyncio.sleep(45)
+    while True:
+        try:
+            symbols = list(_market.states.keys())[:80]
+            pending = [s for s in symbols if _narrative.load_context(s) is None]
+            if pending:
+                log.warning("narrative: warmup de %d símbolos", len(pending))
+                for sym in pending[:40]:
+                    await _narrative.get_context(sym)
+                _narrative.enrich_peers_from_cache()
+            else:
+                # Mantén peers actualizados aunque la cache esté caliente
+                _narrative.enrich_peers_from_cache()
+        except Exception as e:
+            log.warning("narrative_warmup_loop: %s", e)
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -800,11 +826,16 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_mxn_loop(),          name="mxn"),
         asyncio.create_task(_ticker_ws_loop(),    name="ticker_ws"),
         asyncio.create_task(_account_refresh_loop(), name="account_refresh"),
+        asyncio.create_task(_narrative_warmup_loop(), name="narrative_warmup"),
     ]
     log.warning("QTS Web Dashboard → http://0.0.0.0:%s", WEB_PORT)
     yield
     for t in tasks:
         t.cancel()
+    try:
+        await _narrative.close_session()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="QTS Dashboard", lifespan=lifespan)
@@ -1522,6 +1553,166 @@ async def api_suggest_levels(
             "tp": tp_reason or None,
         },
     })
+
+
+def _detect_constellations(item: dict) -> list[str]:
+    """Clasifica un símbolo en constelaciones según sus señales actuales."""
+    consts: list[str] = []
+    tags      = item.get("tags", [])
+    score     = item.get("score", 0)
+    regime    = item.get("regime", "")
+    ab_side   = item.get("ab_side", "NEUTRAL")
+    trend_dir = item.get("trend_dir", "NEUTRAL")
+    state     = item.get("state", "")
+    chg       = item.get("change_pct", 0)
+    funding   = item.get("funding_rate", 0.0)
+    btc_corr  = item.get("btc_corr")
+
+    # 🔥 Breakout: cerca de máximo 24h + tendencia alcista + score alto
+    if "HIGH" in tags and score >= 50 and trend_dir == "ALCISTA":
+        consts.append("BREAKOUT")
+
+    # ❄️ Colapso: cerca de mínimo 24h + tendencia bajista
+    if "LOW" in tags and trend_dir == "BAJISTA":
+        consts.append("COLAPSO")
+
+    # 🚀 Impulso: movers grandes con momentum confirmado
+    if state in ("ROCKET", "SUBIENDO") and score >= 55 and trend_dir == "ALCISTA":
+        consts.append("IMPULSO")
+
+    # 🌱 Acumulación: rango + absorción compradora
+    if regime in ("RANGING", "ACCUMULATION") and ab_side == "BUY":
+        consts.append("ACUMULACION")
+
+    # 💧 Distribución: rango + absorción vendedora
+    if regime == "RANGING" and ab_side == "SELL":
+        consts.append("DISTRIBUCION")
+
+    # 🎢 Volátiles: régimen volátil
+    if regime == "VOLATILE":
+        consts.append("VOLATILE")
+
+    # 🛌 Durmientes: score bajo + ranging + movimiento mínimo
+    if score < 25 and regime == "RANGING" and abs(chg) < 1.5:
+        consts.append("DURMIENTE")
+
+    # 🌊 Funding extremo: crowded trade o capitulación de funding
+    if abs(funding) >= 0.0005:   # ≥0.05% cada 8h
+        consts.append("FUNDING")
+
+    # 📐 Desacoplados del BTC (diversificación real)
+    if btc_corr is not None and abs(btc_corr) < 0.3:
+        consts.append("DESACOPLADO")
+
+    # ⚡ Alta señal: oportunidad calificada por el motor
+    if score >= 70:
+        consts.append("ALTA_SENAL")
+
+    return consts
+
+
+@app.get("/api/market")
+async def api_market():
+    """Vista panorámica: todos los símbolos con señales + constellaciones."""
+    try:
+        data    = await _exec._get("/v5/market/tickers", {"category": "linear"})
+        tickers = (data.get("result") or {}).get("list") or []
+        tmap    = {t["symbol"]: t for t in tickers}
+
+        # Precargar correlaciones BTC en batch (leer de cache en DB)
+        corr_cache: dict[str, float | None] = {}
+        for sym in set(_market.states) | set(_signals):
+            rows = _narrative.get_correlations_for(sym, limit=1, min_abs=0.0)
+            corr_cache[sym] = rows[0]["corr"] if rows else None
+
+        monitored = sorted(set(_market.states) | set(_signals))
+        result: list[dict] = []
+        for sym in monitored:
+            t     = tmap.get(sym, {})
+            ctx   = _narrative.load_context(sym)
+            sig   = _signals.get(sym, {})
+            opp   = sig.get("opp")
+            rg    = sig.get("regime")
+            ab    = sig.get("absorption")
+            tr    = sig.get("trend")
+
+            last     = float(t.get("lastPrice",        0) or 0)
+            mark     = float(t.get("markPrice",     last) or last)
+            chg      = float(t.get("price24hPcnt",     0) or 0) * 100
+            vol      = float(t.get("turnover24h",      0) or 0)
+            hi24     = float(t.get("highPrice24h",     0) or 0)
+            lo24     = float(t.get("lowPrice24h",      0) or 0)
+            funding  = float(t.get("fundingRate",      0) or 0)
+            oi_val   = float(t.get("openInterestValue",0) or 0)
+            score    = opp.score if opp else 0
+            regime_n = rg.regime if rg else ""
+            ab_side  = ab.side   if ab else "NEUTRAL"
+            trend_d  = tr.direction if tr else "NEUTRAL"
+
+            if mark <= 0:
+                ms_s = _market.states.get(sym)
+                mark = _mark_prices.get(sym) or (ms_s.ticker.last_price if ms_s and ms_s.connected else 0)
+
+            if   chg >=  5: state = "ROCKET"
+            elif chg >=  2: state = "SUBIENDO"
+            elif chg >= -2: state = "ESTABLE"
+            elif chg >= -5: state = "CAYENDO"
+            else:           state = "CRASH"
+
+            tags: list[str] = []
+            if score >= 70: tags.append("SEÑAL")
+            if regime_n == "VOLATILE":     tags.append("VOLÁTIL")
+            if regime_n == "ACCUMULATION": tags.append("ACUM")
+            if hi24 > 0 and mark > 0 and (mark / hi24) >= 0.99: tags.append("HIGH")
+            if lo24 > 0 and mark > 0 and (mark / lo24) <= 1.01: tags.append("LOW")
+
+            item: dict = {
+                "symbol":       sym,
+                "label":        sym.replace("USDT", ""),
+                "price":        round(mark, 6),
+                "change_pct":   round(chg, 2),
+                "volume_24h":   round(vol, 0),
+                "high_24h":     round(hi24, 6),
+                "low_24h":      round(lo24, 6),
+                "funding_rate": round(funding, 6),
+                "oi":           round(oi_val, 0),
+                "state":        state,
+                "tags":         tags,
+                "score":        score,
+                "regime":       regime_n,
+                "ab_side":      ab_side,
+                "trend_dir":    trend_d,
+                "btc_corr":     corr_cache.get(sym),
+                "name":         ctx.name       if ctx else "",
+                "sector":       ctx.sector     if ctx else "",
+                "narratives":   ctx.narratives if ctx else [],
+                "ecosystem":    ctx.ecosystem  if ctx else "",
+            }
+            item["constellations"] = _detect_constellations(item)
+            result.append(item)
+
+        result.sort(key=lambda x: -abs(x["change_pct"]))
+        return JSONResponse({"market": result, "ts": int(time.time() * 1000)})
+    except Exception as e:
+        log.error("api_market: %s", e)
+        return JSONResponse({"market": [], "error": str(e)})
+
+
+@app.get("/api/narrative/{symbol}")
+async def api_narrative(symbol: str, refresh: bool = False):
+    """Contexto narrativo de un par: nombre, sector, narrativas, ecosistema,
+    peers, descripción y correlaciones 30d con otros símbolos.
+    """
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    ctx = await _narrative.get_context(sym, refresh=refresh)
+    if ctx is None:
+        return JSONResponse({"error": "no context"}, status_code=503)
+    correlations = _narrative.get_correlations_for(sym, limit=8, min_abs=0.3)
+    payload = ctx.to_dict()
+    payload["correlations"] = correlations
+    return JSONResponse(payload)
 
 
 @app.post("/api/trade")

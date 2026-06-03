@@ -25,6 +25,8 @@
 (function () {
   'use strict';
 
+  let _gvpPrevPrice = 0;
+
   const ZONE_COLORS = {
     HVN:   '#22d3ee',
     LVN:   '#f59e0b',
@@ -394,14 +396,14 @@
     return `<div class="gvp-current-axis-lbl" style="top:${y}%">${fmtPrice(current)}</div>`;
   }
 
-  function buildCurrent(current, vmin, vmax) {
+  function buildCurrent(current, vmin, vmax, direction) {
     if (!current || current < vmin || current > vmax) return '';
     const y = priceToY(current, vmin, vmax).toFixed(2);
-    // El label vive ahora en el axis-y (no en el chart) para no tapar velas.
+    const dirCls = direction === 'up' ? ' is-up' : direction === 'down' ? ' is-down' : '';
     return `
-      <div class="gvp-current-glow" style="top:${y}%"></div>
-      <div class="gvp-current-line" style="top:${y}%"></div>
-      <div class="gvp-current-diamond" style="top:${y}%"></div>`;
+    <div class="gvp-current-glow${dirCls}" style="top:${y}%"></div>
+    <div class="gvp-current-line${dirCls}" style="top:${y}%"></div>
+    <div class="gvp-current-diamond${dirCls}" style="top:${y}%"></div>`;
   }
 
   // ── Stats footer ───────────────────────────────────────────────────────────
@@ -531,7 +533,9 @@
     const lv     = buildLevels(data.levels, vmin, vmax, opts && opts.trails);
     const gx     = buildGeom(geom, vmin, vmax);
     const orders = buildOrders(data.my_orders, vmin, vmax);
-    const cur    = buildCurrent(data.current, vmin, vmax);
+    const _dir   = data.current > _gvpPrevPrice ? 'up' : data.current < _gvpPrevPrice ? 'down' : 'flat';
+    if (data.current > 0) _gvpPrevPrice = data.current;
+    const cur    = buildCurrent(data.current, vmin, vmax, _dir);
     const trails = buildTrails(opts && opts.trails, vmin, vmax);
     const energy = buildEnergy(opts && opts.energy, vmin, vmax);
     const heat   = buildHeat(opts && opts.heat, vmin, vmax, opts && opts.heatOpacity);

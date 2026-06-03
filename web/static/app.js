@@ -1698,6 +1698,294 @@ function render(data) {
   }
 }
 
+// ── Mercado — vista panorámica de pares ───────────────────────────────────────
+
+let _mktData      = null;
+let _mktGroupBy   = localStorage.getItem('qts_mkt_group') || 'constelacion';
+let _mktLastFetch = 0;
+const MKT_TTL     = 30000; // 30s
+
+const MKT_STATE_ORDER = ['ROCKET','SUBIENDO','ESTABLE','CAYENDO','CRASH'];
+const MKT_STATE_LABEL = {
+  ROCKET:   '🚀 ROCKETS  +5%',
+  SUBIENDO: '▲ SUBIENDO  +2% a +5%',
+  ESTABLE:  '⊙ ESTABLES  −2% a +2%',
+  CAYENDO:  '▼ CAYENDO  −5% a −2%',
+  CRASH:    '💀 CRASH  −5%',
+};
+
+const MKT_CONST_META = {
+  BREAKOUT:    { icon: '🔥', label: 'BREAKOUT',     desc: 'Cerca de máximo 24h con tendencia confirmada — momentum real', color: '#22d3ee' },
+  COLAPSO:     { icon: '❄️', label: 'COLAPSO',      desc: 'Cerca de mínimo 24h con tendencia bajista — pánico o capitulación', color: '#f87171' },
+  IMPULSO:     { icon: '🚀', label: 'IMPULSO',      desc: 'Movimiento fuerte + absorción compradora — entrada antes del FOMO', color: '#4ade80' },
+  ACUMULACION: { icon: '🌱', label: 'ACUMULACIÓN',  desc: 'Rango lateral + flujo comprador oculto — smart money cargando', color: '#a78bfa' },
+  DISTRIBUCION:{ icon: '💧', label: 'DISTRIBUCIÓN', desc: 'Rango lateral + flujo vendedor — salida silenciosa institucional', color: '#fb923c' },
+  VOLATILE:    { icon: '🎢', label: 'VOLÁTILES',    desc: 'ATR alto · régimen caótico — scalp friendly, peligroso para posición', color: '#facc15' },
+  DURMIENTE:   { icon: '🛌', label: 'DURMIENTES',   desc: 'Bajo volumen · sin movimiento — coiled spring, próximo movimiento será grande', color: '#94a3b8' },
+  FUNDING:     { icon: '🌊', label: 'FUNDING EXT.', desc: 'Funding extremo — trade masificado, contrarian setup o capitulación', color: '#f59e0b' },
+  DESACOPLADO: { icon: '📐', label: 'DESACOPLADOS', desc: 'Correlación BTC < 30% — diversificación real, catalizador propio', color: '#67e8f9' },
+  ALTA_SENAL:  { icon: '⚡', label: 'ALTA SEÑAL',   desc: 'Score ≥70 — el motor detecta oportunidad de alta calidad ahora mismo', color: '#86efac' },
+};
+
+function _mktFmtPrice(p) {
+  if (!p || p === 0) return '—';
+  if (p >= 1000) return p.toLocaleString('en', {maximumFractionDigits: 2});
+  if (p >= 1)    return p.toFixed(4);
+  return p.toFixed(6);
+}
+
+function _mktFmtVol(v) {
+  if (!v) return '';
+  if (v >= 1e9) return `$${(v/1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `$${(v/1e6).toFixed(0)}M`;
+  return `$${(v/1e3).toFixed(0)}K`;
+}
+
+function _mktBuildCard(item) {
+  const chg    = item.change_pct;
+  const chgCls = chg > 0.5 ? 'up' : chg < -0.5 ? 'down' : 'flat';
+  const chgStr = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+  const score  = item.score || 0;
+
+  const tagHtml = (() => {
+    const parts = [];
+    // Narratives (max 2)
+    (item.narratives || []).slice(0, 2).forEach(n => {
+      parts.push(`<span class="mkt-tag mkt-tag-nar">${n}</span>`);
+    });
+    // Special tags
+    (item.tags || []).forEach(t => {
+      if (t === 'SEÑAL')   parts.push(`<span class="mkt-tag mkt-tag-senal">SEÑAL</span>`);
+      if (t === 'VOLÁTIL') parts.push(`<span class="mkt-tag mkt-tag-vol">VOLÁTIL</span>`);
+      if (t === 'ACUM')    parts.push(`<span class="mkt-tag mkt-tag-acum">ACUM</span>`);
+      if (t === 'HIGH')    parts.push(`<span class="mkt-tag mkt-tag-hi">HIGH</span>`);
+      if (t === 'LOW')     parts.push(`<span class="mkt-tag mkt-tag-lo">LOW</span>`);
+    });
+    return parts.join('');
+  })();
+
+  // Trend/absorption indicator
+  const trendIcon = item.trend_dir === 'ALCISTA' ? '▲' : item.trend_dir === 'BAJISTA' ? '▼' : '';
+  const trendCls  = item.trend_dir === 'ALCISTA' ? 'up' : item.trend_dir === 'BAJISTA' ? 'down' : 'flat';
+  const abIcon    = item.ab_side === 'BUY' ? '⊕' : item.ab_side === 'SELL' ? '⊖' : '';
+  const abCls     = item.ab_side === 'BUY' ? 'up' : item.ab_side === 'SELL' ? 'down' : 'flat';
+
+  // Funding rate display
+  const fundingStr = (() => {
+    const f = item.funding_rate;
+    if (!f || f === 0) return '';
+    const pct = (f * 100).toFixed(4);
+    return `<span class="mkt-card-funding ${f > 0 ? 'pos' : 'neg'}">f:${f > 0 ? '+' : ''}${pct}%</span>`;
+  })();
+
+  // BTC correlation
+  const corrStr = (() => {
+    const c = item.btc_corr;
+    if (c == null) return '';
+    return `<span class="mkt-card-corr">β${c >= 0 ? '+' : ''}${c.toFixed(2)}</span>`;
+  })();
+
+  const sectorHtml = item.sector
+    ? `<span class="mkt-card-sector">${item.sector}</span>` : '';
+  const nameHtml = item.name
+    ? `<div class="mkt-card-name">${item.name}</div>` : '';
+  const scoreHtml = score > 0
+    ? `<span class="mkt-card-score ${score>=70?'hi':''}">⬥${score}</span>` : '';
+
+  const card = document.createElement('div');
+  card.className = 'mkt-card';
+  card.dataset.state = item.state;
+  card.dataset.sym   = item.symbol;
+  card.innerHTML = `
+    <div class="mkt-card-top">
+      <span class="mkt-card-sym">${item.label}</span>
+      ${sectorHtml}
+    </div>
+    ${nameHtml}
+    <div class="mkt-card-price-row">
+      <span class="mkt-card-price">${_mktFmtPrice(item.price)}</span>
+      <span class="mkt-card-chg ${chgCls}">${chgStr}</span>
+    </div>
+    <div class="mkt-card-signals">
+      ${trendIcon ? `<span class="mkt-card-trend ${trendCls}">${trendIcon}</span>` : ''}
+      ${abIcon    ? `<span class="mkt-card-ab ${abCls}">${abIcon}</span>` : ''}
+      ${fundingStr}
+      ${corrStr}
+    </div>
+    <div class="mkt-card-bottom">
+      <div class="mkt-card-tags">${tagHtml}</div>
+      ${scoreHtml}
+    </div>`;
+  // Click: abrir en modo MAIN con el símbolo prellenado
+  card.addEventListener('click', () => {
+    _openMainMode(item.label);
+  });
+  return card;
+}
+
+function _mktGroupByConstelacion(data) {
+  const map = {};
+  // Order defined by MKT_CONST_META keys
+  const ORDER = ['ALTA_SENAL','BREAKOUT','IMPULSO','ACUMULACION','COLAPSO','DISTRIBUCION','VOLATILE','DURMIENTE','FUNDING','DESACOPLADO'];
+  ORDER.forEach(k => { map[k] = []; });
+  data.forEach(item => {
+    (item.constellations || []).forEach(c => {
+      if (!map[c]) map[c] = [];
+      map[c].push(item);
+    });
+  });
+  return ORDER
+    .filter(k => map[k] && map[k].length > 0)
+    .map(k => {
+      const meta = MKT_CONST_META[k] || { icon: '●', label: k, desc: '', color: '' };
+      return {
+        label:   `${meta.icon} ${meta.label}`,
+        desc:    meta.desc,
+        color:   meta.color,
+        constId: k,
+        items:   map[k].sort((a,b) => b.score - a.score),
+      };
+    });
+}
+
+function _mktGroupByEstado(data) {
+  const groups = {};
+  MKT_STATE_ORDER.forEach(s => { groups[s] = []; });
+  data.forEach(item => { (groups[item.state] || (groups['ESTABLE'])).push(item); });
+  return MKT_STATE_ORDER
+    .filter(s => groups[s].length > 0)
+    .map(s => ({ label: MKT_STATE_LABEL[s], items: groups[s] }));
+}
+
+function _mktGroupBySector(data) {
+  const map = {};
+  data.forEach(item => {
+    const k = item.sector || 'Sin sector';
+    if (!map[k]) map[k] = [];
+    map[k].push(item);
+  });
+  return Object.entries(map)
+    .sort((a, b) => b[1].length - a[1].length)
+    .map(([label, items]) => ({ label, items }));
+}
+
+function _mktGroupByNarrativa(data) {
+  const map = {};
+  data.forEach(item => {
+    const narrs = item.narratives && item.narratives.length ? item.narratives : ['Sin narrativa'];
+    narrs.forEach(n => {
+      if (!map[n]) map[n] = [];
+      if (!map[n].find(x => x.symbol === item.symbol)) map[n].push(item);
+    });
+  });
+  return Object.entries(map)
+    .sort((a, b) => b[1].length - a[1].length)
+    .map(([label, items]) => ({ label, items }));
+}
+
+function _mktGroupBySenal(data) {
+  const high = data.filter(i => i.score >= 70).sort((a,b) => b.score - a.score);
+  const mid  = data.filter(i => i.score >= 40 && i.score < 70).sort((a,b) => b.score - a.score);
+  const low  = data.filter(i => i.score <  40).sort((a,b) => b.score - a.score);
+  return [
+    { label: '⚡ ALTA OPORTUNIDAD  ≥70', items: high },
+    { label: '◈ MOMENTUM  40–69',        items: mid  },
+    { label: '○ BAJO SCORE  <40',         items: low  },
+  ].filter(g => g.items.length > 0);
+}
+
+function renderMarket() {
+  const body    = document.getElementById('mkt-body');
+  const loading = document.getElementById('mkt-loading');
+  if (!body) return;
+  if (!_mktData) {
+    if (loading) { loading.style.display = ''; loading.textContent = 'Cargando mercado…'; }
+    body.innerHTML = '';
+    return;
+  }
+  if (loading) loading.style.display = 'none';
+
+  let groups;
+  switch (_mktGroupBy) {
+    case 'constelacion': groups = _mktGroupByConstelacion(_mktData); break;
+    case 'sector':       groups = _mktGroupBySector(_mktData);       break;
+    case 'narrativa':    groups = _mktGroupByNarrativa(_mktData);    break;
+    case 'senal':        groups = _mktGroupBySenal(_mktData);        break;
+    default:             groups = _mktGroupByEstado(_mktData);
+  }
+
+  body.innerHTML = '';
+  groups.forEach(group => {
+    const section = document.createElement('div');
+    section.className = 'mkt-group';
+    const hdr = document.createElement('div');
+    hdr.className = 'mkt-group-hdr';
+    const colorStyle = group.color ? `style="color:${group.color}"` : '';
+    hdr.innerHTML = `
+      <span class="mkt-group-label" ${colorStyle}>${group.label}</span>
+      <span class="mkt-group-count">${group.items.length}</span>
+      <div class="mkt-group-line"></div>`;
+    if (group.desc) {
+      const descEl = document.createElement('div');
+      descEl.className = 'mkt-group-desc';
+      descEl.textContent = group.desc;
+      section.appendChild(hdr);
+      section.appendChild(descEl);
+    } else {
+      section.appendChild(hdr);
+    }
+    const cards = document.createElement('div');
+    cards.className = 'mkt-cards';
+    group.items.forEach(item => cards.appendChild(_mktBuildCard(item)));
+    section.appendChild(cards);
+    body.appendChild(section);
+  });
+
+  if (groups.length === 0) {
+    body.innerHTML = '<div class="mkt-empty">Sin datos de mercado</div>';
+  }
+}
+
+async function loadMarket(force = false) {
+  if (!force && _mktData && (Date.now() - _mktLastFetch < MKT_TTL)) {
+    renderMarket();
+    return;
+  }
+  const loading = document.getElementById('mkt-loading');
+  if (loading) { loading.style.display = ''; loading.textContent = 'Actualizando…'; }
+  try {
+    const r = await fetch('/api/market');
+    const j = await r.json();
+    if (j.market && j.market.length > 0) {
+      _mktData      = j.market;
+      _mktLastFetch = Date.now();
+      // Seed live marks so _getMark() works para cualquier par del Mercado
+      j.market.forEach(item => { if (item.price > 0) _liveMarks[item.symbol] = item.price; });
+    }
+  } catch (e) {
+    console.warn('loadMarket:', e);
+  }
+  renderMarket();
+}
+
+document.getElementById('mkt-group-tabs')?.addEventListener('click', e => {
+  const btn = e.target.closest('[data-group]');
+  if (!btn) return;
+  _mktGroupBy = btn.dataset.group;
+  localStorage.setItem('qts_mkt_group', _mktGroupBy);
+  document.querySelectorAll('.mkt-group-btn').forEach(b => b.classList.toggle('active', b.dataset.group === _mktGroupBy));
+  renderMarket();
+});
+
+document.getElementById('mkt-refresh')?.addEventListener('click', () => loadMarket(true));
+
+// Restore last group selection
+(() => {
+  document.querySelectorAll('.mkt-group-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.group === _mktGroupBy);
+  });
+})();
+
 // ── Tab router ────────────────────────────────────────────────────────────────
 
 let _activeTab = localStorage.getItem('qts_tab') || 'dashboard';
@@ -1716,6 +2004,7 @@ function switchTab(name) {
   document.querySelectorAll(`[data-tab="${name}"]`).forEach(b => b.classList.add('active'));
 
   if (name === 'historial' && !_historyLoaded) loadHistory();
+  if (name === 'mercado') loadMarket();
 }
 
 document.querySelectorAll('[data-tab]').forEach(btn => {
@@ -1842,6 +2131,8 @@ connect();
 // State
 let _tpOpen      = false;
 let _tpMode      = 'manual';      // 'manual' | 'analysis' | 'main'
+let _gvpCapital  = 0;             // available balance from snapshot
+let _gvpLeverage = parseInt(localStorage.getItem('qts_gvp_lev') || '10', 10);
 let _tmDir       = 'Buy';
 let _tmType      = 'Market';
 let _taDir       = 'Buy';
@@ -1872,6 +2163,80 @@ document.getElementById('trade-overlay')?.addEventListener('click', closeTradePa
 document.getElementById('trade-panel-close')?.addEventListener('click', closeTradePanel);
 document.getElementById('btn-open-trade')?.addEventListener('click', openTradePanel);
 document.getElementById('btn-open-trade-fab')?.addEventListener('click', openTradePanel);
+
+function _openMainMode(symbolLabel) {
+  _tpMode = 'main';
+  document.querySelectorAll('.trade-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'main'));
+  document.getElementById('trade-manual').style.display   = 'none';
+  document.getElementById('trade-analysis').style.display = 'none';
+  const mainEl = document.getElementById('trade-main');
+  if (mainEl) mainEl.style.display = 'flex';
+  const inp = document.getElementById('tmain-symbol');
+  if (inp && symbolLabel) {
+    inp.value = symbolLabel;
+    inp.dispatchEvent(new Event('input'));
+  }
+  const overlay = document.getElementById('trade-overlay');
+  const panel   = document.getElementById('trade-panel');
+  if (overlay) overlay.classList.add('open');
+  if (panel)   panel.classList.add('open');
+  _mainRefreshAnalysis();
+}
+
+// ── GVP Capital slider + leverage ─────────────────────────────────────────────
+
+function _gvpUpdateCapital(snap) {
+  const avail = snap?.account?.available || 0;
+  if (avail > 0) _gvpCapital = avail;
+  const capEl = document.getElementById('gvp-cap-avail');
+  if (capEl) capEl.textContent = _gvpCapital > 0 ? `$${_gvpCapital.toFixed(2)}` : '—';
+  const slider = document.getElementById('gvp-cap-slider');
+  if (slider && _gvpCapital > 0) {
+    const maxVal = Math.max(100, Math.ceil(_gvpCapital / 10) * 10);
+    slider.max = maxVal;
+  }
+}
+
+function _gvpApplyLeverage(lev) {
+  _gvpLeverage = lev;
+  localStorage.setItem('qts_gvp_lev', String(lev));
+  document.querySelectorAll('.gvp-lev-btn').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.lev) === lev));
+}
+
+function _gvpApplyPct(pct) {
+  if (_gvpCapital <= 0) return;
+  const amount = Math.max(5, Math.round(_gvpCapital * pct / 100));
+  const slider = document.getElementById('gvp-cap-slider');
+  const sizeIn = document.getElementById('gvp-size');
+  const dispEl = document.getElementById('gvp-cap-display');
+  if (slider) slider.value = amount;
+  if (sizeIn) sizeIn.value = amount;
+  if (dispEl) dispEl.textContent = `$${amount}`;
+  document.querySelectorAll('.gvp-pct-btn').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.pct) === pct));
+}
+
+// Slider input → sync size input and display
+document.getElementById('gvp-cap-slider')?.addEventListener('input', function() {
+  const v = parseInt(this.value);
+  const sizeIn = document.getElementById('gvp-size');
+  const dispEl = document.getElementById('gvp-cap-display');
+  if (sizeIn) sizeIn.value = v;
+  if (dispEl) dispEl.textContent = `$${v}`;
+  document.querySelectorAll('.gvp-pct-btn').forEach(b => b.classList.remove('active'));
+});
+
+// % buttons
+document.getElementById('gvp-panel')?.addEventListener('click', e => {
+  const pctBtn = e.target.closest('.gvp-pct-btn');
+  if (pctBtn) { _gvpApplyPct(parseInt(pctBtn.dataset.pct)); return; }
+  const levBtn = e.target.closest('.gvp-lev-btn');
+  if (levBtn) { _gvpApplyLeverage(parseInt(levBtn.dataset.lev)); return; }
+});
+
+// Restore saved leverage on load
+_gvpApplyLeverage(_gvpLeverage);
 
 // ── Mode toggle ───────────────────────────────────────────────────────────────
 
@@ -1921,7 +2286,15 @@ function _symFull(label) {
 }
 
 function _getMark(label) {
-  return _liveMarks[_symFull(label)] || 0;
+  const price = _liveMarks[_symFull(label)] || 0;
+  if (price > 0) return price;
+  // Fallback: datos del último fetch de /api/market
+  if (_mktData) {
+    const sym  = _symFull(label);
+    const item = _mktData.find(m => m.symbol === sym);
+    if (item && item.price > 0) return item.price;
+  }
+  return 0;
 }
 
 function _updateMarkLabelManual() {
@@ -2262,6 +2635,7 @@ document.getElementById('ta-btn-save')?.addEventListener('click', async () => {
 setInterval(() => {
   if (!_tpOpen || !lastSnap) return;
   _updateMarkFromSnap(lastSnap);
+  _gvpUpdateCapital(lastSnap);
   if (_tpMode === 'analysis') _updateAnalysisPreview();
   if (_tpMode === 'main')     _updateMarkLabelMain();
 }, 1000);
@@ -2377,6 +2751,75 @@ async function _mainRefreshAnalysis() {
     }
   } catch (_) { /* swallow */ }
   finally { _mainAnalysisBusy = false; }
+  _mainRefreshNarrative();
+}
+
+// ── Tejido narrativo: qué representa el par (sector, ecosistema, peers) ─────
+let _mainNarrativeBusy = false;
+const _mainNarrativeCache = new Map(); // sym → {ts, data}
+
+async function _mainRefreshNarrative() {
+  const symLabel = document.getElementById('tmain-symbol')?.value || '';
+  const full = _symFull(symLabel);
+  const box  = document.getElementById('tmain-narrative');
+  if (!box) return;
+  if (!full) { box.hidden = true; return; }
+  const cached = _mainNarrativeCache.get(full);
+  if (cached && (Date.now() - cached.ts) < 60_000) {
+    _renderNarrative(cached.data);
+    return;
+  }
+  if (_mainNarrativeBusy) return;
+  _mainNarrativeBusy = true;
+  try {
+    const r = await fetch(`/api/narrative/${encodeURIComponent(full)}`);
+    if (!r.ok) { box.hidden = true; return; }
+    const j = await r.json();
+    _mainNarrativeCache.set(full, { ts: Date.now(), data: j });
+    _renderNarrative(j);
+  } catch (_) { /* swallow */ }
+  finally { _mainNarrativeBusy = false; }
+}
+
+function _renderNarrative(j) {
+  const box = document.getElementById('tmain-narrative');
+  if (!box || !j) return;
+  box.hidden = false;
+  box.querySelector('.tmain-nar-name').textContent   = j.name || (j.symbol || '').replace(/USDT$/, '');
+  box.querySelector('.tmain-nar-sector').textContent = j.sector || 'Other';
+  const rankEl = box.querySelector('.tmain-nar-rank');
+  rankEl.textContent = j.market_cap_rank ? `#${j.market_cap_rank}` : '';
+  box.querySelector('.tmain-nar-desc').textContent = j.description_short || '—';
+
+  const tags = j.narratives || [];
+  const tagsEl = document.getElementById('tmain-nar-tags');
+  tagsEl.innerHTML = tags.length
+    ? tags.map(t => `<span class="tmain-nar-chip">${esc(t)}</span>`).join('')
+    : '<span class="c-dim">—</span>';
+
+  document.getElementById('tmain-nar-eco').textContent = j.ecosystem || 'Native';
+
+  const peers = (j.sector_peers || []).slice(0, 8).map(s => s.replace(/USDT$/, ''));
+  const peersEl = document.getElementById('tmain-nar-peers');
+  peersEl.innerHTML = peers.length
+    ? peers.map(p => `<span class="tmain-nar-peer">${esc(p)}</span>`).join('')
+    : '<span class="c-dim">—</span>';
+
+  const corr = j.correlations || [];
+  const corrEl = document.getElementById('tmain-nar-corr');
+  if (!corr.length) {
+    corrEl.innerHTML = '<span class="c-dim">aún sin datos (job cada hora)</span>';
+  } else {
+    corrEl.innerHTML = corr.map(c => {
+      const cls = c.corr >=  0.6 ? 'c-green'
+                : c.corr >=  0.3 ? 'c-yellow'
+                : c.corr <= -0.3 ? 'c-red'
+                                 : 'c-dim';
+      const sym = (c.symbol || '').replace(/USDT$/, '');
+      const beta = (c.beta != null) ? ` β${c.beta.toFixed(2)}` : '';
+      return `<span class="tmain-nar-corr-item"><span>${esc(sym)}</span><span class="${cls}">${c.corr.toFixed(2)}${beta}</span></span>`;
+    }).join('');
+  }
 }
 
 document.getElementById('tmain-slpct')?.addEventListener('input', () => { /* live geom regen at open time */ });
@@ -2462,11 +2905,20 @@ document.getElementById('tmain-btn-suggest')?.addEventListener('click', async ()
   }
 });
 
-document.getElementById('tmain-btn-open')?.addEventListener('click', () => {
+document.getElementById('tmain-btn-open')?.addEventListener('click', async () => {
+  const symLabel = document.getElementById('tmain-symbol')?.value?.trim() || '';
+  // Si no hay precio en cache, intentar un fetch rápido antes de fallar
+  if (symLabel && !_getMark(symLabel)) {
+    try {
+      const r = await fetch(`/api/analyze/${encodeURIComponent(symLabel)}`);
+      const j = await r.json();
+      if (j.mark > 0) _liveMarks[_symFull(symLabel)] = j.mark;
+    } catch { /* silencioso */ }
+  }
   const pos = _mainBuildSyntheticPos();
   if (!pos) {
     const sg = document.getElementById('tmain-suggest');
-    if (sg) { sg.textContent = 'Selecciona un par con precio disponible'; sg.className = 'tmain-suggest tmain-suggest-weak'; }
+    if (sg) { sg.textContent = 'Par no disponible — verifica que esté en la lista de símbolos monitoreados'; sg.className = 'tmain-suggest tmain-suggest-weak'; }
     return;
   }
   const posKey = `${pos.full_sym}_${pos.side}`;
@@ -3331,7 +3783,7 @@ async function _gvpQuickTrade(side) {
     const r = await fetch('/api/quick-trade', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: sym, side, size_usdt: sz, sl_pct: sl, tp_pct: tp }),
+      body: JSON.stringify({ symbol: sym, side, size_usdt: sz, sl_pct: sl, tp_pct: tp, leverage: _gvpLeverage }),
     });
     const j = await r.json();
     if (j.success) {

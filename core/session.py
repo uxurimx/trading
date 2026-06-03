@@ -64,6 +64,7 @@ class SessionManager:
                  self.target_pnl, self.max_drawdown, self.api_limit, self.duration_h)
 
         self._persist()
+        self._pg_open()
 
     @classmethod
     def from_snapshot(cls, data: dict) -> "SessionManager":
@@ -150,11 +151,38 @@ class SessionManager:
         """Finaliza formalmente la sesión."""
         if self.status == SessionStatus.CLOSED:
             return
-            
+
         self.status = SessionStatus.CLOSED
         self.end_ts = int(time.time())
         log.info("[TSAA] Sesión %s cerrada. PnL Final: $%.2f", self.id, self.closed_pnl)
         self._persist()
+        self._pg_close()
+
+    def _pg_open(self) -> None:
+        try:
+            from core.trading_db import session_open
+            from core.config import settings as _s
+            agent = "CLAUDE" if getattr(_s, "ai_provider", "openai") == "claude" else "GPT"
+            mode  = "PAPER" if getattr(_s, "paper_trading", True) else "LIVE"
+            pg_id = session_open(
+                name=self.name,
+                initial_balance=self.initial_balance,
+                target_balance=self.initial_balance + self.target_pnl,
+                mode=mode, agent=agent,
+            )
+            settings._active_trading_session_id = pg_id
+        except Exception as e:
+            log.warning("[TSAA] trading_db session_open error: %s", e)
+
+    def _pg_close(self) -> None:
+        try:
+            from core.trading_db import session_close
+            from core.config import settings as _s
+            pg_id = getattr(_s, "_active_trading_session_id", None)
+            if pg_id:
+                session_close(pg_id, self.current_balance)
+        except Exception as e:
+            log.warning("[TSAA] trading_db session_close error: %s", e)
 
     def _persist(self) -> None:
         """Guarda el estado actual en la base de datos."""

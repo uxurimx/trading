@@ -263,6 +263,9 @@ class AIStrategyAgent:
 
     def is_ready(self) -> bool:
         provider = getattr(settings, "ai_provider", "openai")
+        if provider == "claude":
+            import shutil
+            return shutil.which("claude") is not None
         if provider == "openai":
             return bool(getattr(settings, "openai_api_key", ""))
         if provider == "ollama":
@@ -272,8 +275,9 @@ class AIStrategyAgent:
         return False
 
     def provider_label(self) -> str:
-        """Nombre legible del proveedor activo."""
         provider = getattr(settings, "ai_provider", "openai")
+        if provider == "claude":
+            return "Claude(claude-sonnet-4-6)"
         if provider == "ollama":
             model = getattr(settings, "ollama_model", "?")
             return f"Ollama({model})"
@@ -326,11 +330,12 @@ class AIStrategyAgent:
         leverage:      int,
     ) -> Optional[Tuple[str, "OrderRequest", dict]]:
         import asyncio
-        try:
-            import openai as _openai
-        except ImportError:
-            log.error("openai no instalado — ejecutar: pip install openai")
-            return None
+        if getattr(settings, "ai_provider", "openai") != "claude":
+            try:
+                import openai as _openai  # noqa: F401
+            except ImportError:
+                log.error("openai no instalado — ejecutar: pip install openai")
+                return None
 
         if not self.is_ready():
             log.warning("AI Strategy: proveedor '%s' no configurado",
@@ -405,15 +410,6 @@ class AIStrategyAgent:
                 "leverage": leverage
             })
 
-            try:
-                client, model, use_json_fmt = self._make_client_and_model()
-            except Exception as e:
-                log.error("AI Strategy: error al crear cliente: %s", e)
-                strategy_logger.error("CLIENT_ERROR", f"Error al crear cliente IA: {e}")
-                return None
-
-            # Para Ollama: añadir instrucción JSON al final del prompt de usuario
-            json_reminder = "" if use_json_fmt else "\nIMPORTANTE: responde ÚNICAMENTE con el JSON, sin ningún texto adicional. No uses etiquetas <think>."
             user_prompt = (
                 f"{account_snapshot}\n\n"
                 f"{market_snapshot}\n\n"
@@ -427,14 +423,30 @@ class AIStrategyAgent:
                 "Para SL/TP: usa niveles S/R si están disponibles; si no, usa RefSL y RefTP del candidato.\n"
                 f"Si RefTP no da R:R requerido, busca el nivel S/R más lejano que sí lo dé.\n"
                 "Un score ≥ 60 con dirección coherente y CVD ≥ 4/5 ES suficiente.\n"
-                f"Responde SOLO con el JSON.{json_reminder}"
+                "Responde SOLO con el JSON."
             )
 
             log.info(
-                "AI Strategy: consultando %s (%s) — %d candidatos de %d símbolos",
-                self.provider_label(), model, n_candidates, len(symbols),
+                "AI Strategy: consultando %s — %d candidatos de %d símbolos",
+                self.provider_label(), n_candidates, len(symbols),
             )
             t0 = time.monotonic()
+
+            # ── Claude CLI provider ───────────────────────────────────────────
+            if getattr(settings, "ai_provider", "openai") == "claude":
+                return await self._call_claude_cli(
+                    user_prompt, t0, symbols, opps, techs, executor, leverage,
+                )
+
+            try:
+                client, model, use_json_fmt = self._make_client_and_model()
+            except Exception as e:
+                log.error("AI Strategy: error al crear cliente: %s", e)
+                strategy_logger.error("CLIENT_ERROR", f"Error al crear cliente IA: {e}")
+                return None
+
+            json_reminder = "" if use_json_fmt else "\nIMPORTANTE: responde ÚNICAMENTE con el JSON, sin ningún texto adicional."
+            user_prompt = user_prompt + json_reminder
 
         create_kwargs: dict = dict(
             model    = model,
@@ -692,6 +704,169 @@ class AIStrategyAgent:
             })
 
             return symbol, req, token_info
+
+    # ── Claude CLI ────────────────────────────────────────────────────────────
+
+    async def _call_claude_cli(
+        self,
+        user_prompt: str,
+        t0: float,
+        symbols: list,
+        opps: dict,
+        techs: dict,
+        executor,
+        leverage: int,
+    ):
+        import asyncio
+        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(min_rr=settings.min_rr)
+        full_prompt   = f"{system_prompt}\n\n{user_prompt}"
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "--print", "--output-format", "text",
+                "--model", "claude-sonnet-4-6",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(full_prompt.encode()),
+                timeout=90.0,
+            )
+            raw     = stdout.decode().strip()
+            elapsed = time.monotonic() - t0
+
+            strategy_logger.info("RAW_RESPONSE", "Respuesta recibida de Claude CLI", {
+                "elapsed_s": round(elapsed, 2),
+                "raw_content": raw[:500],
+            })
+
+            if elapsed > settings.ai_max_latency_s:
+                log.warning("AI Strategy: descartando por latencia alta (%.1fs)", elapsed)
+                return None, None, {}
+
+        except asyncio.TimeoutError:
+            log.error("AI Strategy: timeout (90s) con Claude CLI")
+            strategy_logger.error("TIMEOUT", "Timeout 90s con Claude CLI")
+            return None, None, {}
+        except Exception as e:
+            log.error("AI Strategy: error Claude CLI: %s", e)
+            strategy_logger.error("LLM_ERROR", f"Error Claude CLI: {e}")
+            return None, None, {}
+
+        # Parsear JSON — mismo extractor robusto
+        try:
+            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+            json_match = re.search(r'\{.*\}', raw, flags=re.DOTALL)
+            data = json.loads(json_match.group(0) if json_match else raw)
+        except json.JSONDecodeError as e:
+            log.error("AI Strategy (Claude): JSON inválido: %s\n%s", e, raw[:300])
+            strategy_logger.error("PARSE_ERROR", f"JSON inválido de Claude: {e}", {"raw": raw[:300]})
+            return None, None, {}
+
+        token_info = {"model": "claude-sonnet-4-6"}
+        action    = data.get("action", "NO_TRADE")
+        reasoning = data.get("reasoning", "Sin razonamiento.")
+
+        # Guardar decisión en PostgreSQL (SKIP también se guarda)
+        try:
+            from core.trading_db import decision_save
+            _active_sid = getattr(settings, "_active_trading_session_id", None)
+            if _active_sid:
+                decision_save(
+                    session_id=_active_sid,
+                    symbol=data.get("symbol", symbols[0] if symbols else ""),
+                    decision_type="ENTER" if action == "TRADE" else "SKIP",
+                    action=action,
+                    reasoning=reasoning,
+                    confidence=int(data.get("confidence", 0) or 0),
+                    signals_json={"raw": data},
+                    executed=action == "TRADE",
+                    latency_ms=int(elapsed * 1000),
+                )
+        except Exception as db_err:
+            log.warning("trading_db: no se pudo guardar decisión: %s", db_err)
+
+        if action != "TRADE":
+            log.info("AI Strategy (Claude): NO_TRADE — %s", reasoning[:200])
+            strategy_logger.info("NO_TRADE", "Claude decidió no operar", {"reasoning": reasoning})
+            self.last_scan_reason = f"NO_TRADE: {reasoning[:150]}"
+            return None, None, token_info
+
+        # Extraer campos — mismo flujo que OpenAI
+        symbol = str(data.get("symbol", "")).strip().upper()
+        side   = str(data.get("side",   "")).strip()
+        try:
+            entry = float(data.get("entry", 0) or 0)
+            sl    = float(data.get("sl",    0) or 0)
+            tp    = float(data.get("tp",    0) or 0)
+            conf  = int(data.get("confidence", 70) or 70)
+        except (TypeError, ValueError) as e:
+            log.error("AI Strategy (Claude): valores numéricos inválidos: %s", e)
+            return None, None, {}
+
+        if not symbol or side not in ("Buy", "Sell") or entry <= 0 or sl <= 0 or tp <= 0:
+            log.error("AI Strategy (Claude): campos obligatorios faltantes: %s", data)
+            return None, None, {}
+
+        if not symbol.endswith("USDT"):
+            symbol = symbol + "USDT"
+        if symbol not in symbols:
+            log.error("AI Strategy (Claude): símbolo '%s' no monitoreado", symbol)
+            return None, None, {}
+
+        # Mismas validaciones de dirección y geometría que OpenAI
+        opp = opps.get(symbol)
+        if opp and opp.trend_score >= 60:
+            if opp.trend_direction == "ALCISTA" and side == "Sell":
+                log.warning("AI Strategy (Claude): SHORT contra tendencia ALCISTA — rechazando")
+                return None, None, token_info
+            if opp.trend_direction == "BAJISTA" and side == "Buy":
+                log.warning("AI Strategy (Claude): LONG contra tendencia BAJISTA — rechazando")
+                return None, None, token_info
+
+        if side == "Buy"  and not (sl < entry < tp):
+            log.error("AI Strategy (Claude): geometría LONG inválida sl=%.6f entry=%.6f tp=%.6f", sl, entry, tp)
+            return None, None, {}
+        if side == "Sell" and not (tp < entry < sl):
+            log.error("AI Strategy (Claude): geometría SHORT inválida tp=%.6f entry=%.6f sl=%.6f", tp, entry, sl)
+            return None, None, {}
+
+        # Calcular qty y OrderRequest reutilizando la misma lógica
+        from core.order_model import OrderRequest
+        tech      = techs.get(symbol)
+        ms        = None
+        balance   = executor.paper_balance if getattr(settings, "paper_trading", False) else 0
+        risk_pct  = getattr(settings, "max_daily_loss_pct", 1.5) / getattr(settings, "max_trades_per_day", 50)
+        risk_usd  = balance * min(risk_pct / 100, 0.02)
+        sl_dist   = abs(entry - sl)
+        qty       = round(risk_usd / sl_dist, 2) if sl_dist > 0 else 1.0
+        qty       = max(qty, 1.0)
+
+        sl_pct    = sl_dist / entry * 100
+        tp_dist   = abs(tp - entry)
+        rr        = tp_dist / sl_dist if sl_dist > 0 else 0
+        fees_rt   = entry * TAKER_FEE_RATE * 2
+        net_rr    = (tp_dist - fees_rt) / (sl_dist + fees_rt) if (sl_dist + fees_rt) > 0 else 0
+
+        if net_rr < settings.min_rr:
+            log.warning("AI Strategy (Claude): R:R neto %.2f < mínimo %.2f", net_rr, settings.min_rr)
+            return None, None, token_info
+
+        req = OrderRequest(
+            symbol=symbol, side=side, entry_price=entry,
+            sl_price=sl, tp_price=tp, qty=qty,
+            leverage=leverage, reasoning=reasoning,
+            confidence=conf, strategy_tag="claude_agent",
+        )
+
+        strategy_logger.info("PROPOSAL_READY", f"Claude propone {symbol}", {
+            "symbol": symbol, "side": side, "entry": entry,
+            "sl": sl, "tp": tp, "rr": round(rr, 2), "qty": qty,
+            "confidence": conf, "reasoning": reasoning,
+        })
+
+        return symbol, req, token_info
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
