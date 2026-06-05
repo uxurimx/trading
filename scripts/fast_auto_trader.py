@@ -54,6 +54,7 @@ BE_TRIGGER   = 0.8    # move SL to BE when PnL reaches 80% of SL risk
 MIN_RVOL     = 0.5    # minimum relative volume to enter
 TRAIL_TIGHT  = 0.002  # 0.2% trail when signal flips or explosion
 TRAIL_LOOSE  = 0.005  # 0.5% trail when signal in favor, normal momentum
+MIN_DIVERGE  = 0.15   # min % divergence vs BTC to confirm edge (beta-adjusted)
 
 WS_PUBLIC  = "wss://stream.bybit.com/v5/public/linear"
 WS_PRIVATE = "wss://stream.bybit.com/v5/private"
@@ -63,6 +64,7 @@ active_positions: dict[str, dict] = {}   # keyed by symbol
 position_lock    = asyncio.Lock()
 last_trade_time: dict[str, float] = {}
 last_signal_time: dict[str, float] = {}
+btc_closes_1m: deque = deque(maxlen=10)  # BTC reference for beta-adjusted signals
 
 # ─── REST HELPERS ──────────────────────────────────────────────────────────
 def rest_get(endpoint: str, params: dict = {}) -> dict:
@@ -212,15 +214,32 @@ class PairState:
         stk_ok  = (stk >= MIN_STREAK) if bias == "LONG"  else (stk <= -MIN_STREAK)
         rvol_ok = rvol >= MIN_RVOL
 
-        if m3_ok and stk_ok and rvol_ok:
-            return {
-                "bias": bias, "price": price,
-                "m3": round(m3, 3), "streak": stk,
-                "rvol": round(rvol, 2),
-                "e9_1": round(e9_1, 6), "e21_1": round(e21_1, 6),
-                "e9_3": round(e9_3, 6), "e21_3": round(e21_3, 6),
-            }
-        return None
+        if not (m3_ok and stk_ok and rvol_ok):
+            return None
+
+        # ── Beta-adjusted divergence vs BTC ─────────────────────────────
+        btc_cl = list(btc_closes_1m)
+        if len(btc_cl) >= 2 and self.symbol != "BTCUSDT":
+            btc_return  = (btc_cl[-1] - btc_cl[-2]) / btc_cl[-2] * 100
+            sym_return  = (cl1[-1]    - cl1[-2])    / cl1[-2]    * 100
+            divergence  = sym_return - btc_return   # +: sym stronger than BTC
+            div_ok = (divergence >= MIN_DIVERGE)  if bias == "LONG" \
+                else (divergence <= -MIN_DIVERGE)
+        else:
+            divergence = 0.0
+            div_ok     = True   # no BTC data yet → don't block signal
+
+        if not div_ok:
+            return None
+
+        return {
+            "bias": bias, "price": price,
+            "m3": round(m3, 3), "streak": stk,
+            "rvol": round(rvol, 2),
+            "divergence": round(divergence, 3),
+            "e9_1": round(e9_1, 6), "e21_1": round(e21_1, 6),
+            "e9_3": round(e9_3, 6), "e21_3": round(e21_3, 6),
+        }
 
 
 # ─── STATE REGISTRY ────────────────────────────────────────────────────────
@@ -444,24 +463,39 @@ async def monitor_position(dry_run: bool):
 async def ws_handler(symbols: list[str], dry_run: bool):
     global active_positions
 
-    # Build subscription topics: kline.1 + kline.3 for all symbols
-    topics_1m = [f"kline.1.{s}"  for s in symbols]
-    topics_3m = [f"kline.3.{s}"  for s in symbols]
-    all_topics = topics_1m + topics_3m
+    # Always include BTC as reference (beta-adjusted divergence), never traded
+    ref_sym   = "BTCUSDT"
+    trade_syms = [s for s in symbols if s != ref_sym]
 
-    # Initialize state
-    for sym in symbols:
+    # Build subscription topics: kline.1 + kline.3 for tradeable symbols + BTC 1m ref
+    topics_1m  = [f"kline.1.{s}" for s in trade_syms]
+    topics_3m  = [f"kline.3.{s}" for s in trade_syms]
+    topics_btc = [f"kline.1.{ref_sym}"]
+    all_topics = topics_1m + topics_3m + topics_btc
+
+    # Initialize state for tradeable symbols only
+    for sym in trade_syms:
         pair_states[sym] = PairState(symbol=sym)
 
     print(f"\n{'='*60}")
     print(f"QTS Fast Auto-Trader {'[DRY RUN]' if dry_run else '[LIVE]'}")
-    print(f"Símbolos: {len(symbols)}  |  SL={SL_PCT*100:.1f}%  TP={TP_PCT*100:.1f}%  R:R 2:1")
-    print(f"Condiciones: 1m+3m alineados  stk≥{MIN_STREAK}  m3≥{MIN_M3_PCT}%")
+    print(f"Símbolos: {len(trade_syms)}  |  SL={SL_PCT*100:.1f}%  TP={TP_PCT*100:.1f}%  R:R 2:1")
+    print(f"Condiciones: 1m+3m alineados  stk≥{MIN_STREAK}  m3≥{MIN_M3_PCT}%  div≥{MIN_DIVERGE}%")
+    print(f"Referencia BTC: {ref_sym} (beta-adjusted divergence activo)")
     print(f"{'='*60}")
 
     # Pre-load historical candles via REST to warm up EMAs
     print("Cargando historial para warm-up EMA...")
-    for sym in symbols:
+    # Warm up BTC reference first
+    try:
+        d = rest_get("/v5/market/kline", {"category": "linear", "symbol": ref_sym, "interval": "1", "limit": "10"})
+        for c in reversed(d["result"]["list"]):
+            btc_closes_1m.append(float(c[4]))
+        print(f"  BTC ref warm-up: {len(btc_closes_1m)} candles")
+    except Exception as e:
+        print(f"  BTC warm-up err: {e}")
+
+    for sym in trade_syms:
         try:
             st = pair_states[sym]
             for tf, cl_attr, vl_attr in [("1", "closes_1m", "vols_1m"), ("3", "closes_3m", "vols_3m")]:
@@ -559,6 +593,13 @@ async def ws_handler(symbols: list[str], dry_run: bool):
                     tf  = parts[1]   # "1" or "3"
                     sym = parts[2]   # "XRPUSDT" etc
 
+                    # BTC reference update — update deque but don't trade
+                    if sym == "BTCUSDT":
+                        candle = msg["data"][0] if msg.get("data") else None
+                        if candle and candle.get("confirm", False):
+                            btc_closes_1m.append(float(candle["close"]))
+                        continue
+
                     if sym not in pair_states:
                         continue
 
@@ -616,7 +657,7 @@ async def ws_handler(symbols: list[str], dry_run: bool):
                         continue
 
                     last_signal_time[sym] = now
-                    print(f"[{time.strftime('%H:%M:%S')}] 📡 SEÑAL {sym} {sig['bias']}  m3={sig['m3']:+.3f}%  stk={sig['streak']:+d}  p=${sig['price']:.5f}")
+                    print(f"[{time.strftime('%H:%M:%S')}] 📡 SEÑAL {sym} {sig['bias']}  m3={sig['m3']:+.3f}%  stk={sig['streak']:+d}  div={sig.get('divergence', 0):+.3f}%  p=${sig['price']:.5f}")
 
                     async with position_lock:
                         if sym in active_positions:
