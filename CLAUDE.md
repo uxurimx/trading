@@ -4,131 +4,146 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**QTS — Quantum Trading System** is a cryptocurrency futures trading platform for Bybit perpetuals. It combines real-time market intelligence (absorption, regime, trend, liquidity signals), AI-powered strategy generation (LLM-based), and automated trade execution with strict risk management.
+**QTS — Quantum Trading System** is a cryptocurrency futures trading platform for Bybit perpetuals (hedge mode, Unified account). Two independent execution paths exist in parallel:
+
+1. **QTS GUI system** — full signal pipeline + GTK4/TUI interface + AI strategy agent
+2. **fast_auto_trader** — standalone WebSocket scalper (`scripts/fast_auto_trader.py`), no dependency on QTS core
 
 ## Setup & Running
 
 ```bash
-# Initial setup (creates venv, installs deps, copies .env.example)
-./setup.sh
-
-# Activate venv before any work
+./setup.sh                         # creates venv, installs deps, copies .env.example
 source .venv/bin/activate
 
-# GTK4 desktop GUI (requires GNOME/libadwaita)
-python main.py
+# QTS GUI system
+python main.py                     # GTK4 desktop (requires GNOME/libadwaita)
+python main_terminal.py            # Terminal TUI (works anywhere)
+python mcp_server.py               # MCP server — exposes trading tools to Claude
 
-# Terminal TUI (works anywhere)
-python main_terminal.py
+# Fast scalper (independent, runs in background)
+nohup python -u scripts/fast_auto_trader.py >> /tmp/fast_trader.log 2>&1 &
+tail -f /tmp/fast_trader.log
+python scripts/fast_auto_trader.py --dry-run          # no real orders
+python scripts/fast_auto_trader.py --symbols XRP,ADA  # override symbols
 
-# MCP server for Claude integration
-python mcp_server.py
+# GTK position monitor (reads live from Bybit REST, independent of trader)
+python interface/trade_monitor.py
 
-# Diagnostic: live account + market context analysis
-python -m tools.analyze_trade
-
-# Check observability pipeline
+# Diagnostics
+python -m tools.analyze_trade      # live account + market context
 python -m tools.verify_observability
 ```
 
-There are no automated tests. Use `BYBIT_TESTNET=true` or `PAPER_TRADING=true` in `.env` for safe development.
+No automated tests. Use `BYBIT_TESTNET=true` or `PAPER_TRADING=true` in `.env` for safe development.
 
-## Architecture
+## Two Independent Architectures
 
-### Data Flow
+### 1. QTS GUI System (`main.py` / `mcp_server.py`)
 
 ```
 Bybit WebSockets (public + private)
     ↓
-MarketStream (orderbook, trades, CVD, liquidations, OI)
-AccountStream (positions, executions, balance)
-KlineStream (REST poll: 15m/1h, resampled every 90s)
+streams/market.py   → orderbook, trades, CVD, liquidations, OI (MarketState)
+streams/account.py  → positions, executions, balance
+streams/klines.py   → REST kline poller (15m/1h), resampled every 90s
     ↓
-Signal Calculation (every ~30s scan interval)
-  AbsorptionDetector  → score 0-100 (CVD divergence, flow efficiency)
-  RegimeClassifier    → RANGING | TRENDING_UP/DOWN | VOLATILE | ACCUMULATION
-  TrendAnalyzer       → multi-TF weighted score (Fibonacci: 1m×1 ... 6h×21)
-  LiquidityAnalyzer   → S/R levels, OI velocity
-  OpportunityScorer   → composite score; threshold ≥70 to propose
+core/absorption.py  → AbsorptionDetector: CVD divergence score 0-100
+core/regime.py      → RegimeClassifier: RANGING | TRENDING_UP/DOWN | VOLATILE | ACCUMULATION
+core/trend.py       → TrendAnalyzer: multi-TF Fibonacci-weighted score
+core/liquidity.py   → LiquidityAnalyzer: HVN/LVN/EQ_H/EQ_L/ROUND levels
+                    → OpportunityScorer: composite ≥70 to propose
     ↓
-Strategy Layer (StrategyEngine or AIStrategyAgent)
-  Input:  top-N symbols by opp.score, balance, session goal
-  Output: OrderRequest (entry, SL, TP, qty, reasoning)
+core/strategy.py    → rule-based OrderRequest
+core/ai_strategy.py → LLM-based OrderRequest (OpenAI/Ollama/compatible)
     ↓
-TradeController (orchestrates lifecycle, enforces modes)
-    ↓
-BybitExecutor (REST v5: place, adjust SL/TP, cancel)
+core/controller.py  → TradeController: lifecycle, AutoMode enforcement
+core/executor.py    → Bybit REST v5
 ```
 
-### Automation Modes (AutoMode enum)
+**AutoMode:** `MANUAL | SUGGEST | AUTO_ENTRY | FULL_AUTO`  
+**TradeState:** `PENDING → SUBMITTED → OPEN → [BREAKEVEN] → [TRAILING] → CLOSED/FAILED`
 
-| Mode | Behavior |
-|------|----------|
-| `MANUAL` | User places orders manually |
-| `SUGGEST` | System proposes, user confirms with 1 click |
-| `AUTO_ENTRY` | Auto-enters, user adjusts stops |
-| `FULL_AUTO` | Fully autonomous: entry → breakeven → trail → close |
+### 2. Fast Auto-Trader (`scripts/fast_auto_trader.py`)
 
-### Trade Lifecycle (TradeState enum)
+Self-contained — only imports `core/config.py` for API keys, everything else is internal.
 
-`PENDING → SUBMITTED → OPEN → [BREAKEVEN] → [TRAILING] → CLOSED/FAILED`
+- Subscribes to `kline.1` and `kline.3` WebSocket streams for 9 pairs + BTC reference
+- Warm-up: fetches 1m/3m/15m/1h history via REST on startup
+- **PairState** dataclass per symbol: EMA9/21 on 1m+3m+15m+1h, streak counter, live price/volume
+- **Signal logic** (`check_signal()`): two paths:
+  - *EMA path*: both 1m and 3m EMA9>EMA21 aligned + streak ≥ MIN_STREAK + m3 momentum + rvol + BTC divergence
+  - *Momentum override*: 3 consecutive closes >0.15% in same direction with rvol ≥ 1.5 — bypasses EMA lag during sharp moves
+- **HTF filter** (`htf_allows()`): blocks entries against 1h or 15m trend
+- **Exit management** (monitor loop every 2s):
+  - Emergency close: price moves ≥0.15% adverse in one tick
+  - Auto-close: price within 0.05% of TP
+  - BE: SL → entry±0.1% when PnL ≥ 40% of risk; cancels fixed TP, trail takes over
+  - Trail: 0.1% trailing SL tick-by-tick post-BE
+  - Flip: candle-based reversal signal → close + open opposite
+- **Sizing**: `risk = equity × 2%`, `qty = risk / sl_distance`; capped at `MIN_NOTIONAL × 1.5`
+- **Structural SL/TP**: nearest swing high/low from last 60 1m closes + round numbers; falls back to ATR×1.5/ATR×2
 
-Breakeven moves SL to entry+fees at +1R; trailing activates at +2R.
+**Current scalping parameters:**
+```python
+SL_PCT=0.002, TP_PCT=0.004, LEVERAGE=50, MIN_STREAK=3, MAX_STREAK=7
+MIN_M3_PCT=0.18, MIN_RVOL=0.8, MIN_DIVERGE=0.15, BE_TRIGGER=0.4
+COOLDOWN_S=15, MAX_POSITIONS=2
+```
 
-### Risk Framework
+**Blacklisted pairs** (0% win rate in live history): LINK, AVAX, HBAR, DOT, FIL, VET.
 
-- **RiskFortress** (`core/risk.py`): daily loss circuit breaker (default -2%), margin alerts at 60%/80%
-- **SessionManager** (`core/session.py`): TSAA model — bounded sessions with PnL target, drawdown stop, time limit, API cost cap. States: `ACTIVE → HARVESTING | LIQUIDATING | API_EXHAUSTED → CLOSED`
+## Databases
 
-### AI Strategy Agent (`core/ai_strategy.py`)
+### DuckDB — `storage/trading.duckdb`
+Used exclusively by the **QTS GUI system**. Initialized by `core/db.initialize_db()`. Tables: `trades`, `tickers`, `trading_sessions`, `system_logs`. All structured events go through `core/logger.py` with trace IDs. **Do not open concurrently** — single-writer only.
 
-Filters top-N candidates (score ≥70), builds market snapshot per symbol, sends to LLM, parses JSON response `{action, symbol, side, entry, sl, tp, confidence, reasoning}`. Validates R:R ≥2.0 net of fees. Minimum 60s between calls; discards proposals older than 45s.
+### PostgreSQL — `trading` database (local Unix socket)
+Used exclusively by **fast_auto_trader**. DSN: `postgresql://dev@/trading?host=/var/run/postgresql`
 
-**Supported LLM providers:** OpenAI (default: gpt-4o), Ollama (local), or any OpenAI-compatible API (Groq, Mistral, etc.).
+| Table | Content |
+|-------|---------|
+| `qts_trades` | One row per trade: entry/exit, SL/TP labels, R:R, PnL, close reason, signal params |
+| `qts_ticks` | Every 2s monitor tick per open position: mark price, PnL, events (BE/TRAIL/FLIP/EMERGENCY) |
+| `qts_signals` | Every signal detected: executed or rejected with reason |
+| `qts_equity` | Balance snapshot every 30s |
 
 ## Key Configuration (`core/config.py`)
 
-65+ Pydantic settings loaded from `.env`. Auto-saves back to `.env` on any change. Key groups:
+65+ Pydantic settings, auto-saved back to `.env` on change. Critical ones:
 - `BYBIT_API_KEY/SECRET`, `BYBIT_TESTNET`
-- `SYMBOLS` (comma-separated), `DEFAULT_SYMBOL`
-- `SPEED_LEVEL`: `nano | scalp | fast | standard` (affects ATR multipliers, timeframes)
-- `MAX_DAILY_LOSS_PCT`, `MAX_TRADES_PER_DAY`
-- `AI_PROVIDER`, `AI_MODEL`, `AI_INTERVAL`
-- `SESSION_*`: duration, target PnL, drawdown, API cost limit
-- `PAPER_TRADING=true` for simulation with fake $10k
+- `PAPER_TRADING=true` → fake $10k, no real orders
+- `SPEED_LEVEL`: `nano | scalp | fast | standard` (ATR multipliers, timeframes for QTS system)
+- `AI_PROVIDER`, `AI_MODEL` (OpenAI/Ollama/compatible)
+- `TRADING_PG_DSN` → PostgreSQL connection for fast_auto_trader
 
-## Database (DuckDB at `storage/trading.duckdb`)
+## MCP Server (`mcp_server.py`)
 
-Initialized by `core/db.initialize_db()` at startup. Tables: `trades`, `tickers`, `trading_sessions`, `system_logs`. All structured events (with trace IDs) go through `core/logger.py` → `system_logs`.
+Exposes trading as MCP tools for Claude: `get_signals`, `get_account`, `get_positions`, `get_symbol_data`, `place_order`, `close_position`, `modify_sl_tp`, `get_session_config`. Runs an asyncio loop in a background thread; MCP tools are synchronous and submit coroutines to that loop via `Future`.
 
-## UI Architecture
+## Bybit-Specific Constraints
 
-**GTK4 GUI** (`interface/gtk_app.py`): AsyncBridge runs async I/O on a separate thread; GLib.timeout_add(100ms) drives UI refresh. Panels: OrderBook, Market Intelligence, Tape, Positions, Session, Risk, CVD chart (Cairo).
+- **Hedge mode**: `positionIdx=1` for LONG, `positionIdx=2` for SHORT — always required on order/stop endpoints
+- **Unified account**: available margin = `usdt_equity - usdt_initialMargin` (not `totalAvailableBalance`)
+- **Min notional**: $5 USDT for linear perpetuals
+- **REST auth**: HMAC-SHA256 of `timestamp + apiKey + recvWindow + queryString`; `recvWindow=10000` to avoid timestamp drift
 
-**Terminal TUI** (`interface/terminal.py`): Textual framework, same data sources, no GTK dependency.
+## Live Trading Operations
 
-## Module Map
+```bash
+# Check if fast_auto_trader is running
+pgrep -af fast_auto_trader
 
-| Path | Role |
-|------|------|
-| `core/controller.py` | TradeController: trade orchestration |
-| `core/executor.py` | Bybit REST v5 client |
-| `core/strategy.py` | Rule-based OrderRequest generation |
-| `core/ai_strategy.py` | LLM-based OrderRequest generation |
-| `core/order_model.py` | Data models: OrderRequest, TradeRecord, TradeState, AutoMode |
-| `core/session.py` | SessionManager (TSAA) |
-| `core/risk.py` | RiskFortress |
-| `core/config.py` | Settings with auto-persist |
-| `core/db.py` | DuckDB init + persistence |
-| `core/logger.py` | StructuredLogger con trace IDs; instancias: `strategy_logger`, `executor_logger`, `controller_logger`, `risk_logger`, `system_logger` |
-| `core/log_analyst.py` | LogAnalystAgent — consulta DB y usa LLM para analizar patrones de logs y trades |
-| `core/absorption.py` | AbsorptionDetector (CVD-based) |
-| `core/regime.py` | RegimeClassifier |
-| `core/trend.py` | Multi-timeframe TrendAnalyzer |
-| `core/liquidity.py` | S/R and order book profile |
-| `core/technicals.py` | ATR, EMA, RSI from klines |
-| `streams/market.py` | Public WebSocket: orderbook, trades, CVD, liquidations |
-| `streams/account.py` | Private WebSocket: positions, executions, balance |
-| `streams/klines.py` | REST kline poller (resampled) |
-| `interface/gtk_app.py` | Main GTK4/Adwaita GUI |
-| `interface/terminal.py` | Textual TUI |
+# Stop it cleanly
+pkill -f fast_auto_trader.py
+
+# Query trade history
+psql "postgresql://dev@/trading?host=/var/run/postgresql" \
+  -c "SELECT symbol, side, pnl, close_reason, duration_s FROM qts_trades ORDER BY ts DESC LIMIT 20;"
+
+# Query Bybit closed PnL directly
+# Use rest_get('/v5/position/closed-pnl', {'category':'linear','limit':'50'}) in Python
+```
+
+## interface/trade_monitor.py
+
+Standalone GTK4 monitor that polls Bybit REST every 3s. Does **not** connect to DuckDB or PostgreSQL — reads directly from Bybit. Shows balance, open positions with mark price/PnL, and a live tick table with event detection (SL moves, near-TP warnings).
