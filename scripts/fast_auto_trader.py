@@ -44,13 +44,14 @@ DEFAULT_SYMBOLS = [
 
 MIN_STREAK   = 2      # consecutive candles aligned
 MIN_M3_PCT   = 0.15   # 3-candle momentum %
-SL_PCT       = 0.005  # 0.5%
-TP_PCT       = 0.010  # 1.0%   → R:R 2:1
+SL_PCT       = 0.007  # 0.7% — wider to survive normal noise
+TP_PCT       = 0.014  # 1.4% — maintains R:R 2:1
 LEVERAGE     = 30     # higher leverage → smaller margin needed per trade
 MAX_POSITIONS = 2     # max simultaneous open positions
 MIN_NOTIONAL = 5.0    # USD (Bybit hard min)
 COOLDOWN_S   = 60     # seconds between trades on same symbol
-BE_TRIGGER   = 0.5    # move SL to BE when PnL reaches 50% of SL risk
+BE_TRIGGER   = 0.8    # move SL to BE when PnL reaches 80% of SL risk
+MIN_RVOL     = 0.5    # minimum relative volume to enter
 
 WS_PUBLIC  = "wss://stream.bybit.com/v5/public/linear"
 WS_PRIVATE = "wss://stream.bybit.com/v5/private"
@@ -64,7 +65,7 @@ last_signal_time: dict[str, float] = {}
 # ─── REST HELPERS ──────────────────────────────────────────────────────────
 def rest_get(endpoint: str, params: dict = {}) -> dict:
     ts    = str(int(time.time() * 1000))
-    recv  = "5000"
+    recv  = "10000"
     q     = urllib.parse.urlencode(params)
     pre   = ts + API_KEY + recv + q
     sig   = hmac.new(API_SECRET.encode(), pre.encode(), hashlib.sha256).hexdigest()
@@ -77,7 +78,7 @@ def rest_get(endpoint: str, params: dict = {}) -> dict:
 
 def rest_post(endpoint: str, body: dict) -> dict:
     ts        = str(int(time.time() * 1000))
-    recv      = "5000"
+    recv      = "10000"
     body_str  = json.dumps(body)
     pre       = ts + API_KEY + recv + body_str
     sig       = hmac.new(API_SECRET.encode(), pre.encode(), hashlib.sha256).hexdigest()
@@ -205,10 +206,11 @@ class PairState:
         rvol  = (self.live_vol_1m / avg_v) if avg_v > 0 else 1.0
 
         bias = "LONG" if t1 == "L" else "SHORT"
-        m3_ok  = (m3 > MIN_M3_PCT)  if bias == "LONG"  else (m3 < -MIN_M3_PCT)
-        stk_ok = (stk >= MIN_STREAK) if bias == "LONG"  else (stk <= -MIN_STREAK)
+        m3_ok   = (m3 > MIN_M3_PCT)   if bias == "LONG"  else (m3 < -MIN_M3_PCT)
+        stk_ok  = (stk >= MIN_STREAK) if bias == "LONG"  else (stk <= -MIN_STREAK)
+        rvol_ok = rvol >= MIN_RVOL
 
-        if m3_ok and stk_ok:
+        if m3_ok and stk_ok and rvol_ok:
             return {
                 "bias": bias, "price": price,
                 "m3": round(m3, 3), "streak": stk,
@@ -269,6 +271,11 @@ async def execute_entry(sym: str, sig: dict, avail: float, dry_run: bool) -> boo
         print("   [DRY RUN — no se ejecuta]")
         return False
 
+    # Reserve slot before placing order to prevent duplicate signals
+    active_positions[sym] = {"symbol": sym, "side": bias, "entry": price,
+                              "sl": sl, "tp": tp, "qty": qty,
+                              "order_id": None, "be_moved": False, "liq": "?"}
+
     try:
         rest_post("/v5/position/set-leverage", {
             "category": "linear", "symbol": sym,
@@ -289,6 +296,7 @@ async def execute_entry(sym: str, sig: dict, avail: float, dry_run: bool) -> boo
 
         if resp["retCode"] != 0:
             print(f"   ❌ Error orden: {resp['retMsg']}")
+            del active_positions[sym]
             return False
 
         order_id = resp["result"]["orderId"]
@@ -313,6 +321,7 @@ async def execute_entry(sym: str, sig: dict, avail: float, dry_run: bool) -> boo
 
     except Exception as e:
         print(f"   ❌ Exception: {e}")
+        active_positions.pop(sym, None)
         return False
 
 
