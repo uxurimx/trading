@@ -10,6 +10,7 @@ Usage:
 """
 import asyncio
 import json
+import math
 import hmac
 import hashlib
 import time
@@ -22,6 +23,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 import websockets
+import psycopg2
+import psycopg2.extras
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -36,28 +40,128 @@ except Exception:
     PAPER_MODE = os.getenv("PAPER_TRADING", "false").lower() == "true"
 
 # ─── STRATEGY CONFIG ───────────────────────────────────────────────────────
+# Pares con 0% WR en historial — eliminados: LINK(-$0.17), AVAX(-$0.10), HBAR(-$0.05), DOT(-$0.04), FIL(-$0.03)
+# ADA: 75% WR +$0.06 (el único consistente). Enfoque en líquidos de alto volumen.
 DEFAULT_SYMBOLS = [
-    "XRPUSDT", "DOGEUSDT", "ADAUSDT", "DOTUSDT", "NEARUSDT",
-    "INJUSDT", "LTCUSDT", "XLMUSDT", "ALGOUSDT", "VETUSDT",
-    "HBARUSDT", "ATOMUSDT", "LINKUSDT", "TRXUSDT", "FILUSDT",
+    "XRPUSDT", "ADAUSDT", "NEARUSDT",
+    "INJUSDT", "XLMUSDT", "ALGOUSDT",
+    "ATOMUSDT", "TRXUSDT", "DOGEUSDT",
 ]
 
-MIN_STREAK   = 2      # consecutive candles aligned
-MIN_M3_PCT   = 0.15   # 3-candle momentum %
-SL_PCT       = 0.007  # 0.7% — wider to survive normal noise
-TP_PCT       = 0.014  # 1.4% — maintains R:R 2:1
-LEVERAGE     = 30     # higher leverage → smaller margin needed per trade
-MAX_POSITIONS = 2     # max simultaneous open positions
-MIN_NOTIONAL = 5.0    # USD (Bybit hard min)
-COOLDOWN_S   = 60     # seconds between trades on same symbol
-BE_TRIGGER   = 0.8    # move SL to BE when PnL reaches 80% of SL risk
-MIN_RVOL     = 0.5    # minimum relative volume to enter
-TRAIL_TIGHT  = 0.002  # 0.2% trail when signal flips or explosion
-TRAIL_LOOSE  = 0.005  # 0.5% trail when signal in favor, normal momentum
-MIN_DIVERGE  = 0.15   # min % divergence vs BTC to confirm edge (beta-adjusted)
+MIN_STREAK   = 3      # mínimo 3 velas — 2 era ruido puro (30% WR)
+MAX_STREAK   = 7      # máximo razonable para no perseguir
+MIN_M3_PCT   = 0.18   # 0.12% generaba falsas señales — subido
+SL_PCT       = 0.002  # 0.2% SL → R:R real 2:1 con TP 0.4%
+TP_PCT       = 0.004  # 0.4% TP — 30-60s con 50x leverage
+LEVERAGE     = 50     # 50x
+MAX_POSITIONS = 2
+MIN_NOTIONAL = 5.0
+COOLDOWN_S   = 15     # 15s cooldown — evita re-entrar en ruido
+BE_TRIGGER   = 0.4    # BE al 40% del riesgo
+MIN_RVOL     = 0.8    # exige más volumen relativo
+TRAIL_TIGHT  = 0.001  # 0.1% trail post-BE
+TRAIL_LOOSE  = 0.002
+MIN_DIVERGE  = 0.15   # divergencia mínima vs BTC restaurada
 
 WS_PUBLIC  = "wss://stream.bybit.com/v5/public/linear"
 WS_PRIVATE = "wss://stream.bybit.com/v5/private"
+
+PG_DSN = "postgresql://dev@/trading?host=/var/run/postgresql"
+
+# ─── POSTGRES LOGGER ───────────────────────────────────────────────────────
+_pg_conn = None
+
+def _pg():
+    global _pg_conn
+    try:
+        if _pg_conn is None or _pg_conn.closed:
+            _pg_conn = psycopg2.connect(PG_DSN)
+            _pg_conn.autocommit = True
+    except Exception as e:
+        print(f"[PG] conexión fallida: {e}")
+        _pg_conn = None
+    return _pg_conn
+
+def pg_log_trade_open(sym, side, entry, qty, notional, leverage, sl, tp, sl_label, tp_label, rr, sig):
+    """Inserta fila de trade abierto — sin pnl ni close_reason todavía."""
+    try:
+        con = _pg()
+        if not con: return None
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO qts_trades
+              (symbol, side, entry_price, qty, notional, leverage,
+               sl_price, tp_price, sl_label, tp_label, rr,
+               stk, m3, rvol, divergence, atr5, htf_info, opened_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+        """, (
+            sym, side, entry, qty, notional, leverage,
+            sl, tp, sl_label, tp_label, rr,
+            sig.get("streak"), sig.get("m3"), sig.get("rvol"),
+            sig.get("divergence"), sig.get("atr5"), sig.get("htf"),
+            datetime.now(timezone.utc),
+        ))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[PG] log_trade_open err: {e}")
+        return None
+
+def pg_log_trade_close(trade_id, exit_price, pnl, close_reason, be_moved, duration_s):
+    try:
+        con = _pg()
+        if not con: return
+        cur = con.cursor()
+        cur.execute("""
+            UPDATE qts_trades SET
+              exit_price=%s, pnl=%s, close_reason=%s,
+              be_moved=%s, duration_s=%s, closed_at=%s
+            WHERE id=%s
+        """, (exit_price, pnl, close_reason, be_moved, duration_s,
+              datetime.now(timezone.utc), trade_id))
+    except Exception as e:
+        print(f"[PG] log_trade_close err: {e}")
+
+def pg_log_tick(sym, side, mark, pnl, sl_dist, tp_dist, be_moved, event=None):
+    try:
+        con = _pg()
+        if not con: return
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO qts_ticks (symbol, side, mark_price, pnl, sl_dist_pct, tp_dist_pct, be_moved, event)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (sym, side, mark, pnl, sl_dist, tp_dist, be_moved, event))
+    except Exception as e:
+        print(f"[PG] log_tick err: {e}")
+
+def pg_log_signal(sym, bias, sig, executed, reject_reason=None):
+    try:
+        con = _pg()
+        if not con: return
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO qts_signals (symbol, bias, stk, m3, rvol, divergence, atr5, htf_info, executed, reject_reason)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            sym, bias,
+            sig.get("streak"), sig.get("m3"), sig.get("rvol"),
+            sig.get("divergence"), sig.get("atr5"), sig.get("htf"),
+            executed, reject_reason,
+        ))
+    except Exception as e:
+        print(f"[PG] log_signal err: {e}")
+
+def pg_log_equity(equity, avail, open_pos):
+    try:
+        con = _pg()
+        if not con: return
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO qts_equity (equity, avail, open_positions) VALUES (%s,%s,%s)
+        """, (equity, avail, open_pos))
+    except Exception as e:
+        print(f"[PG] log_equity err: {e}")
 
 # ─── GLOBALS ───────────────────────────────────────────────────────────────
 active_positions: dict[str, dict] = {}   # keyed by symbol
@@ -147,12 +251,14 @@ def has_any_open_position() -> bool:
 @dataclass
 class PairState:
     symbol: str
-    closes_1m: deque = field(default_factory=lambda: deque(maxlen=30))
-    closes_3m: deque = field(default_factory=lambda: deque(maxlen=20))
-    vols_1m:   deque = field(default_factory=lambda: deque(maxlen=20))
-    vols_3m:   deque = field(default_factory=lambda: deque(maxlen=20))
-    ts_1m: int = 0   # timestamp of last confirmed 1m candle
-    ts_3m: int = 0   # timestamp of last confirmed 3m candle
+    closes_1m:  deque = field(default_factory=lambda: deque(maxlen=60))
+    closes_3m:  deque = field(default_factory=lambda: deque(maxlen=30))
+    closes_15m: deque = field(default_factory=lambda: deque(maxlen=30))
+    closes_1h:  deque = field(default_factory=lambda: deque(maxlen=24))
+    vols_1m:    deque = field(default_factory=lambda: deque(maxlen=20))
+    vols_3m:    deque = field(default_factory=lambda: deque(maxlen=20))
+    ts_1m: int = 0
+    ts_3m: int = 0
     live_price: float = 0.0
     live_vol_1m: float = 0.0
     signal_count: int = 0
@@ -182,6 +288,74 @@ class PairState:
                 break
         return s * d
 
+    # ── Higher timeframe trend ──────────────────────────────────────────
+    def htf_bias(self) -> Optional[str]:
+        """Returns '1h:L/S 15m:L/S' or None if not enough data."""
+        parts = []
+        if len(self.closes_1h) >= 9:
+            t = "L" if self._ema(self.closes_1h, 9) > self._ema(self.closes_1h, min(21, len(self.closes_1h))) else "S"
+            parts.append(f"1h:{t}")
+        if len(self.closes_15m) >= 9:
+            t = "L" if self._ema(self.closes_15m, 9) > self._ema(self.closes_15m, min(21, len(self.closes_15m))) else "S"
+            parts.append(f"15m:{t}")
+        return " ".join(parts) if parts else None
+
+    def htf_allows(self, bias: str) -> tuple[bool, str]:
+        """Returns (allowed, reason). Blocks entries against 1h trend."""
+        h1_trend = None
+        m15_trend = None
+        if len(self.closes_1h) >= 9:
+            h1_trend = "L" if self._ema(self.closes_1h, 9) > self._ema(self.closes_1h, min(21, len(self.closes_1h))) else "S"
+        if len(self.closes_15m) >= 9:
+            m15_trend = "L" if self._ema(self.closes_15m, 9) > self._ema(self.closes_15m, min(21, len(self.closes_15m))) else "S"
+
+        expected = "L" if bias == "LONG" else "S"
+
+        if h1_trend and h1_trend != expected:
+            return False, f"1h={h1_trend} contra {bias} — tendencia real opuesta"
+        if m15_trend and m15_trend != expected:
+            return False, f"15m={m15_trend} contra {bias}"
+        htf_str = f"1h={h1_trend or '?'} 15m={m15_trend or '?'}"
+        return True, htf_str
+
+    # ── Swing S/R detection from kline history ──────────────────────────
+    def nearest_resistance(self, price: float, lookback: int = 4) -> Optional[float]:
+        """Nearest swing high above price from 1m klines."""
+        cl = list(self.closes_1m)
+        n = len(cl)
+        if n < lookback * 2 + 1:
+            return None
+        highs = []
+        for i in range(lookback, n - lookback):
+            if all(cl[i] >= cl[i-j] for j in range(1, lookback+1)) and \
+               all(cl[i] >= cl[i+j] for j in range(1, lookback+1)):
+                if cl[i] > price * 1.001:   # at least 0.1% above
+                    highs.append(cl[i])
+        # Also add nearest round number above
+        mag = 10 ** (len(str(int(price))) - 2)
+        rnd = math.ceil(price / mag) * mag
+        if rnd > price * 1.001:
+            highs.append(rnd)
+        return min(highs) if highs else None
+
+    def nearest_support(self, price: float, lookback: int = 4) -> Optional[float]:
+        """Nearest swing low below price from 1m klines."""
+        cl = list(self.closes_1m)
+        n = len(cl)
+        if n < lookback * 2 + 1:
+            return None
+        lows = []
+        for i in range(lookback, n - lookback):
+            if all(cl[i] <= cl[i-j] for j in range(1, lookback+1)) and \
+               all(cl[i] <= cl[i+j] for j in range(1, lookback+1)):
+                if cl[i] < price * 0.999:
+                    lows.append(cl[i])
+        mag = 10 ** (len(str(int(price))) - 2)
+        rnd = math.floor(price / mag) * mag
+        if rnd < price * 0.999:
+            lows.append(rnd)
+        return max(lows) if lows else None
+
     # ── Main signal check ───────────────────────────────────────────────
     def check_signal(self) -> Optional[dict]:
         if len(self.closes_1m) < 12 or len(self.closes_3m) < 6:
@@ -199,9 +373,6 @@ class PairState:
         t1 = "L" if e9_1 > e21_1 else "S"
         t3 = "L" if e9_3 > e21_3 else "S"
 
-        if t1 != t3:
-            return None
-
         stk = self._streak(self.closes_1m)
         price = self.live_price or cl1[-1]
         m3  = (cl1[-1] - cl1[-4]) / cl1[-4] * 100 if len(cl1) >= 4 else 0.0
@@ -209,34 +380,90 @@ class PairState:
         avg_v = sum(vl1[-12:-2]) / 10 if len(vl1) >= 12 else 0
         rvol  = (self.live_vol_1m / avg_v) if avg_v > 0 else 1.0
 
-        bias = "LONG" if t1 == "L" else "SHORT"
+        # ── Momentum override: strong consecutive closes ignoran EMA lag ─────
+        # Si 3 velas seguidas bajan/suben >0.15% c/u con volumen alto → señal directa
+        momentum_bias = None
+        if len(cl1) >= 4:
+            moves = [(cl1[i] - cl1[i-1]) / cl1[i-1] * 100 for i in range(-3, 0)]
+            if all(m < -0.15 for m in moves) and rvol >= 1.2:
+                momentum_bias = "SHORT"
+            elif all(m > 0.15 for m in moves) and rvol >= 1.2:
+                momentum_bias = "LONG"
+
+        # EMA-based bias (requiere ambas TF alineadas)
+        ema_bias = None
+        if t1 == t3:
+            ema_bias = "LONG" if t1 == "L" else "SHORT"
+
+        # Usar momentum si EMA está rezagada (EMA contra momentum = lag)
+        if momentum_bias and ema_bias and momentum_bias != ema_bias:
+            bias = momentum_bias   # momentum override — EMA no ha catcheado
+            signal_type = "MOMENTUM"
+        elif ema_bias:
+            bias = ema_bias
+            signal_type = "EMA"
+        else:
+            return None   # ni EMA alineada ni momentum claro
+
+        stk_abs = abs(stk)
         m3_ok   = (m3 > MIN_M3_PCT)   if bias == "LONG"  else (m3 < -MIN_M3_PCT)
-        stk_ok  = (stk >= MIN_STREAK) if bias == "LONG"  else (stk <= -MIN_STREAK)
+        stk_ok  = stk_abs >= MIN_STREAK
+        if stk_abs > MAX_STREAK:
+            stk_ok = rvol >= 2.0 and abs(m3) >= 0.40
         rvol_ok = rvol >= MIN_RVOL
 
-        if not (m3_ok and stk_ok and rvol_ok):
+        # Momentum override tiene requisitos más altos (sin confirmación EMA)
+        if signal_type == "MOMENTUM":
+            if rvol < 1.5 or abs(m3) < 0.25:
+                return None
+        elif not (m3_ok and stk_ok and rvol_ok):
             return None
 
-        # ── Beta-adjusted divergence vs BTC ─────────────────────────────
+        # ── ATR check: symbol must have enough range to reach TP ────────────
+        ranges = [abs(cl1[i] - cl1[i-1]) / cl1[i-1] * 100 for i in range(-5, 0)]
+        atr5 = sum(ranges) / len(ranges) if ranges else 0
+        if atr5 < 0.10:   # market sleeping — less than 0.10% avg candle
+            return None
+
+        # ── BTC trend filter (EMA9 vs EMA21 of last 10 BTC candles) ─────────
         btc_cl = list(btc_closes_1m)
-        if len(btc_cl) >= 2 and self.symbol != "BTCUSDT":
-            btc_return  = (btc_cl[-1] - btc_cl[-2]) / btc_cl[-2] * 100
-            sym_return  = (cl1[-1]    - cl1[-2])    / cl1[-2]    * 100
-            divergence  = sym_return - btc_return   # +: sym stronger than BTC
+        btc_bias = None
+        if len(btc_cl) >= 10:
+            btc_e9  = self._ema(deque(btc_cl, maxlen=len(btc_cl)), 9)
+            btc_e21 = self._ema(deque(btc_cl, maxlen=len(btc_cl)), min(21, len(btc_cl)))
+            btc_bias = "LONG" if btc_e9 > btc_e21 else "SHORT"
+
+        # ── Beta-adjusted divergence vs BTC (3-candle window, not 1) ────────
+        if len(btc_cl) >= 4 and self.symbol != "BTCUSDT":
+            btc_return  = (btc_cl[-1] - btc_cl[-4]) / btc_cl[-4] * 100   # 3-candle BTC return
+            sym_return  = (cl1[-1]    - cl1[-4])    / cl1[-4]    * 100
+            divergence  = sym_return - btc_return
             div_ok = (divergence >= MIN_DIVERGE)  if bias == "LONG" \
                 else (divergence <= -MIN_DIVERGE)
+            # If BTC is moving against us, require stronger divergence
+            if btc_bias and btc_bias != bias:
+                div_ok = (divergence >= MIN_DIVERGE * 2) if bias == "LONG" \
+                    else (divergence <= -MIN_DIVERGE * 2)
         else:
             divergence = 0.0
-            div_ok     = True   # no BTC data yet → don't block signal
+            div_ok     = True
 
         if not div_ok:
             return None
+
+        # ── Higher timeframe filter — NEVER fight 1h or 15m trend ───────────
+        htf_ok, htf_reason = self.htf_allows(bias)
+        if not htf_ok:
+            return None   # signal is against the real trend — hard block
 
         return {
             "bias": bias, "price": price,
             "m3": round(m3, 3), "streak": stk,
             "rvol": round(rvol, 2),
             "divergence": round(divergence, 3),
+            "atr5": round(atr5, 3),
+            "htf": htf_reason,
+            "signal_type": signal_type,
             "e9_1": round(e9_1, 6), "e21_1": round(e21_1, 6),
             "e9_3": round(e9_3, 6), "e21_3": round(e21_3, 6),
         }
@@ -253,12 +480,81 @@ async def execute_entry(sym: str, sig: dict, avail: float, dry_run: bool) -> boo
     bias  = sig["bias"]
     price = sig["price"]
 
-    sl = round(price * (1 - SL_PCT) if bias == "LONG" else price * (1 + SL_PCT), 6)
-    tp = round(price * (1 + TP_PCT) if bias == "LONG" else price * (1 - TP_PCT), 6)
+    atr5 = sig.get("atr5", SL_PCT * 100)
+    st   = pair_states.get(sym)
 
-    # Conservative sizing: min viable notional to preserve capital
-    # Risk per trade = notional × SL_PCT ≈ $5.5 × 0.005 = $0.028 (~2.5% of equity)
-    notional = max(MIN_NOTIONAL, min(avail * 0.30 * LEVERAGE, MIN_NOTIONAL * 1.2))
+    # ── SL: structural swing level, not arbitrary % ──────────────────────
+    # LONG: SL just below nearest swing LOW → structurally invalid if broken
+    # SHORT: SL just above nearest swing HIGH → same logic
+    # "Just below/above" = 0.1% buffer so we're NOT on the exact level
+    # (sitting on the level = stop hunt bait)
+    structural_sl = None
+    if st:
+        structural_sl = st.nearest_support(price) if bias == "LONG" else st.nearest_resistance(price)
+
+    if structural_sl:
+        # Place SL 0.15% beyond the structural level (not on it)
+        if bias == "LONG":
+            sl = round(structural_sl * 0.9985, 6)
+        else:
+            sl = round(structural_sl * 1.0015, 6)
+        sl_pct = abs(price - sl) / price
+        sl_label = "swing low/high"
+    else:
+        # No structural level found → ATR fallback, clamped
+        sl_pct = max(0.005, min(0.012, atr5 / 100 * 1.5))
+        sl = round(price * (1 - sl_pct) if bias == "LONG" else price * (1 + sl_pct), 6)
+        sl_label = "ATR×1.5"
+
+    # Sanity: SL must be between 0.3% and 2.0% from price
+    sl_pct = abs(price - sl) / price
+    if sl_pct < 0.003 or sl_pct > 0.020:
+        sl_pct = max(0.005, min(0.012, atr5 / 100 * 1.5))
+        sl = round(price * (1 - sl_pct) if bias == "LONG" else price * (1 + sl_pct), 6)
+        sl_label = "ATR×1.5 (fallback)"
+
+    # ── TP: just BEFORE nearest resistance/support — not on the level ────
+    # Price often reverses at resistance without breaking it. Place TP
+    # 0.1% before the level so we capture the move, not wait for the break.
+    swing_tp = None
+    if st:
+        swing_tp = st.nearest_resistance(price) if bias == "LONG" else st.nearest_support(price)
+
+    if swing_tp:
+        # TP = 0.15% before the level (we exit before the wall, not into it)
+        raw_tp = swing_tp * 0.9985 if bias == "LONG" else swing_tp * 1.0015
+        tp_pct = abs(raw_tp - price) / price
+        rr = tp_pct / sl_pct if sl_pct > 0 else 0
+        if rr >= 1.5:
+            tp = round(raw_tp, 6)
+            tp_label = f"swing S/R (R:R {rr:.1f}:1)"
+        else:
+            tp_pct = sl_pct * 2
+            tp = round(price * (1 + tp_pct) if bias == "LONG" else price * (1 - tp_pct), 6)
+            tp_label = f"ATR×2 (swing R:R {rr:.1f} insuficiente)"
+    else:
+        tp_pct = sl_pct * 2
+        tp = round(price * (1 + tp_pct) if bias == "LONG" else price * (1 - tp_pct), 6)
+        tp_label = "ATR×2 (sin swing)"
+
+    # Final R:R
+    rr = abs(tp - price) / abs(price - sl) if abs(price - sl) > 0 else 0
+
+    # Skip trade if R:R < 1.5 (structure doesn't support the trade)
+    if rr < 1.5:
+        print(f"   ⛔ {sym} {bias} rechazado: R:R={rr:.1f} < 1.5  SL={sl_pct*100:.2f}%  TP={tp_pct*100:.2f}%")
+        return False
+
+    # Risk-based sizing: risk 2% of available equity per trade
+    # qty = risk_usd / distance_to_sl_per_unit
+    eq, _ = get_balance()
+    risk_usd   = max(0.02, eq * 0.02)          # 2% of equity, min $0.02
+    sl_dist_pp = abs(price - sl)               # distance per unit in price
+    qty_by_risk = risk_usd / sl_dist_pp if sl_dist_pp > 0 else 0
+    notional_by_risk = qty_by_risk * price
+
+    # Clamp to Bybit min notional and available margin
+    notional = max(MIN_NOTIONAL, min(notional_by_risk, avail * 0.30 * LEVERAGE, MIN_NOTIONAL * 1.5))
     if notional < MIN_NOTIONAL:
         print(f"   ⏭  {sym} saltado — notional ${notional:.2f} < mínimo ${MIN_NOTIONAL}")
         return False
@@ -277,16 +573,17 @@ async def execute_entry(sym: str, sig: dict, avail: float, dry_run: bool) -> boo
         print(f"   ⏭  {sym} saltado — margen req ${required_margin:.3f} > disponible ${avail:.3f}")
         return False
 
-    risk_usd = actual_notional * SL_PCT
-    gain_usd = actual_notional * TP_PCT
+    risk_usd = actual_notional * sl_pct
+    gain_usd = actual_notional * tp_pct
 
     ts = time.strftime("%H:%M:%S")
     side_str = "LONG" if bias == "LONG" else "SHORT"
     print(f"\n{'='*60}")
     print(f"⚡ [{ts}] {sym} {side_str}  [{len(active_positions)+1}/{MAX_POSITIONS}]")
-    print(f"   price=${price:.5f}  m3={sig['m3']:+.3f}%  stk={sig['streak']:+d}  rvol={sig['rvol']:.2f}x")
-    print(f"   qty={qty}  notional=${actual_notional:.2f}  lev={LEVERAGE}x  avail=${avail:.4f}")
-    print(f"   SL={sl}  TP={tp}  Riesgo=${risk_usd:.4f}  Potencial=${gain_usd:.4f}")
+    print(f"   price=${price:.5f}  m3={sig['m3']:+.3f}%  stk={sig['streak']:+d}  rvol={sig['rvol']:.2f}x  atr={atr5:.2f}%  div={sig['divergence']:+.3f}%")
+    print(f"   SL=${sl} [{sl_label}] -{sl_pct*100:.2f}%  →  TP=${tp} [{tp_label}] +{tp_pct*100:.2f}%  R:R {rr:.1f}:1")
+    print(f"   qty={qty}  notional=${actual_notional:.2f}  riesgo=${risk_usd:.4f} (2% equity)  lev={LEVERAGE}x")
+    print(f"   Riesgo=${risk_usd:.4f}  Potencial=${gain_usd:.4f}")
 
     if dry_run:
         print("   [DRY RUN — no se ejecuta]")
@@ -326,18 +623,31 @@ async def execute_entry(sym: str, sig: dict, avail: float, dry_run: bool) -> boo
         pos = get_open_position(sym)
         if pos:
             entry = float(pos["avgPrice"])
+            real_sl = float(pos["stopLoss"])
+            real_tp = float(pos["takeProfit"])
+            real_qty = float(pos["size"])
             active_positions[sym] = {
                 "symbol": sym, "side": bias,
-                "entry": entry, "sl": float(pos["stopLoss"]),
-                "tp": float(pos["takeProfit"]), "qty": float(pos["size"]),
+                "entry": entry, "sl": real_sl,
+                "tp": real_tp, "qty": real_qty,
                 "order_id": order_id, "be_moved": False,
                 "liq": pos.get("liqPrice", "?"),
+                "opened_at": time.time(),
             }
-            print(f"   ✅ ABIERTA @ ${entry}  Liq=${pos.get('liqPrice','?')}")
+            # ── Log a PostgreSQL ──────────────────────────────────────────
+            trade_id = pg_log_trade_open(
+                sym, bias, entry, real_qty, real_qty * entry, LEVERAGE,
+                real_sl, real_tp, sl_label, tp_label, rr, sig,
+            )
+            active_positions[sym]["pg_id"] = trade_id
+            pg_log_signal(sym, bias, sig, executed=True)
+            # ─────────────────────────────────────────────────────────────
+            print(f"   ✅ ABIERTA @ ${entry}  Liq=${pos.get('liqPrice','?')}  [PG id={trade_id}]")
             last_trade_time[sym] = time.time()
             return True
         else:
             print(f"   ⚠️  Orden enviada pero posición no encontrada")
+            pg_log_signal(sym, bias, sig, executed=False, reject_reason="position not found after order")
             return False
 
     except Exception as e:
@@ -385,30 +695,73 @@ async def monitor_position(dry_run: bool):
             if not pos:
                 ts = time.strftime("%H:%M:%S")
                 print(f"\n[{ts}] ✅ {sym} CERRADA (TP/SL)")
+                exit_price, final_pnl = 0.0, 0.0
                 try:
                     hist = rest_get("/v5/execution/list", {"category": "linear", "symbol": sym, "limit": "5"})
-                    for ex in hist["result"]["list"][:2]:
+                    execs = hist["result"]["list"]
+                    for ex in execs[:2]:
                         print(f"   {ex['side']} {ex['execQty']} @ ${ex['execPrice']}")
+                    if execs:
+                        exit_price = float(execs[0]["execPrice"])
                     eq, avail = get_balance()
                     print(f"   💰 Equity=${eq:.5f}  Disponible=${avail:.5f}")
+                    pg_log_equity(eq, avail, len(active_positions) - 1)
                 except Exception:
                     pass
+                # Calcular PnL aproximado para el registro
+                dur = int(time.time() - ap.get("opened_at", time.time()))
+                if exit_price:
+                    if side == "LONG":
+                        final_pnl = (exit_price - ap["entry"]) * ap["qty"]
+                    else:
+                        final_pnl = (ap["entry"] - exit_price) * ap["qty"]
+                pg_log_trade_close(ap.get("pg_id"), exit_price, final_pnl, "SL/TP", ap["be_moved"], dur)
                 del active_positions[sym]
                 continue
 
             mark  = float(pos["markPrice"])
             pnl   = float(pos["unrealisedPnl"])
             entry = ap["entry"]
-            sl    = float(pos["stopLoss"])
-            tp    = float(pos["takeProfit"])
+            sl    = float(pos["stopLoss"]) if pos.get("stopLoss") else 0.0
+            tp    = float(pos["takeProfit"]) if pos.get("takeProfit") else 0.0
 
             sl_dist = abs(mark - sl) / mark * 100
-            tp_dist = abs(tp - mark) / mark * 100
+            tp_dist = abs(tp - mark) / mark * 100 if tp > 0 else 0
             color   = "🟢" if pnl >= 0 else "🔴"
             ts      = time.strftime("%H:%M:%S")
             print(f"[{ts}] {color} {sym} {side}  ${mark:.5f}  pnl=${pnl:+.4f}  SL-{sl_dist:.2f}%  TP+{tp_dist:.2f}%")
 
-            # ── Reversal check (PRE y POST be) — actúa en cualquier fase ──────
+            # Log tick a PG
+            pg_log_tick(sym, side, mark, pnl, sl_dist, tp_dist, ap["be_moved"])
+
+            # ── Reversal tick-by-tick (precio, sin esperar candle) ─────────────
+            if not dry_run:
+                last_mark = ap.get("last_mark", mark)
+                ap["last_mark"] = mark
+                tick_move = (mark - last_mark) / last_mark * 100
+                adverse   = tick_move if side == "SHORT" else -tick_move
+                if adverse >= 0.15:
+                    if close_position(sym, side, ap["qty"]):
+                        dur = int(time.time() - ap.get("opened_at", time.time()))
+                        pg_log_trade_close(ap.get("pg_id"), mark, pnl, "EMERGENCY", ap["be_moved"], dur)
+                        pg_log_tick(sym, side, mark, pnl, sl_dist, tp_dist, ap["be_moved"], event="EMERGENCY")
+                        print(f"   🚨 CIERRE EMERGENCIA {sym} {side}: precio +{adverse:.2f}% contra  pnl=${pnl:+.4f}")
+                        del active_positions[sym]
+                    continue
+
+            # ── Auto-close cerca del TP ──────────────────────────────────────────
+            if tp > 0 and not dry_run:
+                dist_to_tp = abs(tp - mark) / mark * 100
+                if dist_to_tp <= 0.05:
+                    if close_position(sym, side, ap["qty"]):
+                        dur = int(time.time() - ap.get("opened_at", time.time()))
+                        pg_log_trade_close(ap.get("pg_id"), mark, pnl, "NEAR_TP", ap["be_moved"], dur)
+                        pg_log_tick(sym, side, mark, pnl, sl_dist, tp_dist, ap["be_moved"], event="NEAR_TP")
+                        print(f"   💰 AUTO-CLOSE {sym}: a {dist_to_tp:.3f}% del TP  pnl=${pnl:+.4f}")
+                        del active_positions[sym]
+                    continue
+
+            # ── Reversal candle-based (flip) ────────────────────────────────────
             if not dry_run:
                 st = pair_states.get(sym)
                 rev_sig = st.check_signal() if st else None
@@ -418,10 +771,12 @@ async def monitor_position(dry_run: bool):
                     if streak_against and m3_strong:
                         qty_close = ap["qty"]
                         if close_position(sym, side, qty_close):
+                            dur = int(time.time() - ap.get("opened_at", time.time()))
+                            pg_log_trade_close(ap.get("pg_id"), mark, pnl, "FLIP", ap["be_moved"], dur)
+                            pg_log_tick(sym, side, mark, pnl, sl_dist, tp_dist, ap["be_moved"], event="FLIP")
                             print(f"   🔄 FLIP {sym}: {side}→{rev_sig['bias']}  "
                                   f"stk={rev_sig['streak']}  m3={rev_sig['m3']:+.3f}%  pnl=${pnl:+.4f}")
                             del active_positions[sym]
-                            # Immediately open in opposite direction
                             await asyncio.sleep(0.5)
                             eq2, avail2 = get_balance()
                             same_dir = sum(1 for p in active_positions.values() if p["side"] == rev_sig["bias"])
@@ -431,33 +786,33 @@ async def monitor_position(dry_run: bool):
                                 print(f"   ⏸  Flip bloqueado: avail=${avail2:.4f}  same_dir={same_dir}")
                         continue
 
-            # ── Phase 1: Move SL to breakeven ──────────────────────────────
+            # ── Phase 1: BE ─────────────────────────────────────────────────────
             if not ap["be_moved"] and not dry_run:
                 risk = abs(entry - ap["sl"]) * ap["qty"]
                 if pnl >= risk * BE_TRIGGER:
                     new_sl = round(entry * 1.001 if side == "LONG" else entry * 0.999, 6)
-                    if update_sl(sym, side, new_sl):
+                    resp = rest_post("/v5/position/trading-stop", {
+                        "category": "linear", "symbol": sym,
+                        "positionIdx": 1 if side == "LONG" else 2,
+                        "stopLoss": str(new_sl), "slTriggerBy": "LastPrice",
+                        "takeProfit": "0",
+                    })
+                    if resp["retCode"] == 0:
                         ap["be_moved"] = True
                         ap["sl"] = new_sl
                         ap["peak_pnl"] = pnl
-                        print(f"   🔒 SL→BE: ${new_sl} (pnl=${pnl:+.4f})")
+                        pg_log_tick(sym, side, mark, pnl, sl_dist, tp_dist, True, event="BE")
+                        print(f"   🔒 SL→BE: ${new_sl}  TP fijo cancelado — trail activo  (pnl=${pnl:+.4f})")
 
-            # ── Phase 2: Tick-by-tick price trailing + auto-close (after BE) ─
+            # ── Phase 2: Trail ──────────────────────────────────────────────────
             elif ap["be_moved"] and not dry_run:
                 ap["peak_pnl"] = max(ap.get("peak_pnl", pnl), pnl)
-
-                # Auto-close when TP is within 0.3%
-                if tp_dist <= 0.30:
-                    if close_position(sym, side, ap["qty"]):
-                        print(f"   💰 AUTO-CLOSE {sym}: TP a {tp_dist:.2f}%  pnl=${pnl:+.4f}")
-                    continue
-
-                # Price-based trail every tick
                 new_sl = round(mark * (1 - TRAIL_TIGHT) if side == "LONG"
                                else mark * (1 + TRAIL_TIGHT), 6)
                 better = (new_sl > ap["sl"]) if side == "LONG" else (new_sl < ap["sl"])
                 if better and update_sl(sym, side, new_sl):
                     ap["sl"] = new_sl
+                    pg_log_tick(sym, side, mark, pnl, sl_dist, tp_dist, True, event="TRAIL")
                     print(f"   📈 trail {sym}: SL→${new_sl}  pnl=${pnl:+.4f}")
 
         except Exception as e:
@@ -485,7 +840,7 @@ async def ws_handler(symbols: list[str], dry_run: bool):
     print(f"\n{'='*60}")
     print(f"QTS Fast Auto-Trader {'[DRY RUN]' if dry_run else '[LIVE]'}")
     print(f"Símbolos: {len(trade_syms)}  |  SL={SL_PCT*100:.1f}%  TP={TP_PCT*100:.1f}%  R:R 2:1")
-    print(f"Condiciones: 1m+3m alineados  stk≥{MIN_STREAK}  m3≥{MIN_M3_PCT}%  div≥{MIN_DIVERGE}%")
+    print(f"Condiciones: 1m+3m alineados  stk={MIN_STREAK}-{MAX_STREAK}  m3≥{MIN_M3_PCT}%  div≥{MIN_DIVERGE}%")
     print(f"Referencia BTC: {ref_sym} (beta-adjusted divergence activo)")
     print(f"{'='*60}")
 
@@ -503,14 +858,20 @@ async def ws_handler(symbols: list[str], dry_run: bool):
     for sym in trade_syms:
         try:
             st = pair_states[sym]
-            for tf, cl_attr, vl_attr in [("1", "closes_1m", "vols_1m"), ("3", "closes_3m", "vols_3m")]:
+            for tf, cl_attr, vl_attr, limit in [
+                ("1",  "closes_1m",  "vols_1m",  "30"),
+                ("3",  "closes_3m",  "vols_3m",  "30"),
+                ("15", "closes_15m", None,        "30"),
+                ("60", "closes_1h",  None,        "24"),
+            ]:
                 d = rest_get("/v5/market/kline", {
-                    "category": "linear", "symbol": sym, "interval": tf, "limit": "30"
+                    "category": "linear", "symbol": sym, "interval": tf, "limit": limit
                 })
                 candles = list(reversed(d["result"]["list"]))
                 for c in candles:
                     getattr(st, cl_attr).append(float(c[4]))   # close
-                    getattr(st, vl_attr).append(float(c[5]))   # volume
+                    if vl_attr:
+                        getattr(st, vl_attr).append(float(c[5]))   # volume
         except Exception as e:
             print(f"  {sym} warm-up err: {e}")
     print(f"Warm-up completo. Conectando WebSocket...\n")
@@ -554,7 +915,7 @@ async def ws_handler(symbols: list[str], dry_run: bool):
 
                     # Position monitor every 5 seconds
                     now = time.time()
-                    if now - last_monitor >= 5 and active_positions:
+                    if now - last_monitor >= 2 and active_positions:
                         await monitor_position(dry_run)
                         last_monitor = now
 
@@ -563,6 +924,7 @@ async def ws_handler(symbols: list[str], dry_run: bool):
                         eq, avail = get_balance()
                         n = len(active_positions)
                         print(f"[{time.strftime('%H:%M:%S')}] 👁 {n}/{MAX_POSITIONS} pos  Equity=${eq:.5f}  Disponible=${avail:.5f}")
+                        pg_log_equity(eq, avail, n)
                         # Show top candidates
                         candidates = []
                         for s, st2 in pair_states.items():
@@ -655,21 +1017,34 @@ async def ws_handler(symbols: list[str], dry_run: bool):
                     sig = st.check_signal()
                     if not sig:
                         continue
+                    pg_log_signal(sym, sig["bias"], sig, executed=False, reject_reason="pending_execution_check")
 
-                    # Max 1 LONG + 1 SHORT — no duplicar dirección
+                    # Detect market regime: if >60% of aligned pairs are SHORT → allow 2 SHORTs
+                    aligned = [(s2, st2) for s2, st2 in pair_states.items()
+                               if len(st2.closes_1m) >= 12 and len(st2.closes_3m) >= 6]
+                    short_count = sum(1 for _, st2 in aligned
+                                      if st2._ema(st2.closes_1m,9) < st2._ema(st2.closes_1m,21)
+                                      and st2._ema(st2.closes_3m,9) < st2._ema(st2.closes_3m,21))
+                    market_short = len(aligned) > 0 and short_count / len(aligned) >= 0.60
+                    market_long  = len(aligned) > 0 and (len(aligned) - short_count) / len(aligned) >= 0.60
+
+                    # Allow 2 positions in dominant direction, else max 1 per side
                     same_dir = sum(1 for p in active_positions.values() if p["side"] == sig["bias"])
-                    if same_dir >= 1:
+                    dominant_dir = "SHORT" if market_short else ("LONG" if market_long else None)
+                    max_same = 2 if sig["bias"] == dominant_dir else 1
+                    if same_dir >= max_same:
                         continue
 
                     last_signal_time[sym] = now
-                    print(f"[{time.strftime('%H:%M:%S')}] 📡 SEÑAL {sym} {sig['bias']}  m3={sig['m3']:+.3f}%  stk={sig['streak']:+d}  div={sig.get('divergence', 0):+.3f}%  p=${sig['price']:.5f}")
+                    regime_tag = f" [{dominant_dir or 'MIXTO'} {short_count}/{len(aligned)}]"
+                    print(f"[{time.strftime('%H:%M:%S')}] 📡 SEÑAL {sym} {sig['bias']}  m3={sig['m3']:+.3f}%  stk={sig['streak']:+d}  div={sig.get('divergence', 0):+.3f}%  p=${sig['price']:.5f}{regime_tag}")
 
                     async with position_lock:
                         if sym in active_positions:
                             continue
                         same_dir = sum(1 for p in active_positions.values() if p["side"] == sig["bias"])
-                        if same_dir >= 1:
-                            print(f"   ⏸  Ya hay un {sig['bias']} activo")
+                        if same_dir >= max_same:
+                            print(f"   ⏸  Ya hay {same_dir} {sig['bias']} activo(s)")
                             continue
                         if len(active_positions) >= MAX_POSITIONS:
                             print(f"   ⏸  Máximo de posiciones alcanzado ({MAX_POSITIONS})")
