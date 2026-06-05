@@ -52,6 +52,8 @@ MIN_NOTIONAL = 5.0    # USD (Bybit hard min)
 COOLDOWN_S   = 60     # seconds between trades on same symbol
 BE_TRIGGER   = 0.8    # move SL to BE when PnL reaches 80% of SL risk
 MIN_RVOL     = 0.5    # minimum relative volume to enter
+TRAIL_TIGHT  = 0.002  # 0.2% trail when signal flips or explosion
+TRAIL_LOOSE  = 0.005  # 0.5% trail when signal in favor, normal momentum
 
 WS_PUBLIC  = "wss://stream.bybit.com/v5/public/linear"
 WS_PRIVATE = "wss://stream.bybit.com/v5/private"
@@ -325,6 +327,29 @@ async def execute_entry(sym: str, sig: dict, avail: float, dry_run: bool) -> boo
         return False
 
 
+def close_position(sym: str, side: str, qty: float) -> bool:
+    """Market-close an open position."""
+    close_side = "Sell" if side == "LONG" else "Buy"
+    pos_idx    = 1 if side == "LONG" else 2
+    resp = rest_post("/v5/order/create", {
+        "category": "linear", "symbol": sym,
+        "side": close_side, "orderType": "Market",
+        "qty": str(qty), "positionIdx": pos_idx,
+        "reduceOnly": True, "timeInForce": "IOC",
+    })
+    return resp["retCode"] == 0
+
+
+def update_sl(sym: str, side: str, new_sl: float) -> bool:
+    """Move stop-loss to new_sl."""
+    resp = rest_post("/v5/position/trading-stop", {
+        "category": "linear", "symbol": sym,
+        "positionIdx": 1 if side == "LONG" else 2,
+        "stopLoss": str(new_sl), "slTriggerBy": "LastPrice",
+    })
+    return resp["retCode"] == 0
+
+
 async def monitor_position(dry_run: bool):
     """Polls all open positions, moves SL to BE, detects closes."""
     global active_positions
@@ -364,19 +389,52 @@ async def monitor_position(dry_run: bool):
             ts      = time.strftime("%H:%M:%S")
             print(f"[{ts}] {color} {sym} {side}  ${mark:.5f}  pnl=${pnl:+.4f}  SL-{sl_dist:.2f}%  TP+{tp_dist:.2f}%")
 
+            # ── Phase 1: Move SL to breakeven ──────────────────────────────
             if not ap["be_moved"] and not dry_run:
                 risk = abs(entry - ap["sl"]) * ap["qty"]
                 if pnl >= risk * BE_TRIGGER:
                     new_sl = round(entry * 1.001 if side == "LONG" else entry * 0.999, 6)
-                    resp = rest_post("/v5/position/trading-stop", {
-                        "category": "linear", "symbol": sym,
-                        "positionIdx": 1 if side == "LONG" else 2,
-                        "stopLoss": str(new_sl), "slTriggerBy": "LastPrice",
-                    })
-                    if resp["retCode"] == 0:
+                    if update_sl(sym, side, new_sl):
                         ap["be_moved"] = True
                         ap["sl"] = new_sl
                         print(f"   🔒 SL→BE: ${new_sl} (pnl=${pnl:+.4f})")
+
+            # ── Phase 2: Signal-aware exit management (after BE) ────────────
+            elif ap["be_moved"] and not dry_run:
+                st = pair_states.get(sym)
+                exit_sig = st.check_signal() if st else None
+
+                if exit_sig and exit_sig["bias"] != side:
+                    # Signal flipped against position
+                    streak_against = abs(exit_sig["streak"]) >= MIN_STREAK
+                    m3_strong      = abs(exit_sig["m3"]) >= MIN_M3_PCT
+                    if streak_against and m3_strong:
+                        # Strong reversal signal → close immediately
+                        qty_close = ap["qty"]
+                        if close_position(sym, side, qty_close):
+                            print(f"   🚨 CIERRE ANTICIPADO {sym}: señal invertida  "
+                                  f"stk={exit_sig['streak']}  m3={exit_sig['m3']:+.3f}%  pnl=${pnl:+.4f}")
+                    else:
+                        # Weak reversal → tighten SL aggressively (0.2%)
+                        new_sl = round(mark * (1 - TRAIL_TIGHT) if side == "LONG"
+                                       else mark * (1 + TRAIL_TIGHT), 6)
+                        better = (new_sl > ap["sl"]) if side == "LONG" else (new_sl < ap["sl"])
+                        if better and update_sl(sym, side, new_sl):
+                            ap["sl"] = new_sl
+                            print(f"   ⚡ TRAIL AGRESIVO {sym}: ${new_sl}  "
+                                  f"stk={exit_sig['streak']}  pnl=${pnl:+.4f}")
+
+                elif exit_sig and exit_sig["bias"] == side:
+                    # Signal in favor → trail loosely, tighter on explosion
+                    explosion = exit_sig["rvol"] >= 2.0 and abs(exit_sig["m3"]) >= MIN_M3_PCT * 2
+                    trail_pct = TRAIL_TIGHT if explosion else TRAIL_LOOSE
+                    new_sl    = round(mark * (1 - trail_pct) if side == "LONG"
+                                      else mark * (1 + trail_pct), 6)
+                    better = (new_sl > ap["sl"]) if side == "LONG" else (new_sl < ap["sl"])
+                    if better and update_sl(sym, side, new_sl):
+                        ap["sl"] = new_sl
+                        label = "EXPLOSION 🚀" if explosion else "trail"
+                        print(f"   📈 {label} {sym}: SL→${new_sl}  pnl=${pnl:+.4f}")
 
         except Exception as e:
             print(f"   monitor err {sym}: {e}")
@@ -539,7 +597,6 @@ async def ws_handler(symbols: list[str], dry_run: bool):
                     if sym in active_positions:
                         continue
 
-                    # Skip if at max simultaneous positions
                     if len(active_positions) >= MAX_POSITIONS:
                         continue
 
@@ -553,11 +610,20 @@ async def ws_handler(symbols: list[str], dry_run: bool):
                     if not sig:
                         continue
 
+                    # Max 1 LONG + 1 SHORT — no duplicar dirección
+                    same_dir = sum(1 for p in active_positions.values() if p["side"] == sig["bias"])
+                    if same_dir >= 1:
+                        continue
+
                     last_signal_time[sym] = now
                     print(f"[{time.strftime('%H:%M:%S')}] 📡 SEÑAL {sym} {sig['bias']}  m3={sig['m3']:+.3f}%  stk={sig['streak']:+d}  p=${sig['price']:.5f}")
 
                     async with position_lock:
                         if sym in active_positions:
+                            continue
+                        same_dir = sum(1 for p in active_positions.values() if p["side"] == sig["bias"])
+                        if same_dir >= 1:
+                            print(f"   ⏸  Ya hay un {sig['bias']} activo")
                             continue
                         if len(active_positions) >= MAX_POSITIONS:
                             print(f"   ⏸  Máximo de posiciones alcanzado ({MAX_POSITIONS})")
