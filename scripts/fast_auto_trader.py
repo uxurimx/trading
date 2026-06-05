@@ -46,9 +46,9 @@ MIN_STREAK   = 2      # consecutive candles aligned
 MIN_M3_PCT   = 0.15   # 3-candle momentum %
 SL_PCT       = 0.005  # 0.5%
 TP_PCT       = 0.010  # 1.0%   → R:R 2:1
-LEVERAGE     = 20     # higher leverage → smaller margin needed per trade
+LEVERAGE     = 30     # higher leverage → smaller margin needed per trade
 MAX_POSITIONS = 2     # max simultaneous open positions
-MIN_NOTIONAL = 5.5    # USD (Bybit min is 5)
+MIN_NOTIONAL = 5.0    # USD (Bybit hard min)
 COOLDOWN_S   = 60     # seconds between trades on same symbol
 BE_TRIGGER   = 0.5    # move SL to BE when PnL reaches 50% of SL risk
 
@@ -233,19 +233,24 @@ async def execute_entry(sym: str, sig: dict, avail: float, dry_run: bool) -> boo
     sl = round(price * (1 - SL_PCT) if bias == "LONG" else price * (1 + SL_PCT), 6)
     tp = round(price * (1 + TP_PCT) if bias == "LONG" else price * (1 - TP_PCT), 6)
 
-    # Use available margin, cap at 80% of it per trade
-    margin_to_use = avail * 0.80
-    notional = max(MIN_NOTIONAL, margin_to_use * LEVERAGE)
-    qty_raw  = notional / price
-    qty      = max(1, int(qty_raw))
+    # Conservative sizing: min viable notional to preserve capital
+    # Risk per trade = notional × SL_PCT ≈ $5.5 × 0.005 = $0.028 (~2.5% of equity)
+    notional = max(MIN_NOTIONAL, min(avail * 0.30 * LEVERAGE, MIN_NOTIONAL * 1.2))
+    if notional < MIN_NOTIONAL:
+        print(f"   ⏭  {sym} saltado — notional ${notional:.2f} < mínimo ${MIN_NOTIONAL}")
+        return False
+
+    qty_raw = notional / price
+    qty     = max(1, int(qty_raw))
 
     actual_notional = qty * price
+    # Ensure we still meet minimum after int rounding
     if actual_notional < MIN_NOTIONAL:
         qty = int(MIN_NOTIONAL / price) + 1
         actual_notional = qty * price
 
     required_margin = actual_notional / LEVERAGE
-    if required_margin > avail * 0.95:
+    if required_margin > avail:
         print(f"   ⏭  {sym} saltado — margen req ${required_margin:.3f} > disponible ${avail:.3f}")
         return False
 
@@ -550,7 +555,7 @@ async def ws_handler(symbols: list[str], dry_run: bool):
                             continue
 
                         eq, avail = get_balance()
-                        if avail < 0.3:
+                        if avail < 0.15:
                             print(f"   ⚠️  Margen disponible insuficiente: ${avail:.4f}")
                             continue
 
