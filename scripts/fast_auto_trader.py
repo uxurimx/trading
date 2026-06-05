@@ -408,6 +408,29 @@ async def monitor_position(dry_run: bool):
             ts      = time.strftime("%H:%M:%S")
             print(f"[{ts}] {color} {sym} {side}  ${mark:.5f}  pnl=${pnl:+.4f}  SL-{sl_dist:.2f}%  TP+{tp_dist:.2f}%")
 
+            # ── Reversal check (PRE y POST be) — actúa en cualquier fase ──────
+            if not dry_run:
+                st = pair_states.get(sym)
+                rev_sig = st.check_signal() if st else None
+                if rev_sig and rev_sig["bias"] != side:
+                    streak_against = abs(rev_sig["streak"]) >= MIN_STREAK
+                    m3_strong      = abs(rev_sig["m3"]) >= MIN_M3_PCT
+                    if streak_against and m3_strong:
+                        qty_close = ap["qty"]
+                        if close_position(sym, side, qty_close):
+                            print(f"   🔄 FLIP {sym}: {side}→{rev_sig['bias']}  "
+                                  f"stk={rev_sig['streak']}  m3={rev_sig['m3']:+.3f}%  pnl=${pnl:+.4f}")
+                            del active_positions[sym]
+                            # Immediately open in opposite direction
+                            await asyncio.sleep(0.5)
+                            eq2, avail2 = get_balance()
+                            same_dir = sum(1 for p in active_positions.values() if p["side"] == rev_sig["bias"])
+                            if avail2 >= 0.15 and same_dir == 0:
+                                await execute_entry(sym, rev_sig, avail2, dry_run)
+                            else:
+                                print(f"   ⏸  Flip bloqueado: avail=${avail2:.4f}  same_dir={same_dir}")
+                        continue
+
             # ── Phase 1: Move SL to breakeven ──────────────────────────────
             if not ap["be_moved"] and not dry_run:
                 risk = abs(entry - ap["sl"]) * ap["qty"]
@@ -416,44 +439,26 @@ async def monitor_position(dry_run: bool):
                     if update_sl(sym, side, new_sl):
                         ap["be_moved"] = True
                         ap["sl"] = new_sl
+                        ap["peak_pnl"] = pnl
                         print(f"   🔒 SL→BE: ${new_sl} (pnl=${pnl:+.4f})")
 
-            # ── Phase 2: Signal-aware exit management (after BE) ────────────
+            # ── Phase 2: Tick-by-tick price trailing + auto-close (after BE) ─
             elif ap["be_moved"] and not dry_run:
-                st = pair_states.get(sym)
-                exit_sig = st.check_signal() if st else None
+                ap["peak_pnl"] = max(ap.get("peak_pnl", pnl), pnl)
 
-                if exit_sig and exit_sig["bias"] != side:
-                    # Signal flipped against position
-                    streak_against = abs(exit_sig["streak"]) >= MIN_STREAK
-                    m3_strong      = abs(exit_sig["m3"]) >= MIN_M3_PCT
-                    if streak_against and m3_strong:
-                        # Strong reversal signal → close immediately
-                        qty_close = ap["qty"]
-                        if close_position(sym, side, qty_close):
-                            print(f"   🚨 CIERRE ANTICIPADO {sym}: señal invertida  "
-                                  f"stk={exit_sig['streak']}  m3={exit_sig['m3']:+.3f}%  pnl=${pnl:+.4f}")
-                    else:
-                        # Weak reversal → tighten SL aggressively (0.2%)
-                        new_sl = round(mark * (1 - TRAIL_TIGHT) if side == "LONG"
-                                       else mark * (1 + TRAIL_TIGHT), 6)
-                        better = (new_sl > ap["sl"]) if side == "LONG" else (new_sl < ap["sl"])
-                        if better and update_sl(sym, side, new_sl):
-                            ap["sl"] = new_sl
-                            print(f"   ⚡ TRAIL AGRESIVO {sym}: ${new_sl}  "
-                                  f"stk={exit_sig['streak']}  pnl=${pnl:+.4f}")
+                # Auto-close when TP is within 0.3%
+                if tp_dist <= 0.30:
+                    if close_position(sym, side, ap["qty"]):
+                        print(f"   💰 AUTO-CLOSE {sym}: TP a {tp_dist:.2f}%  pnl=${pnl:+.4f}")
+                    continue
 
-                elif exit_sig and exit_sig["bias"] == side:
-                    # Signal in favor → trail loosely, tighter on explosion
-                    explosion = exit_sig["rvol"] >= 2.0 and abs(exit_sig["m3"]) >= MIN_M3_PCT * 2
-                    trail_pct = TRAIL_TIGHT if explosion else TRAIL_LOOSE
-                    new_sl    = round(mark * (1 - trail_pct) if side == "LONG"
-                                      else mark * (1 + trail_pct), 6)
-                    better = (new_sl > ap["sl"]) if side == "LONG" else (new_sl < ap["sl"])
-                    if better and update_sl(sym, side, new_sl):
-                        ap["sl"] = new_sl
-                        label = "EXPLOSION 🚀" if explosion else "trail"
-                        print(f"   📈 {label} {sym}: SL→${new_sl}  pnl=${pnl:+.4f}")
+                # Price-based trail every tick
+                new_sl = round(mark * (1 - TRAIL_TIGHT) if side == "LONG"
+                               else mark * (1 + TRAIL_TIGHT), 6)
+                better = (new_sl > ap["sl"]) if side == "LONG" else (new_sl < ap["sl"])
+                if better and update_sl(sym, side, new_sl):
+                    ap["sl"] = new_sl
+                    print(f"   📈 trail {sym}: SL→${new_sl}  pnl=${pnl:+.4f}")
 
         except Exception as e:
             print(f"   monitor err {sym}: {e}")
