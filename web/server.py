@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config import settings, SPEED_CONFIGS
+from core import trading_db as tdb
 from core import narrative as _narrative
 from core.absorption import AbsorptionDetector
 from core.liquidity import LiquidityAnalyzer
@@ -51,6 +52,27 @@ _market  = MarketStream()
 _account = AccountStream()
 _klines  = KlineStream()
 _exec    = BybitExecutor()
+
+# ── Postgres session tracking ─────────────────────────────────────────────────
+_pg_session_id: str = ""
+_pg_trade_ids:  dict[str, str] = {}   # order_id → trade_id en Postgres
+
+def _pg_ensure_session() -> str:
+    global _pg_session_id
+    if not _pg_session_id:
+        try:
+            bal = _account.balance if _account and _account.balance else 0.0
+            _pg_session_id = tdb.session_open(
+                name=f"QTS Web {__import__('datetime').date.today()}",
+                initial_balance=bal or 1.0,
+                target_balance=0.0,
+                mode="LIVE" if not settings.paper_trading else "PAPER",
+                agent="CLAUDE",
+                strategy_focus="EXPRESS_SCALP",
+            )
+        except Exception as e:
+            log.warning("pg_ensure_session: %s", e)
+    return _pg_session_id
 
 _abs_det  = AbsorptionDetector()
 _liq_an   = LiquidityAnalyzer()
@@ -1804,8 +1826,26 @@ async def api_close_position(symbol: str, side: str):
         data = await _exec._post("/v5/order/create", body)
         if data.get("retCode") == 0:
             log.warning("Position closed: %s %s", sym, side)
-            # Refresh inmediato: no esperar al WS privado para actualizar el estado
             asyncio.create_task(_account_refresh_loop_once())
+            # ── Registrar cierre en Postgres ──────────────────────────────────
+            try:
+                order_id = data["result"].get("orderId", "")
+                tid = _pg_trade_ids.get(order_id) or next(
+                    (v for k, v in _pg_trade_ids.items() if sym in k), None)
+                if tid:
+                    mark_now = _mark_prices.get(sym) or (pos.mark_price if pos else 0)
+                    pnl = pos.unrealized_pnl if pos else 0.0
+                    r_mult = pnl / (pos.margin * 0.01) if (pos and pos.margin) else 0.0
+                    tdb.trade_close(tid, exit_price=mark_now, pnl_usd=pnl,
+                                    r_multiple=round(r_mult, 3),
+                                    close_reason="MANUAL_WEB")
+                    tdb.decision_save(_pg_ensure_session(), sym, "EXIT",
+                                      f"Cierre manual web {sym} {side}",
+                                      f"PnL={pnl:.4f}", confidence=0,
+                                      executed=True, trade_id=tid)
+                    log.info("pg: trade cerrado %s pnl=%.4f", tid, pnl)
+            except Exception as pg_e:
+                log.warning("pg trade_close error: %s", pg_e)
             return JSONResponse({"success": True, "order_id": data["result"].get("orderId", "")})
         return JSONResponse({"success": False, "error": data.get("retMsg", "error")})
     except Exception as e:
@@ -1903,6 +1943,28 @@ async def api_quick_trade(req: Request):
             strategy_tag = "quick_web",
         )
         result = await _exec.place_market_bracket(order)
+
+        if result.success:
+            try:
+                sid = _pg_ensure_session()
+                rr  = abs(tp - mark) / abs(sl - mark) if sl != mark else 0
+                risk_usd = qty * abs(mark - sl)
+                pg_side  = "LONG" if is_buy else "SHORT"
+                tid = tdb.trade_open(
+                    session_id=sid, symbol=symbol, side=pg_side,
+                    entry_price=result.filled_price or mark,
+                    sl_price=sl, tp_price=tp, qty=qty, leverage=leverage,
+                    opportunity_type="QUICK_SCALP", timeframe="1m",
+                    confidence_score=0, safety_score=0,
+                    risk_usd=round(risk_usd, 4), rr_planned=round(rr, 3),
+                    paper_mode=settings.paper_trading,
+                    pre_notes=f"quick_trade via web | size_usdt={size_usdt} sl_pct={sl_pct} tp_pct={tp_pct}",
+                )
+                _pg_trade_ids[result.order_id] = tid
+                log.info("pg: trade abierto %s → %s", result.order_id, tid)
+            except Exception as pg_e:
+                log.warning("pg trade_open error: %s", pg_e)
+
         return JSONResponse({
             "success":  result.success,
             "order_id": result.order_id,

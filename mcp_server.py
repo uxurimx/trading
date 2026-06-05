@@ -109,9 +109,10 @@ async def _async_main() -> None:
 
 
 async def _signal_loop() -> None:
-    """Calcula señales para todos los símbolos cada 5 segundos."""
-    # Esperar a que haya datos antes de empezar
+    """Calcula señales para todos los símbolos cada 20 segundos."""
     await asyncio.sleep(10)
+
+    fast_key = SPEED_CONFIGS.get(settings.speed_level, SPEED_CONFIGS["standard"])["fast"]
 
     while True:
         try:
@@ -127,8 +128,6 @@ async def _signal_loop() -> None:
                 regime     = _regime.classify(ms, trend)
                 opp        = _scorer.score(absorption, regime, trend, lmap)
 
-                # ATR desde klines — usa el kline rápido del nivel de velocidad activo
-                fast_key = SPEED_CONFIGS.get(settings.speed_level, SPEED_CONFIGS["standard"])["fast"]
                 k15  = _klines.store.get(sym, fast_key)
                 atr  = TechIndicators.atr(k15, 14) if k15 else 0.0
                 rsi  = TechIndicators.rsi(TechIndicators.closes(k15), 14) if k15 else 50.0
@@ -148,13 +147,17 @@ async def _signal_loop() -> None:
                     "ob_imbal":   ms.orderbook.imbalance,
                 }
 
-                # Solicitar klines si no están actualizados
-                _klines.request(sym)
+                # Solicitar klines solo si están stale
+                if _klines.store.stale(sym):
+                    _klines.request(sym)
+
+                # Ceder el event loop entre símbolos para no bloquear I/O
+                await asyncio.sleep(0)
 
         except Exception as e:
             log.error("signal_loop error: %s", e)
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(20)
 
 
 def _submit(coro) -> Any:
